@@ -91,11 +91,18 @@ export const chunkIds = (ids: string[], size: number = CHUNK_SIZE): string[][] =
 
 export const changeKey = (kind: string, verb: string) => `${kind}:${verb}`;
 
-/** kinds x verbs of one hub item, as the keys the applier accumulates per issue */
+/**
+ * kinds x verbs of one hub item, as the keys the applier accumulates per issue.
+ * The hub aggregates kinds and verbs of an item as two separate sets, so the pairing is lost. When both
+ * sets have several entries a pair may not have happened (a comment deleted while the issue was edited),
+ * so `issue:deleted` is left out; a missed delete is then caught by the not-found path of fetchIssue.
+ */
 export const itemChangeKeys = (item: Pick<TLiveItem, "kinds" | "verbs">): string[] => {
   const kinds = item.kinds.length > 0 ? item.kinds : ["issue"];
   const verbs = item.verbs.length > 0 ? item.verbs : ["updated"];
-  return kinds.flatMap((kind) => verbs.map((verb) => changeKey(kind, verb)));
+  const ambiguous = kinds.length > 1 && verbs.length > 1;
+  const keys = kinds.flatMap((kind) => verbs.map((verb) => changeKey(kind, verb)));
+  return ambiguous ? keys.filter((key) => key !== changeKey("issue", "deleted")) : keys;
 };
 
 /** True when every actor of the item is the current user (an item without actors is never "own"). */
@@ -116,13 +123,24 @@ export const hasIssueDeleted = (keys: Iterable<string>): boolean => {
   return false;
 };
 
-/** Best effort: the service rethrows only the response body, so the status may be missing. */
+/**
+ * Best effort: the service rethrows only the response body, so the status is usually missing.
+ * Matches the API body of a missing work item ({ error: "The required object does not exist." }),
+ * a DRF style { detail: "Not found." }, and the Error thrown by the store ("Work item not found").
+ */
 export const isNotFoundError = (error: unknown): boolean => {
   if (typeof error !== "object" || error === null) return false;
-  const body = error as { status?: unknown; status_code?: unknown; error?: unknown; detail?: unknown };
+  const body = error as {
+    status?: unknown;
+    status_code?: unknown;
+    error?: unknown;
+    detail?: unknown;
+    message?: unknown;
+  };
   if (body.status === 404 || body.status_code === 404) return true;
-  const text = typeof body.error === "string" ? body.error : typeof body.detail === "string" ? body.detail : "";
-  return /not found/i.test(text);
+  return [body.error, body.detail, body.message].some(
+    (text) => typeof text === "string" && /does not exist|not found/i.test(text)
+  );
 };
 
 /** Any comment change at all. */

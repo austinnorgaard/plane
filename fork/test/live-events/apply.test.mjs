@@ -55,7 +55,19 @@ test("helpers", () => {
   assert.equal(A.listContainsIssue(undefined, "9"), false);
   assert.equal(A.hasIssueDeleted(["issue:deleted"]), true);
   assert.equal(A.hasIssueDeleted(["comment:deleted", "issue:updated"]), false);
+  assert.equal(A.isNotFoundError({ error: "The required object does not exist." }), true);
+  assert.equal(A.isNotFoundError({ detail: "Not found." }), true);
+  assert.equal(A.isNotFoundError(new Error("Work item not found")), true);
   assert.equal(A.isNotFoundError({ error: "Issue not found" }), true);
+  assert.equal(
+    A.itemChangeKeys({ kinds: ["issue", "comment"], verbs: ["updated", "deleted"] }).includes("issue:deleted"),
+    false
+  );
+  assert.equal(
+    A.itemChangeKeys({ kinds: ["issue", "comment"], verbs: ["updated", "deleted"] }).includes("comment:deleted"),
+    true
+  );
+  assert.equal(A.itemChangeKeys({ kinds: ["issue"], verbs: ["updated", "deleted"] }).includes("issue:deleted"), true);
   assert.equal(A.isNotFoundError({ status: 404 }), true);
   assert.equal(A.isNotFoundError({ error: "boom" }), false);
   assert.equal(A.isNotFoundError(undefined), false);
@@ -237,7 +249,7 @@ test("peek closes when fetchIssue reports the issue as not found", async (t) => 
     present: { arch: { id: "arch" } },
   });
   detail.fetchIssue = async () => {
-    throw { error: "Issue not found" };
+    throw { error: "The required object does not exist." };
   };
   globalThis.__resp = () => [];
   applier.handle(ev(["arch"], "issue:updated"));
@@ -338,4 +350,66 @@ test("revoked closes an open peek and refreshes lists", async (t) => {
   assert.ok(
     calls.some((c) => c[0] === "setPeek") && calls.some((c) => c[0] === "toast") && calls.some((c) => c[0] === "coarse")
   );
+});
+
+for (const [label, failure] of [
+  ["network error (undefined body)", undefined],
+  ["server error body", { error: "boom" }],
+  ["plain Error", new Error("Network Error")],
+]) {
+  test(`non-404 fetchIssue failure keeps the peek open: ${label}`, async (t) => {
+    const { applier, calls, detail } = setup(t, {
+      peek: { projectId: "p", issueId: "arch", workspaceSlug: "w" },
+      present: { arch: { id: "arch" } },
+    });
+    detail.fetchIssue = async () => {
+      throw failure;
+    };
+    const original = console.error;
+    console.error = () => {};
+    globalThis.__resp = () => [];
+    applier.handle(ev(["arch"], "issue:updated"));
+    await tick(t, 400);
+    console.error = original;
+    assert.equal(calls.filter((c) => c[0] === "setPeek" || c[0] === "toast").length, 0);
+  });
+}
+test("comment:deleted plus issue:updated on an id the list omits keeps the map entry", async (t) => {
+  const { applier, calls } = setup(t, { present: { arch: { id: "arch" } }, listed: ["arch"] });
+  globalThis.__resp = () => [];
+  applier.handle(ev(["arch"], "comment:deleted"));
+  applier.handle(ev(["arch"], "issue:updated"));
+  await tick(t, 400);
+  assert.equal(calls.filter((c) => c[0] === "removeFromList").length, 1);
+  assert.equal(calls.filter((c) => c[0] === "map.remove").length, 0);
+});
+test("a mixed item (kinds issue+comment, verbs updated+deleted) is not read as an issue delete", async (t) => {
+  const { applier, calls } = setup(t, {
+    peek: { projectId: "p", issueId: "arch", workspaceSlug: "w" },
+    present: { arch: { id: "arch" } },
+    listed: ["arch"],
+  });
+  globalThis.__resp = () => [];
+  applier.handle({
+    type: "events",
+    project_id: "p",
+    items: [{ issue_id: "arch", kinds: ["issue", "comment"], verbs: ["updated", "deleted"], actor_ids: [] }],
+  });
+  await tick(t, 400);
+  assert.equal(calls.filter((c) => c[0] === "map.remove").length, 0);
+  assert.equal(calls.filter((c) => c[0] === "setPeek").length, 0);
+});
+test("an issue delete batched with an update in one window drops the map entry and closes the peek", async (t) => {
+  const { applier, calls } = setup(t, {
+    peek: { projectId: "p", issueId: "gone", workspaceSlug: "w" },
+    present: { gone: { id: "gone" } },
+    listed: ["gone"],
+  });
+  globalThis.__resp = () => [];
+  applier.handle(ev(["gone"], "issue:updated"));
+  applier.handle(ev(["gone"], "issue:deleted"));
+  await tick(t, 400);
+  assert.equal(calls.filter((c) => c[0] === "map.remove").length, 1);
+  assert.equal(calls.filter((c) => c[0] === "setPeek").length, 1);
+  assert.equal(calls.filter((c) => c[0] === "fetchIssue").length, 0);
 });
