@@ -8,21 +8,24 @@ import { describe, expect, it } from "vitest";
 import { buildAllowlist, isOriginAllowed } from "@/events/origin";
 import { parseEventsConfig } from "@/events/config";
 
-const allow = buildAllowlist(["https://plane.example.com, http://192.0.2.10 ,,", "HTTPS://Plane.Example.com:443/"]);
+const allow = buildAllowlist([
+  "https://plane.example.com, http://lan.example.test ,,",
+  "HTTPS://Plane.Example.com:443/",
+]);
 const ok = (origin: string | undefined, host?: string, xfh?: string, list = allow) =>
   isOriginAllowed({ origin, host, forwardedHost: xfh }, list);
 
 describe("origin allowlist", () => {
   it("splits, trims, drops empties and normalises", () => {
-    expect([...allow].toSorted()).toEqual(["http://192.0.2.10", "https://plane.example.com"]);
+    expect([...allow].toSorted()).toEqual(["http://lan.example.test", "https://plane.example.com"]);
   });
 
   it("accepts the public https origin when the tunnel rewrote Host", () => {
-    expect(ok("https://plane.example.com", "127.0.0.1:8080")).toBe(true);
+    expect(ok("https://plane.example.com", "upstream.example.test:8080")).toBe(true);
   });
 
   it("accepts the LAN http origin", () => {
-    expect(ok("http://192.0.2.10", "192.0.2.10")).toBe(true);
+    expect(ok("http://lan.example.test", "lan.example.test")).toBe(true);
   });
 
   it("rejects a foreign origin", () => {
@@ -38,12 +41,14 @@ describe("origin allowlist", () => {
     const empty = buildAllowlist(["", " , "]);
     expect(empty.size).toBe(0);
     expect(ok("https://plane.example.com", "plane.example.com", undefined, empty)).toBe(true);
-    expect(ok("https://plane.example.com", "127.0.0.1", undefined, empty)).toBe(false);
+    expect(ok("https://plane.example.com", "upstream.example.test", undefined, empty)).toBe(false);
   });
 
   it("host match ignores scheme and prefers the first X-Forwarded-Host value", () => {
     const empty = buildAllowlist([]);
-    expect(ok("https://app.example.org", "10.0.0.5", "app.example.org, proxy.internal", empty)).toBe(true);
+    expect(ok("https://app.example.org", "upstream.example.test", "app.example.org, edge.example.test", empty)).toBe(
+      true
+    );
     expect(ok("https://app.example.org", "app.example.org", "other.example.org", empty)).toBe(false);
     expect(ok("http://app.example.org:8080", "app.example.org:8080", undefined, empty)).toBe(true);
     expect(ok("https://app.example.org:8443", "app.example.org", undefined, empty)).toBe(false);

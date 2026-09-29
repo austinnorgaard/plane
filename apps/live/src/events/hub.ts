@@ -62,8 +62,18 @@ export const EVENT_KINDS = [
 export const EVENT_VERBS = ["created", "updated", "deleted", "removed", "archived", "unarchived", "restored"] as const;
 
 const MAX_IDS = 500;
+const MAX_SETTLE_TIMERS_PER_PROJECT = 20;
 
-export const redisMessageSchema = z.object({
+// The API publisher names the id list `ids`; the design names it `issue_ids`. Accept both.
+const withIssueIds = (raw: unknown) => {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const obj = raw as Record<string, unknown>;
+    if (obj.issue_ids === undefined && obj.ids !== undefined) return { ...obj, issue_ids: obj.ids };
+  }
+  return raw;
+};
+
+const redisEventShape = z.object({
   v: z.literal(1),
   project_id: z.string().uuid(),
   issue_ids: z.union([z.array(z.string().uuid()).max(MAX_IDS), z.literal("*")]),
@@ -73,7 +83,8 @@ export const redisMessageSchema = z.object({
   ts: z.union([z.number(), z.string()]).optional(),
   settle: z.boolean().optional(),
 });
-export type RedisEvent = z.infer<typeof redisMessageSchema>;
+export const redisMessageSchema = z.preprocess(withIssueIds, redisEventShape);
+export type RedisEvent = z.infer<typeof redisEventShape>;
 
 const clientMessageSchema = z.discriminatedUnion("type", [
   z.object({
@@ -102,6 +113,19 @@ type Client = {
   closed: boolean;
 };
 
+/**
+ * Make ws itself refuse frames above `bytes` (it closes 1009 before buffering the payload).
+ * express-ws creates its servers with ws defaults (100 MiB) and is shared with the Hocuspocus
+ * endpoint, so the limit is applied to this endpoint's sockets only, on the socket's receiver.
+ * If ws internals ever change, the per-message size check in onClientMessage still applies.
+ */
+export const limitPayload = (ws: unknown, bytes: number): boolean => {
+  const receiver = (ws as { _receiver?: { _maxPayload?: number } } | null)?._receiver;
+  if (!receiver || typeof receiver._maxPayload !== "number") return false;
+  receiver._maxPayload = bytes;
+  return true;
+};
+
 export class EventsHub {
   private readonly config: EventsConfig;
   private readonly auth: EventsAuthApi;
@@ -112,6 +136,7 @@ export class EventsHub {
   private readonly pending = new Map<string, Pending>();
   private readonly rate = new Map<string, { start: number; count: number }>();
   private readonly settleTimers = new Set<ReturnType<typeof setTimeout>>();
+  private readonly settleState = new Map<string, { count: number; wildcard: ReturnType<typeof setTimeout> | null }>();
   private subscriber: SubscriberLike | null = null;
   private seenReady = false;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -161,6 +186,7 @@ export class EventsHub {
     if (this.revalidateTimer) clearInterval(this.revalidateTimer);
     this.settleTimers.forEach((t) => clearTimeout(t));
     this.settleTimers.clear();
+    this.settleState.clear();
     this.pending.forEach((p) => p.timer && clearTimeout(p.timer));
     this.pending.clear();
     for (const client of this.clients) this.close(client, 1001, "shutdown");
@@ -182,6 +208,7 @@ export class EventsHub {
       }
     };
     if (!this.config.enabled) return reject(CLOSE_DISABLED, "live events disabled");
+    limitPayload(ws, this.config.maxMessageBytes);
     if (this.stopped || !this.subscriber) return reject(CLOSE_UNAVAILABLE, "unavailable");
     const headers = req.headers;
     if (
@@ -475,13 +502,41 @@ export class EventsHub {
     }
     if (!pending.timer) pending.timer = setTimeout(() => this.flush(projectId), this.config.coalesceMs);
 
-    if (event.settle && !fromSettle) {
+    if (event.settle && !fromSettle) this.scheduleSettle(event);
+  }
+
+  // At most MAX_SETTLE_TIMERS_PER_PROJECT individual re-emits are pending per project. Beyond
+  // that a single project-wide re-emit is (re)started, so timers stay bounded under a burst.
+  private scheduleSettle(event: RedisEvent) {
+    const projectId = event.project_id;
+    let state = this.settleState.get(projectId);
+    if (!state) this.settleState.set(projectId, (state = { count: 0, wildcard: null }));
+    const st = state;
+    const arm = (fire: () => void) => {
       const timer = setTimeout(() => {
         this.settleTimers.delete(timer);
-        this.ingest({ ...event, settle: false }, true);
+        fire();
+        if (st.count === 0 && !st.wildcard) this.settleState.delete(projectId);
       }, this.config.settleMs);
       this.settleTimers.add(timer);
+      return timer;
+    };
+    if (st.count < MAX_SETTLE_TIMERS_PER_PROJECT) {
+      st.count++;
+      arm(() => {
+        st.count--;
+        this.ingest({ ...event, settle: false }, true);
+      });
+      return;
     }
+    if (st.wildcard) {
+      clearTimeout(st.wildcard);
+      this.settleTimers.delete(st.wildcard);
+    }
+    st.wildcard = arm(() => {
+      st.wildcard = null;
+      this.ingest({ ...event, issue_ids: "*", settle: false }, true);
+    });
   }
 
   private markFull(pending: Pending) {

@@ -56,3 +56,27 @@ describe("events controller isolation", () => {
     expect(routes).toContain("/collaboration/");
   });
 });
+
+describe("payload cap", () => {
+  it("ws closes 1009 for a frame above the cap, without the hub seeing it", async () => {
+    const { WebSocketServer, WebSocket } = await import("ws");
+    const { limitPayload } = await import("@/events/hub");
+    const wss = new WebSocketServer({ port: 0, host: "localhost" });
+    await new Promise((r) => wss.once("listening", r));
+    const seen: number[] = [];
+    wss.on("connection", (socket) => {
+      expect(limitPayload(socket, 4096)).toBe(true);
+      socket.on("error", () => undefined); // the hub closes the socket on error
+      socket.on("message", (d: Buffer) => seen.push(d.length));
+    });
+    const { port } = wss.address() as { port: number };
+    const client = new WebSocket(`ws://localhost:${port}`);
+    await new Promise((r) => client.once("open", r));
+    client.send("x".repeat(100));
+    client.send("y".repeat(5000));
+    const code = await new Promise<number>((r) => client.once("close", (c) => r(c)));
+    expect(code).toBe(1009);
+    expect(seen).toEqual([100]);
+    wss.close();
+  });
+});

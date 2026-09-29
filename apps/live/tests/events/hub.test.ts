@@ -445,3 +445,47 @@ describe("heartbeat and resync", () => {
     expect(b.of("resync")).toHaveLength(1);
   });
 });
+
+describe("publisher contract", () => {
+  it("accepts the API payload shape that names the id list `ids`", async () => {
+    const { hub, sub } = await started();
+    const a = await connect(hub);
+    await subscribe(a, "acme", [P1]);
+    const wire = { v: 1, project_id: P1, kind: "issue", verb: "created", ids: [I1], actor_id: ACTOR, settle: false };
+    sub.publish(P1, wire);
+    sub.publish(P1, { ...wire, ids: "*" });
+    vi.advanceTimersByTime(300);
+    expect(hub.invalidDropped).toBe(0);
+    expect(a.of("events")).toHaveLength(1);
+    expect(a.of("events")[0].full_refresh).toBe(true);
+  });
+
+  it("accepts a null actor_id and a missing ts", async () => {
+    const { hub, sub } = await started();
+    const a = await connect(hub);
+    await subscribe(a, "acme", [P1]);
+    sub.publish(P1, { v: 1, project_id: P1, kind: "comment", verb: "updated", ids: [I1], actor_id: null });
+    vi.advanceTimersByTime(300);
+    expect(a.of("events")[0].items[0].issue_id).toBe(I1);
+  });
+});
+
+describe("settle timers are bounded per project", () => {
+  it("a burst of settle events collapses into one project-wide re-emit after the cap", async () => {
+    const { hub, sub } = await started();
+    const a = await connect(hub);
+    await subscribe(a, "acme", [P1]);
+    // 30 events spread over separate rate windows so the rate limit does not interfere
+    for (let i = 0; i < 30; i++) {
+      sub.publish(P1, evt(P1, [I1], { settle: true }));
+      vi.advanceTimersByTime(20);
+    }
+    const before = a.of("events").length;
+    vi.advanceTimersByTime(5_000);
+    const after = a.of("events");
+    expect(after.length).toBeGreaterThan(before);
+    expect(after.some((f) => f.full_refresh === true)).toBe(true);
+    vi.advanceTimersByTime(10_000);
+    expect(a.of("events")).toHaveLength(after.length);
+  });
+});

@@ -56,7 +56,8 @@ export type OriginInput = {
  */
 export const isOriginAllowed = (input: OriginInput, allowlist: Set<string>): boolean => {
   const rawOrigin = Array.isArray(input.origin) ? input.origin[0] : input.origin;
-  if (!rawOrigin || rawOrigin.trim().toLowerCase() === "null") return false;
+  // the literal "null" is not a URL, so normalizeOrigin rejects it below
+  if (!rawOrigin) return false;
   const normalized = normalizeOrigin(rawOrigin);
   if (!normalized) return false;
   if (allowlist.has(normalized)) return true;
