@@ -1,5 +1,4 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
-
 # LU-02 spike: build and test environments in a WSL podman distro
 
 Ticket: PLN-2 (LU-02). Scope: stock Plane v1.4.2 only, no feature code.
@@ -15,17 +14,17 @@ longer be pulled) and two tooling traps were found and fixed (pnpm 11 store
 location, workspace packages must be built before some checks). See
 "Deviations from the ticket, and findings". None is a blocker.
 
-| Check                                                                        | Result                                                                         |
-| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| podman handles `# syntax=docker/dockerfile:1.7` and `RUN --mount=type=cache` | PASS (cache hit on second build)                                               |
-| Stock web image builds with no build args, no OOM                            | PASS, 209 s, peak 2913 MB                                                      |
-| Web bundle parity with makeplane/plane-frontend:v1.4.2                       | PASS (same file count, same VITE defaults)                                     |
-| Stock live image builds and `/live/health` returns 200                       | PASS, but only with a Redis sidecar (see D1)                                   |
-| Backend overlay: `manage.py check`, pip freeze equal to base                 | PASS                                                                           |
-| `podman save -m` / `podman load` round trip                                  | PASS, image IDs identical                                                      |
-| API tests: pod, no published ports, pytest baseline                          | PASS, 514 passed, 0 failed (no minio, see D2)                                  |
-| Node tests: install, vitest, tsc, oxlint baseline                            | PASS after building workspace packages first (see D3)                          |
-| No visible windows                                                           | PASS, WindowsTerminal count 2 before and after, OpenConsole 0 before and after |
+| Check | Result |
+|---|---|
+| podman handles `# syntax=docker/dockerfile:1.7` and `RUN --mount=type=cache` | PASS (cache hit on second build) |
+| Stock web image builds with no build args, no OOM | PASS, 209 s, peak 2913 MB |
+| Web bundle parity with makeplane/plane-frontend:v1.4.2 | PASS (same file count, same VITE defaults) |
+| Stock live image builds and `/live/health` returns 200 | PASS, but only with a Redis sidecar (see D1) |
+| Backend overlay: `manage.py check`, pip freeze equal to base | PASS |
+| `podman save -m` / `podman load` round trip | PASS, image IDs identical |
+| API tests: pod, no published ports, pytest baseline | PASS, 514 passed, 0 failed (no minio, see D2) |
+| Node tests: install, vitest, tsc, oxlint baseline | PASS after building workspace packages first (see D3) |
+| No visible windows | PASS, WindowsTerminal count 2 before and after, OpenConsole 0 before and after |
 
 ## Environment
 
@@ -39,11 +38,11 @@ location, workspace packages must be built before some checks). See
 
 ### 1. Sync
 
-| Method                                                                                         | Time                                                       |
-| ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| `git archive live-updates/v1.4.2 \| tar -x` into `/root/plane-build/spike` (5257 files, 70 MB) | 0.7 s                                                      |
-| `fork/test/sync.ps1`, cold Windows file cache                                                  | 44.4 s                                                     |
-| `fork/test/sync.ps1`, warm (every later run)                                                   | 2.3 s to 3.9 s (clean 0.3-0.7, stream 1.2-3.1, repair 0.4) |
+| Method | Time |
+|---|---|
+| `git archive live-updates/v1.4.2 \| tar -x` into `/root/plane-build/spike` (5257 files, 70 MB) | 0.7 s |
+| `fork/test/sync.ps1`, cold Windows file cache | 44.4 s |
+| `fork/test/sync.ps1`, warm (every later run) | 2.3 s to 3.9 s (clean 0.3-0.7, stream 1.2-3.1, repair 0.4) |
 
 Found: a plain `tar.exe` copy of a Windows checkout loses two things. The one tracked symlink (`packages/i18n/locales -> src/locales`) becomes an 11-byte text file, and every exec bit is gone (14 tracked 100755 files, including `apps/api/bin/*.sh` and `setup.sh`). `sync.ps1` repairs both from `git ls-files -s` after the stream. The PowerShell 5.1 pipeline is text-only and corrupts a binary pipe, so the script streams through `cmd.exe /c "tar.exe ... | wsl.exe ... tar -x"`.
 
@@ -55,27 +54,27 @@ Found: a plain `tar.exe` copy of a Windows checkout loses two things. The one tr
 
 ### 3. Web image (`apps/web/Dockerfile.web`, no build args)
 
-| Metric                                                                           | Value                                                                           |
-| -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| Wall time, cold (pulls, corepack, pnpm fetch, turbo build)                       | 209 s                                                                           |
+| Metric | Value |
+|---|---|
+| Wall time, cold (pulls, corepack, pnpm fetch, turbo build) | 209 s |
 | Wall time, one-line change to `apps/web/app/root.tsx`, warm layer and pnpm cache | 149 s (13 steps cached, `pnpm fetch`, install and the whole turbo build re-run) |
-| Peak RAM, `free -m` every 5 s (cold)                                             | 2913 MB used (571 MB idle baseline, +2342 MB)                                   |
-| Min MemAvailable, 1 s sampling (cold)                                            | 12778 MB of 15946 MB                                                            |
-| Peak swap                                                                        | 0 MB                                                                            |
-| Peak RAM, incremental rebuild                                                    | 3245 MB used                                                                    |
-| OOM                                                                              | none                                                                            |
-| Image size                                                                       | 97 MB (upstream image: 97.2 MB)                                                 |
-| Boot check                                                                       | nginx 1.31.6 answers `GET /` with 200 and the SPA `index.html`                  |
+| Peak RAM, `free -m` every 5 s (cold) | 2913 MB used (571 MB idle baseline, +2342 MB) |
+| Min MemAvailable, 1 s sampling (cold) | 12778 MB of 15946 MB |
+| Peak swap | 0 MB |
+| Peak RAM, incremental rebuild | 3245 MB used |
+| OOM | none |
+| Image size | 97 MB (upstream image: 97.2 MB) |
+| Boot check | nginx 1.31.6 answers `GET /` with 200 and the SPA `index.html` |
 
 `build-branch.yml` passes no build args for web, so the Dockerfile defaults are what upstream ships. Confirmed in the bundle (see parity below).
 
 Parity against `docker.io/makeplane/plane-frontend:v1.4.2` (`/usr/share/nginx/html` copied out of both):
 
-|              | ours       | upstream   |
-| ------------ | ---------- | ---------- |
-| files / dirs | 1101 / 5   | 1101 / 5   |
-| .js / .css   | 916 / 3    | 916 / 3    |
-| total bytes  | 31,532,934 | 31,532,936 |
+| | ours | upstream |
+|---|---|---|
+| files / dirs | 1101 / 5 | 1101 / 5 |
+| .js / .css | 916 / 3 | 916 / 3 |
+| total bytes | 31,532,934 | 31,532,936 |
 
 - 1072 files share a name; 1071 are byte-identical. The one difference is `index.html`, which is identical after normalising the content hash in chunk file names.
 - 29 chunk files exist under different hashed names on each side. 28 of the 29 pairs have identical byte size (the 29th differs by 2 bytes, a hash-length change inside a filename reference). Chunk hashes differ between the two builds even though sizes match; the cause was not investigated, so treat hashed file names as unstable and compare by count and size.
@@ -86,34 +85,34 @@ Stock VITE args confirmed: build with no args and the result matches upstream.
 
 ### 4. Live image (`apps/live/Dockerfile.live`)
 
-| Metric                                                                                                     | Value                                                                               |
-| ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| Wall time, cold                                                                                            | 245 s                                                                               |
-| Peak RAM (5 s sampling)                                                                                    | 1912 MB used (623 MB baseline, +1289 MB)                                            |
-| Min MemAvailable                                                                                           | 13954 MB                                                                            |
-| Image size                                                                                                 | 1.15 GB (the runner stage copies all of `/app/node_modules` and `packages/`)        |
-| Boot with `API_BASE_URL=http://127.0.0.1:9`, dummy `LIVE_SERVER_SECRET_KEY`, **no Redis**                  | exits 1: `Redis client not initialized` (see D1)                                    |
+| Metric | Value |
+|---|---|
+| Wall time, cold | 245 s |
+| Peak RAM (5 s sampling) | 1912 MB used (623 MB baseline, +1289 MB) |
+| Min MemAvailable | 13954 MB |
+| Image size | 1.15 GB (the runner stage copies all of `/app/node_modules` and `packages/`) |
+| Boot with `API_BASE_URL=http://127.0.0.1:9`, dummy `LIVE_SERVER_SECRET_KEY`, **no Redis** | exits 1: `Redis client not initialized` (see D1) |
 | Boot with the same env plus `REDIS_URL=redis://127.0.0.1:6379` and a valkey 7.2.11 sidecar in the same pod | `GET /live/health` returns `200 {"status":"OK",...}`; container memory about 248 MB |
 
 ### 5. Backend overlay (`fork/docker/Dockerfile.fork-api`)
 
-| Metric                                                                                | Value                                                                            |
-| ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| Build time                                                                            | 4 s (one COPY layer)                                                             |
-| Image size                                                                            | 331 MB (base `makeplane/plane-backend:v1.4.2` is 326 MB; the layer adds 4.57 MB) |
-| `python manage.py check` (dummy `SECRET_KEY`, `DATABASE_URL`, `REDIS_URL`, `WEB_URL`) | "System check identified no issues (0 silenced)", same as the base image         |
-| `pip freeze` overlay vs base                                                          | identical, 110 packages                                                          |
-| `.py` files under `/code/plane`                                                       | 649, same as `apps/api/plane`                                                    |
+| Metric | Value |
+|---|---|
+| Build time | 4 s (one COPY layer) |
+| Image size | 331 MB (base `makeplane/plane-backend:v1.4.2` is 326 MB; the layer adds 4.57 MB) |
+| `python manage.py check` (dummy `SECRET_KEY`, `DATABASE_URL`, `REDIS_URL`, `WEB_URL`) | "System check identified no issues (0 silenced)", same as the base image |
+| `pip freeze` overlay vs base | identical, 110 packages |
+| `.py` files under `/code/plane` | 649, same as `apps/api/plane` |
 
 ### 6. Transfer format (`podman save -m --format docker-archive`, web + live + api)
 
-| Metric                                | Value                                        |
-| ------------------------------------- | -------------------------------------------- |
-| Save time                             | 43.7 s                                       |
-| Tar size                              | 1,568,002,560 bytes (1.46 GiB)               |
-| `gzip -6` of the tar (single thread)  | 447,705,554 bytes (427 MB), 54.9 s           |
-| Load time after removing the 3 images | 22.1 s                                       |
-| Result                                | all 3 image IDs identical to before the save |
+| Metric | Value |
+|---|---|
+| Save time | 43.7 s |
+| Tar size | 1,568,002,560 bytes (1.46 GiB) |
+| `gzip -6` of the tar (single thread) | 447,705,554 bytes (427 MB), 54.9 s |
+| Load time after removing the 3 images | 22.1 s |
+| Result | all 3 image IDs identical to before the save |
 
 The api image carries its full 326 MB base in the archive; docker-archive does not dedupe against a base the target already holds.
 
@@ -136,17 +135,16 @@ The api image carries its full 326 MB base in the archive; docker-archive does n
 
 Clean run of `node-tests.sh all` from a tree with no `node_modules` and no `dist` (pnpm store already populated): 125 s wall, peak RAM 1981 MB used (640 MB baseline, +1341 MB).
 
-| Step       | Command                                                   | Result                                           | Wall                                                                                                                                     |
-| ---------- | --------------------------------------------------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| install    | `pnpm install --frozen-lockfile`                          | OK, 1457 packages, pnpm 11.3.0                   | 22 s with a warm store and no node_modules; 23 to 24 s with an empty store (fast network); 4 to 5 s when node_modules is already current |
-| build-libs | `pnpm turbo run build --filter=live^... --filter=web^...` | 12 tasks, all OK                                 | 37 s cold; 3-8 s when turbo has a cache                                                                                                  |
-| live-test  | `pnpm --filter live test`                                 | **2 files, 32 tests passed** (11 + 21), 0 failed | 10 s                                                                                                                                     |
-| live-types | `pnpm --filter live check:types`                          | 0 errors                                         | 7 s                                                                                                                                      |
-| web-types  | `pnpm --filter web check:types`                           | 0 errors                                         | 44 s                                                                                                                                     |
-| web-lint   | `pnpm --filter web check:lint`                            | 0 errors, 780 warnings (limit 11957), 1877 files | 4 s                                                                                                                                      |
+| Step | Command | Result | Wall |
+|---|---|---|---|
+| install | `pnpm install --frozen-lockfile` | OK, 1457 packages, pnpm 11.3.0 | 22 s with a warm store and no node_modules; 23 to 24 s with an empty store (fast network); 4 to 5 s when node_modules is already current |
+| build-libs | `pnpm turbo run build --filter=live^... --filter=web^...` | 12 tasks, all OK | 37 s cold; 3-8 s when turbo has a cache |
+| live-test | `pnpm --filter live test` | **2 files, 32 tests passed** (11 + 21), 0 failed | 10 s |
+| live-types | `pnpm --filter live check:types` | 0 errors | 7 s |
+| web-types | `pnpm --filter web check:types` | 0 errors | 44 s |
+| web-lint | `pnpm --filter web check:lint` | 0 errors, 780 warnings (limit 11957), 1877 files | 4 s |
 
 Do workspace packages have to be built first? **Yes.**
-
 - `@plane/editor` (and everything it needs) must be built before `pnpm --filter live test`. Without a build, `tests/lib/pdf/pdf-rendering.test.ts` fails to load: `Failed to resolve entry for package "@plane/editor"` (the package's `main` is `./dist/index.js`). `effect-utils.test.ts` still passes (11 tests) because it does not touch the editor. So the pages vitest suites, which import `@plane/editor`, need `build-libs` first.
 - `pnpm --filter web check:types` needs web's own workspace dependencies built. With only the live dependencies built it fails with 527 TS errors (`Cannot find module '@plane/i18n'`, `@plane/shared-state`, `@plane/services`, and knock-on implicit-any errors). After building `web^...` it is clean. This is also why upstream CI runs `turbo run build --affected` before `check:types`.
 - `check:lint` does not need a build.
@@ -162,7 +160,6 @@ D3. **Workspace packages must be built before live tests and web type checks** (
 D4. **pnpm 11 ignores `npm_config_store_dir`.** It silently placed the 1.1 GB store at `/work/.pnpm-store` inside the source tree, leaving the `plane-pnpm-store` volume with only the corepack cache. The variable that works is `pnpm_config_store_dir` (verified with `pnpm store path`). `.pnpm-store` is not in upstream's `.gitignore` or `.dockerignore`, so an accidental in-tree store would be committed and sent in every image build context. `sync.ps1` now also excludes it. The `build` and `dist` excludes are anchored to the top level, so a nested tracked `build/` or `dist/` directory is not dropped.
 
 D5. Smaller notes:
-
 - The `builder` stage of `Dockerfile.web` and `Dockerfile.live` runs `corepack enable pnpm && pnpm add -g turbo` before any `package.json` is copied in, so corepack picks the latest pnpm (12.8.1 on this date), not the pinned 11.3.0. Later stages get 11.3.0. It worked, but the first stage is not reproducible. A fork that wants deterministic builds can add `corepack prepare pnpm@11.3.0 --activate` there; that is a change to an upstream file, so it would have to be listed in `PATCHES.md`.
 - Base images float: `node:22-alpine` (v22.23.3 here) and `nginx:1.31-alpine` (nginx 1.31.6). Pin digests if bit-for-bit repeatability matters.
 - Do not run the recipe from Git Bash without `MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'`; it rewrites leading `/` arguments passed to `wsl.exe`.
