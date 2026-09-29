@@ -90,8 +90,29 @@ describe("pages access guard", () => {
     expect((await get(authHeaders())).status).toBe(200);
   });
 
-  it("does not read the request body for a caller that fails the guard", async () => {
-    const res = await postRebase(app.base, "{not json", {});
-    expect(res.status).toBe(401);
+  // The guard must run before the body is read: an oversize or malformed body from a caller that fails
+  // the guard gets the guard's status, never 413, 400 or 415.
+  const oversize = "a".repeat(26 * 1024 * 1024);
+  it.each([
+    ["malformed body", "{not json"],
+    ["oversize body", oversize],
+  ])("answers the guard status before reading a %s", async (_n, body) => {
+    expect((await postRebase(app.base, body, {})).status).toBe(401);
+    expect((await postRebase(app.base, body, authHeaders({ "x-forwarded-for": "proxy.example" }))).status).toBe(403);
+    mockEnv.LIVE_SERVER_SECRET_KEY = "";
+    expect((await postRebase(app.base, body, authHeaders())).status).toBe(503);
+    process.env.PAGES_API_ENABLED = "0";
+    expect((await postRebase(app.base, body, authHeaders())).status).toBe(404);
+  });
+
+  it("answers 415 to a wrong content type only after the guard passes", async () => {
+    const send = (headers: Record<string, string>) =>
+      fetch(`${app.base}/fork/pages/rebase`, {
+        method: "POST",
+        headers: { "content-type": "text/plain", ...headers },
+        body: "x",
+      });
+    expect((await send({})).status).toBe(401);
+    expect((await send(authHeaders())).status).toBe(415);
   });
 });

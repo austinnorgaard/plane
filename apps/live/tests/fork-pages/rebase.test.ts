@@ -94,6 +94,23 @@ describe("rebase", () => {
     expect(updates).toBe(1);
   });
 
+  it("treats empty html as an empty paragraph", () => {
+    const result = rebase({ baseBinary: baseState(), descriptionHtml: "", name: null });
+    expect(result.description_html).toMatch(/^<p[^>]*><\/p>$/);
+    expect(textOf(result.description_html)).toBe("");
+  });
+
+  it("rejects a partial update whose dependencies are missing from the base", () => {
+    const source = new Y.Doc();
+    source.getXmlFragment("default").insert(0, [new Y.XmlText("first")]);
+    const before = Y.encodeStateVector(source);
+    source.getXmlFragment("default").insert(1, [new Y.XmlText("second")]);
+    const diffOnly = Y.encodeStateAsUpdate(source, before);
+    expect(() => rebase({ baseBinary: diffOnly, descriptionHtml: "<p>x</p>", name: null })).toThrow(
+      InvalidBaseStateError
+    );
+  });
+
   it("rejects a base that is not a Yjs update", () => {
     expect(() =>
       rebase({ baseBinary: new Uint8Array([255, 255, 255, 9]), descriptionHtml: "<p>x</p>", name: null })

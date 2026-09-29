@@ -19,6 +19,8 @@ const sha256 = (value: string): Buffer => createHash("sha256").update(value).dig
  * Nothing about the request or the key is logged.
  */
 export const requirePagesApiAccess = (req: Request, res: Response, next: NextFunction): void => {
+  // The flag is read per request straight from process.env (not the validated env module) so it can be
+  // switched without a restart and toggled in tests; the secret goes through the validated env module.
   if (process.env.PAGES_API_ENABLED !== "1") {
     res.status(404).json({ message: "Not Found" });
     return;

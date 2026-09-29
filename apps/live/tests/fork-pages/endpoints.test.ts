@@ -184,6 +184,18 @@ describe("POST /fork/pages/rebase", () => {
     expect(res.status).toBe(400);
   });
 
+  it.each([
+    ["characters outside the base64 alphabet", "AAA!AAA="],
+    ["a length that is not a multiple of 4", "AAAAA"],
+    ["misplaced padding", "AA=A"],
+  ])("400 with the base_binary issue path for %s", async (_n, value) => {
+    const res = await postRebase(app.base, { base_binary: value, name: "x" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; issues: Array<{ path: string }> };
+    expect(body.error).toBe("Validation error");
+    expect(body.issues.map((issue) => issue.path)).toEqual(["base_binary"]);
+  });
+
   it("does not echo submitted values in validation errors", async () => {
     const res = await postRebase(app.base, { base_binary: "SECRET-VALUE!!", name: "x" });
     expect(await res.text()).not.toContain("SECRET-VALUE");

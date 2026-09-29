@@ -59,9 +59,14 @@ export const rebase = ({ baseBinary, descriptionHtml, name }: TRebaseInput): TRe
   } catch {
     throw new InvalidBaseStateError();
   }
+  // A partial update (one that depends on structs the base does not contain) is kept as pending and
+  // would silently produce a result outside the stored lineage, so only a full state is accepted.
+  if (doc.store.pendingStructs !== null || doc.store.pendingDs !== null) {
+    throw new InvalidBaseStateError();
+  }
 
   // Convert before opening the transaction so a conversion failure leaves nothing half applied.
-  const bodyJSON = descriptionHtml === null ? null : generateJSON(descriptionHtml || "<p></p>", DOC_EXTENSIONS);
+  const bodyJSON = descriptionHtml === null ? null : generateJSON(descriptionHtml, DOC_EXTENSIONS);
   const titleJSON = name === null ? null : generateTitleProsemirrorJson(name);
 
   doc.transact(() => {
