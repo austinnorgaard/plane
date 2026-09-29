@@ -61,9 +61,10 @@ def is_page_loaded(page_id):
     return loaded if isinstance(loaded, bool) else None
 
 
-def rebase_page(page_id, description_binary_b64, description_html):
-    """Ask the live service to apply description_html on top of the stored binary
-    document. Returns the decoded json answer. Raises LiveServiceError on any failure."""
+def rebase_page(page_id, base_binary_b64, description_html, name):
+    """Ask the live service to apply description_html and/or name (either may be None)
+    on top of the stored binary document. Returns the decoded json answer.
+    Raises LiveServiceError on any failure."""
     base = _base_url()
     if base is None:
         raise LiveServiceError("live url is not configured")
@@ -71,9 +72,9 @@ def rebase_page(page_id, description_binary_b64, description_html):
         response = requests.post(
             f"{base}fork/pages/rebase",
             json={
-                "page_id": str(page_id),
-                "description_binary": description_binary_b64,
+                "base_binary": base_binary_b64,
                 "description_html": description_html,
+                "name": name,
             },
             headers={**_secret_header(), "Content-Type": REBASE_CONTENT_TYPE},
             timeout=REBASE_TIMEOUT_SECONDS,

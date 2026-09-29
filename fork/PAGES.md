@@ -10,7 +10,7 @@ All paths are under `/api/v1/workspaces/<slug>/projects/<project_id>/`.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `pages/` | list (paginated; `?archived=true` lists archived pages instead) |
+| GET | `pages/` | list (cursor paginated; `?archived=true` lists archived pages; filters `parent_id`, `external_source`, `external_id`; `order_by` limited to created_at, updated_at, name, sort_order, otherwise the default `-created_at`) |
 | POST | `pages/` | create |
 | GET | `pages/<page_id>/` | retrieve (includes `description_html`) |
 | PATCH | `pages/<page_id>/` | update `name` and/or `description_html` |
@@ -29,7 +29,7 @@ use different paths, add aliases here and in `api/urls/page.py`. This is confirm
 
 - Create: pages start with a NULL binary document and `description_json = {}`; the live service builds the document from
   `description_html` the first time the page is opened. A duplicate `(external_source, external_id)` pair in the project answers
-  409 with `{"error": ..., "id": <existing page id>}`; the check runs under a transaction-scoped advisory lock.
+  409 with `{"error": "Page with the same external id and external source already exists", "id": <existing page id>}`; the check runs under a transaction-scoped advisory lock.
   A project with pages disabled (`page_view` false) answers 400; an archived or unknown project answers 404.
   The optional `parent` must be an active page of the same project.
 - Update accepts only `name` and `description_html` and **replaces the whole body**; any other key, or an empty body, is 400.
@@ -37,10 +37,10 @@ use different paths, add aliases here and in `api/urls/page.py`. This is confirm
 - Update never merges into an open document. If the page is loaded in the live service, or its state cannot be determined
   (no live URL, timeout, bad answer), the answer is 409 `{"error": "page is open in an editor; retry later"}` and nothing is written.
   - Page without a stored binary: presence is checked, then html/name are written directly and the binary stays NULL.
-  - Page with a stored binary: the html is rebased onto the binary through the live service, the result is validated, and
-    presence is checked **after** the rebase; the binary, html, json and name are then saved together. Live failure or an invalid
-    rebase result is 503 `{"error": "live service unavailable, page not updated"}`. A name-only update skips the rebase
-    but still checks presence.
+  - Page with a stored binary: the change is always rebased onto the binary through the live service (a name-only change too,
+    because the title lives in the binary), the result is validated, and presence is checked **after** the rebase; the binary,
+    html, json and name are then saved together. Live failure or an invalid rebase result is 503
+    `{"error": "live service unavailable, page not updated"}`.
 - Request bodies larger than `FILE_SIZE_LIMIT` (5 MB by default) are 413.
 - After commit: `page_transaction` and `track_page_version` are queued, and a best-effort presence re-check logs a warning
   (page id only) if the page was opened during the write.
@@ -52,4 +52,4 @@ Both send the `live-server-secret-key` header taken from `LIVE_SERVER_SECRET_KEY
 
 - `GET {LIVE_URL}fork/pages/<id>/loaded`, 3 s timeout, answer `{"loaded": true|false}`; anything else counts as unknown.
 - `POST {LIVE_URL}fork/pages/rebase`, `Content-Type: application/vnd.plane-fork.rebase+json`, 10 s timeout. Body
-  `{"page_id", "description_binary" (base64), "description_html"}`; answer `{"description_binary" (base64), "description_html", "description_json"}`.
+  `{"base_binary" (base64), "description_html" (string or null), "name" (string or null)}`; answer `{"description_binary" (base64), "description_html", "description_json"}`.

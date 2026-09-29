@@ -33,6 +33,7 @@ from plane.bgtasks.page_transaction_task import page_transaction
 from plane.bgtasks.page_version_task import track_page_version
 from plane.db.models import Page, Project, ProjectMember, ProjectPage, UserFavorite
 from plane.utils import live_pages
+from plane.utils.order_queryset import PAGE_ORDER_BY_ALLOWLIST, sanitize_order_by
 
 from .base import BaseAPIView
 
@@ -121,9 +122,18 @@ class PageListCreateAPIEndpoint(PageBaseAPIEndpoint):
             queryset = queryset.filter(archived_at__isnull=False)
         else:
             queryset = queryset.filter(archived_at__isnull=True)
+        for param, field in (
+            ("parent_id", "parent_id"),
+            ("external_source", "external_source"),
+            ("external_id", "external_id"),
+        ):
+            value = request.GET.get(param)
+            if value:
+                queryset = queryset.filter(**{field: value})
+        order_by = sanitize_order_by(request.GET.get("order_by"), PAGE_ORDER_BY_ALLOWLIST, default="-created_at")
         return self.paginate(
             request=request,
-            queryset=queryset.order_by("-created_at"),
+            queryset=queryset.order_by(order_by, "-created_at"),
             on_results=lambda pages: PageListAPISerializer(pages, many=True).data,
         )
 
@@ -158,7 +168,10 @@ class PageListCreateAPIEndpoint(PageBaseAPIEndpoint):
                 )
                 if existing is not None:
                     return Response(
-                        {"error": "A page with the same external id and source already exists", "id": str(existing)},
+                        {
+                            "error": "Page with the same external id and external source already exists",
+                            "id": str(existing),
+                        },
                         status=status.HTTP_409_CONFLICT,
                     )
 
@@ -239,33 +252,36 @@ class PageDetailAPIEndpoint(PageBaseAPIEndpoint):
                     page.description_html = data["description_html"]
                     update_fields.append("description_html")
             else:
-                # (b) Stored document: fold the html into it through the live service.
-                rebased = None
-                if has_html:
-                    try:
-                        result = live_pages.rebase_page(
-                            page.id,
-                            base64.b64encode(bytes(page.description_binary)).decode(),
-                            data["description_html"],
-                        )
-                    except live_pages.LiveServiceError:
-                        return Response(LIVE_UNAVAILABLE, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-                    rebased = PageBinaryUpdateSerializer(data=result)
-                    if not rebased.is_valid() or not rebased.validated_data.get("description_binary"):
-                        return Response(LIVE_UNAVAILABLE, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+                # (b) Stored document: fold the change (html and/or name) into it through the live
+                # service; the title lives in the binary too, so a name-only change rebases as well.
+                try:
+                    result = live_pages.rebase_page(
+                        page.id,
+                        base64.b64encode(bytes(page.description_binary)).decode(),
+                        data.get("description_html"),
+                        data.get("name"),
+                    )
+                except live_pages.LiveServiceError:
+                    return Response(LIVE_UNAVAILABLE, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+                rebased = PageBinaryUpdateSerializer(data=result)
+                if not rebased.is_valid() or not rebased.validated_data.get("description_binary"):
+                    return Response(LIVE_UNAVAILABLE, status=status.HTTP_503_SERVICE_UNAVAILABLE)
                 # The presence check comes after the rebase so a page opened meanwhile is caught.
                 if live_pages.is_page_loaded(page.id) is not False:
                     return Response(OPEN_IN_EDITOR, status=status.HTTP_409_CONFLICT)
-                update_fields = []
+                validated = rebased.validated_data
+                update_fields = ["description_binary"]
+                page.description_binary = validated["description_binary"]
                 if "name" in data:
                     page.name = data["name"]
                     update_fields.append("name")
-                if rebased is not None:
-                    validated = rebased.validated_data
-                    page.description_binary = validated["description_binary"]
-                    page.description_html = validated.get("description_html") or data["description_html"]
-                    page.description_json = validated.get("description_json") or {}
-                    update_fields += ["description_binary", "description_html", "description_json"]
+                new_html = validated.get("description_html") or data.get("description_html")
+                if new_html:
+                    page.description_html = new_html
+                    update_fields.append("description_html")
+                if validated.get("description_json"):
+                    page.description_json = validated["description_json"]
+                    update_fields.append("description_json")
 
             page.save(update_fields=[*update_fields, "description_stripped", "updated_at", "updated_by"])
             stored_html = page.description_html
@@ -291,8 +307,11 @@ class PageDetailAPIEndpoint(PageBaseAPIEndpoint):
             user_id=user_id,
         )
         # Best effort: someone may have opened the page while we were writing.
-        if live_pages.is_page_loaded(page_id) is True:
-            logger.warning("page %s was opened in an editor during an api update", page_id)
+        try:
+            if live_pages.is_page_loaded(page_id) is True:
+                logger.warning("page %s was opened in an editor during an api update", page_id)
+        except Exception as exc:
+            logger.warning("presence re-check failed for page %s (%s)", page_id, type(exc).__name__)
 
 
 class PageArchiveAPIEndpoint(PageBaseAPIEndpoint):

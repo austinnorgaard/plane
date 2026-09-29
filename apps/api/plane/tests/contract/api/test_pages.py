@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 
-from plane.db.models import Page, Project, ProjectMember, ProjectPage, User
+from plane.db.models import Page, Project, ProjectMember, ProjectPage, User, WorkspaceMember
 from plane.utils import live_pages
 
 LIVE = "plane.api.views.page.live_pages"
@@ -192,7 +192,10 @@ class TestCreate:
         second = session_client.post(base(project), body, format="json")
         assert first.status_code == 201
         assert second.status_code == 409
-        assert second.data["id"] == first.data["id"]
+        assert second.data == {
+            "error": "Page with the same external id and external source already exists",
+            "id": first.data["id"],
+        }
         assert Page.objects.filter(external_id="e1").count() == 1
 
     def test_same_external_id_other_source_is_fine(self, session_client, project):
@@ -463,15 +466,75 @@ class TestPatchWithBinary:
         assert response.status_code == 503
         live.is_page_loaded.assert_not_called()
 
-    def test_name_only_skips_rebase_but_checks_presence(self, session_client, project, create_user, mocker):
+    def test_name_only_still_rebases(
+        self, session_client, project, create_user, mocker, celery_mocks, django_capture_on_commit_callbacks
+    ):
         live = mocker.patch(LIVE)
+        live.LiveServiceError = live_pages.LiveServiceError
+        live.rebase_page.return_value = {"description_binary": rebase_answer()["description_binary"]}
         live.is_page_loaded.return_value = False
         page = binary_page(project, create_user)
-        assert session_client.patch(detail(project, page), {"name": "n"}, format="json").status_code == 200
-        live.rebase_page.assert_not_called()
+        with django_capture_on_commit_callbacks(execute=True):
+            response = session_client.patch(detail(project, page), {"name": "n"}, format="json")
+        assert response.status_code == 200
+        args = live.rebase_page.call_args[0]
+        assert args[2] is None and args[3] == "n"
         page.refresh_from_db()
-        assert bytes(page.description_binary) == b"\x01\x02\x03"
-        assert page.name == "n"
+        assert bytes(page.description_binary) == b"\x09\x08\x07\x06\x05"
+        assert (page.name, page.description_html) == ("n", "<p>hello</p>")
+        celery_mocks["transaction"].assert_not_called()
+        celery_mocks["version"].assert_called_once()
+
+    def test_name_only_invalid_rebase_result_is_503(self, session_client, project, create_user, mocker):
+        live = mocker.patch(LIVE)
+        live.LiveServiceError = live_pages.LiveServiceError
+        live.rebase_page.return_value = {}
+        page = binary_page(project, create_user)
+        assert session_client.patch(detail(project, page), {"name": "n"}, format="json").status_code == 503
+        page.refresh_from_db()
+        assert page.name == "A page"
+
+    def test_empty_html_becomes_empty_paragraph(self, session_client, project, create_user, mocker):
+        live = mocker.patch(LIVE)
+        live.LiveServiceError = live_pages.LiveServiceError
+        live.rebase_page.return_value = {"description_binary": rebase_answer()["description_binary"]}
+        live.is_page_loaded.return_value = False
+        page = binary_page(project, create_user)
+        assert session_client.patch(detail(project, page), {"description_html": ""}, format="json").status_code == 200
+        assert live.rebase_page.call_args[0][2] == "<p></p>"
+        page.refresh_from_db()
+        assert page.description_html == "<p></p>"
+
+    @pytest.mark.parametrize("live_url", [None, "http://localhost:1/live/"])
+    def test_live_unreachable_is_503_through_the_real_client(
+        self, session_client, project, create_user, settings, mocker, live_url
+    ):
+        import requests
+
+        settings.LIVE_URL = live_url
+        mocker.patch("plane.utils.live_pages.requests.post", side_effect=requests.Timeout("slow"))
+        page = binary_page(project, create_user)
+        response = session_client.patch(detail(project, page), {"description_html": "<p>n</p>"}, format="json")
+        assert response.status_code == 503
+        assert response.data == LIVE_DOWN_MSG
+        page.refresh_from_db()
+        assert page.description_html == "<p>hello</p>"
+
+    def test_track_page_version_creates_a_version_row(
+        self, session_client, project, create_user, mocker, celery_mocks, django_capture_on_commit_callbacks
+    ):
+        from plane.bgtasks.page_version_task import track_page_version
+        from plane.db.models import PageVersion
+
+        mocker.patch(LIVE).is_page_loaded.return_value = False
+        page = make_page(project, create_user)
+        with django_capture_on_commit_callbacks(execute=True):
+            session_client.patch(detail(project, page), {"description_html": "<p>v2</p>"}, format="json")
+        kwargs = celery_mocks["version"].call_args.kwargs
+        track_page_version(**kwargs)
+        version = PageVersion.objects.get(page=page)
+        assert version.description_html == "<p>v2</p>"
+        assert version.description_json == {}
 
     def test_post_commit_recheck_warns_with_page_id_only(
         self, session_client, project, create_user, mocker, caplog, django_capture_on_commit_callbacks
@@ -586,9 +649,10 @@ class TestLiveClient:
         post = mocker.patch("plane.utils.live_pages.requests.post")
         post.return_value.status_code = 200
         post.return_value.json.return_value = {"description_binary": "AA=="}
-        assert live_pages.rebase_page(uuid4(), "AQ==", "<p>x</p>") == {"description_binary": "AA=="}
+        assert live_pages.rebase_page(uuid4(), "AQ==", None, "New name") == {"description_binary": "AA=="}
         assert post.call_args[0][0] == "http://localhost:3100/live/fork/pages/rebase"
         assert post.call_args.kwargs["timeout"] == 10
+        assert post.call_args.kwargs["json"] == {"base_binary": "AQ==", "description_html": None, "name": "New name"}
         headers = post.call_args.kwargs["headers"]
         assert headers["Content-Type"] == "application/vnd.plane-fork.rebase+json"
         assert headers["live-server-secret-key"] == "k-test"
@@ -598,10 +662,10 @@ class TestLiveClient:
         post = mocker.patch("plane.utils.live_pages.requests.post")
         post.return_value.status_code = 500
         with pytest.raises(live_pages.LiveServiceError):
-            live_pages.rebase_page(uuid4(), "AQ==", "<p>x</p>")
+            live_pages.rebase_page(uuid4(), "AQ==", "<p>x</p>", None)
         settings.LIVE_URL = None
         with pytest.raises(live_pages.LiveServiceError):
-            live_pages.rebase_page(uuid4(), "AQ==", "<p>x</p>")
+            live_pages.rebase_page(uuid4(), "AQ==", "<p>x</p>", None)
 
 
 @pytest.mark.unit
@@ -612,3 +676,145 @@ def test_version_task_uses_description_json():
 
     source = inspect.getsource(page_version_task)
     assert "page.description," not in source and "page.description\n" not in source
+
+
+@pytest.mark.contract
+class TestPresenceFailuresAtViewLevel:
+    """Branch (a) through the real live client: every failure mode counts as unknown."""
+
+    @pytest.mark.parametrize(
+        "kind",
+        ["timeout", "http_500", "not_json", "bad_shape"],
+    )
+    def test_unknown_presence_conflicts(self, session_client, project, create_user, settings, mocker, kind):
+        import requests
+
+        settings.LIVE_URL = "http://localhost:3100/live/"
+        get = mocker.patch("plane.utils.live_pages.requests.get")
+        if kind == "timeout":
+            get.side_effect = requests.Timeout("slow")
+        else:
+            get.return_value.status_code = 500 if kind == "http_500" else 200
+            if kind == "not_json":
+                get.return_value.json.side_effect = ValueError("nope")
+            else:
+                get.return_value.json.return_value = {"loaded": "maybe"}
+        page = make_page(project, create_user)
+        response = session_client.patch(detail(project, page), {"name": "x"}, format="json")
+        assert response.status_code == 409
+        assert response.data == OPEN_MSG
+        page.refresh_from_db()
+        assert page.name == "A page"
+
+
+@pytest.mark.contract
+class TestAccessRules:
+    def test_workspace_admin_not_project_member_is_403(self, api_client, project):
+        admin = make_user("wsadmin@plane.so")
+        WorkspaceMember.objects.create(workspace=project.workspace, member=admin, role=20)
+        assert client_for(admin, api_client).get(base(project)).status_code == 403
+
+    def test_guest_sees_only_own_pages_without_view_all(self, api_client, project, create_user):
+        guest = make_user("g@plane.so")
+        join(project, guest, 5)
+        make_page(project, create_user, name="theirs")
+        mine = make_page(project, guest, name="mine")
+        response = client_for(guest, api_client).get(base(project))
+        assert [r["id"] for r in response.data["results"]] == [str(mine.id)]
+
+    def test_guest_sees_public_pages_with_view_all(self, api_client, project, create_user):
+        project.guest_view_all_features = True
+        project.save()
+        guest = make_user("g@plane.so")
+        join(project, guest, 5)
+        theirs = make_page(project, create_user, name="theirs")
+        make_page(project, create_user, name="private", access=Page.PRIVATE_ACCESS)
+        response = client_for(guest, api_client).get(base(project))
+        assert [r["id"] for r in response.data["results"]] == [str(theirs.id)]
+        assert client_for(guest, api_client).get(detail(project, theirs)).status_code == 200
+
+    def test_page_linked_only_to_other_project_is_403(self, session_client, project, create_user):
+        other = Project.objects.create(name="B", identifier="BB", workspace=project.workspace)
+        ProjectMember.objects.create(project=other, member=create_user, role=20, is_active=True)
+        page = make_page(other, create_user)
+        assert session_client.get(detail(project, page)).status_code == 403
+        assert session_client.patch(detail(project, page), {"name": "x"}, format="json").status_code == 403
+        assert session_client.post(archive_url(project, page)).status_code == 403
+
+    def test_rate_limit_headers_present_with_api_key(self, api_key_client, project):
+        response = api_key_client.get(base(project))
+        assert response.status_code == 200
+        assert "X-RateLimit-Remaining" in response
+
+
+@pytest.mark.contract
+class TestListFiltersAndOrdering:
+    def test_cursor_pagination(self, session_client, project, create_user):
+        pages = [make_page(project, create_user, name=f"p{i}") for i in range(3)]
+        first = session_client.get(base(project) + "?per_page=2")
+        assert first.status_code == 200
+        assert len(first.data["results"]) == 2
+        assert first.data["next_page_results"] is True
+        second = session_client.get(base(project) + f"?per_page=2&cursor={first.data['next_cursor']}")
+        assert len(second.data["results"]) == 1
+        seen = {r["id"] for r in first.data["results"]} | {r["id"] for r in second.data["results"]}
+        assert seen == {str(p.id) for p in pages}
+        back = session_client.get(base(project) + f"?per_page=2&cursor={second.data['prev_cursor']}")
+        assert {r["id"] for r in back.data["results"]} == {r["id"] for r in first.data["results"]}
+
+    def test_filters(self, session_client, project, create_user):
+        parent = make_page(project, create_user, name="parent")
+        kid = make_page(project, create_user, name="kid", parent=parent, external_id="x1", external_source="sync")
+        make_page(project, create_user, name="other", external_id="x2", external_source="sync")
+        ids = lambda qs: [r["id"] for r in session_client.get(base(project) + qs).data["results"]]  # noqa: E731
+        assert ids(f"?parent_id={parent.id}") == [str(kid.id)]
+        assert ids("?external_id=x1") == [str(kid.id)]
+        assert sorted(ids("?external_source=sync")) == sorted(ids("?external_id=x1") + ids("?external_id=x2"))
+        assert ids("?external_source=sync&external_id=x2") != [str(kid.id)]
+        assert ids("?external_source=none") == []
+
+    def test_order_by_allowlist(self, session_client, project, create_user):
+        make_page(project, create_user, name="b")
+        make_page(project, create_user, name="a")
+        names = lambda qs: [r["name"] for r in session_client.get(base(project) + qs).data["results"]]  # noqa: E731
+        assert names("?order_by=name") == ["a", "b"]
+        assert names("?order_by=-name") == ["b", "a"]
+
+    @pytest.mark.parametrize("bad", ["owned_by__password", "--name", "description_binary", "workspace__owner"])
+    def test_disallowed_order_by_falls_back_to_default(self, session_client, project, create_user, bad):
+        first = make_page(project, create_user, name="first")
+        second = make_page(project, create_user, name="second")
+        response = session_client.get(base(project) + f"?order_by={bad}")
+        assert response.status_code == 200
+        assert [r["id"] for r in response.data["results"]] == [str(second.id), str(first.id)]
+
+
+@pytest.mark.contract
+@pytest.mark.django_db(transaction=True)
+class TestConcurrentCreate:
+    def test_parallel_creates_with_same_external_pair_give_one_201_and_one_409(self, project, api_token):
+        import threading
+
+        from django.db import connection
+        from rest_framework.test import APIClient
+
+        body = {"name": "n", "external_id": "race", "external_source": "sync"}
+        results = []
+        barrier = threading.Barrier(4)
+
+        def worker():
+            try:
+                client = APIClient()
+                client.credentials(HTTP_X_API_KEY=api_token.token)
+                barrier.wait(timeout=10)
+                results.append(client.post(base(project), body, format="json").status_code)
+            finally:
+                connection.close()
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+        assert sorted(results) == [201, 409, 409, 409]
+        assert Page.objects.filter(external_id="race").count() == 1
