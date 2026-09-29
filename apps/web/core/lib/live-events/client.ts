@@ -368,6 +368,8 @@ export class LiveEventsClient {
         this.emitResync();
         return;
       case "subscribed":
+        // a transient roles failure on the hub also answers with denied: recovery is the next reconnect
+        // or the hub's periodic revalidation
         frame.denied.forEach((projectId) => this.denied.add(projectId));
         return;
       case "revoked":

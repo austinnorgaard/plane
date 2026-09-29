@@ -110,6 +110,21 @@ export const shouldResetComments = (keys: Iterable<string>): boolean => {
   return false;
 };
 
+/** The batch carries an issue delete for the id: the only case where the issue map entry may be dropped. */
+export const hasIssueDeleted = (keys: Iterable<string>): boolean => {
+  for (const key of keys) if (key === changeKey("issue", "deleted")) return true;
+  return false;
+};
+
+/** Best effort: the service rethrows only the response body, so the status may be missing. */
+export const isNotFoundError = (error: unknown): boolean => {
+  if (typeof error !== "object" || error === null) return false;
+  const body = error as { status?: unknown; status_code?: unknown; error?: unknown; detail?: unknown };
+  if (body.status === 404 || body.status_code === 404) return true;
+  const text = typeof body.error === "string" ? body.error : typeof body.detail === "string" ? body.detail : "";
+  return /not found/i.test(text);
+};
+
 /** Any comment change at all. */
 export const hasCommentChange = (keys: Iterable<string>): boolean => {
   for (const key of keys) if (isCommentKey(key)) return true;
@@ -179,10 +194,7 @@ export class LiveWorkItemsApplier {
 
     if (event.type === "revoked") {
       // access lost: close an open peek, the lists follow through the coarse refresh
-      if (this.getOpenIssueIds().length > 0) {
-        this.deps.issueDetail.setPeekIssue(undefined);
-        this.deps.onIssueMissingFromPeek();
-      }
+      if (this.getOpenIssueIds().length > 0) this.closePeek();
       this.scheduleCoarse(true);
       return;
     }
@@ -362,33 +374,38 @@ export class LiveWorkItemsApplier {
         }
       });
 
-      // removeIssueFromList reads the issue map, so the map entry must outlive it
+      // removeIssueFromList reads the issue map, so the map entry must outlive it. The list endpoint also
+      // omits archived, draft and intake work items, so only an issue delete drops the map entry.
       for (const id of missing) {
         for (const target of listTargets) target.store.removeIssueFromList(id);
-        issueMap.removeIssue(id);
+        if (hasIssueDeleted(batch.get(id) ?? [])) issueMap.removeIssue(id);
       }
     });
 
     if (coarseNeeded) this.scheduleCoarse(false);
-    await this.refreshOpenIssues(batch, new Set(missing));
+    await this.refreshOpenIssues(batch, new Set(missing.filter((id) => hasIssueDeleted(batch.get(id) ?? []))));
   }
 
   // ---- peek / detail ----
 
-  private async refreshOpenIssues(batch: Map<string, Set<string>>, missing: Set<string>) {
+  private async refreshOpenIssues(batch: Map<string, Set<string>>, deleted: Set<string>) {
     const refreshes: Promise<void>[] = [];
     for (const issueId of this.getOpenIssueIds()) {
       const kinds = batch.get(issueId);
       if (!kinds) continue;
-      if (missing.has(issueId)) {
-        // deleted or no longer visible: never fetchIssue on it
-        this.deps.issueDetail.setPeekIssue(undefined);
-        this.deps.onIssueMissingFromPeek();
+      if (deleted.has(issueId)) {
+        // deleted: never fetchIssue on it
+        this.closePeek();
         continue;
       }
       refreshes.push(this.refreshIssueDetail(issueId, kinds));
     }
     await Promise.all(refreshes);
+  }
+
+  private closePeek() {
+    this.deps.issueDetail.setPeekIssue(undefined);
+    this.deps.onIssueMissingFromPeek();
   }
 
   private async refreshIssueDetail(issueId: string, kinds: Set<string>) {
@@ -417,20 +434,26 @@ export class LiveWorkItemsApplier {
     });
   }
 
+  private fetchIssueDetail(issueId: string) {
+    const { workspaceSlug, projectId, issueDetail } = this.deps;
+    issueDetail.fetchIssue(workspaceSlug, projectId, issueId).catch((error: unknown) => {
+      // gone or no longer visible: close the peek, anything else is transient
+      if (isNotFoundError(error) && this.getOpenIssueIds().includes(issueId)) this.closePeek();
+      else console.error("live detail fetch failed", error);
+    });
+  }
+
   /**
    * At most one fetchIssue per issue every PEEK_FETCH_THROTTLE_MS. Returns true when a fetch was started now;
    * otherwise a trailing fetch is scheduled and the caller refreshes comments and activities itself.
    */
   private throttledFetchIssue(issueId: string, beforeFetch: () => void): boolean {
-    const { workspaceSlug, projectId, issueDetail } = this.deps;
     const now = Date.now();
     const last = this.lastPeekFetch.get(issueId) ?? -Infinity;
     if (now - last >= PEEK_FETCH_THROTTLE_MS) {
       this.lastPeekFetch.set(issueId, now);
       beforeFetch();
-      issueDetail.fetchIssue(workspaceSlug, projectId, issueId).catch((error: unknown) => {
-        console.error("live detail fetch failed", error);
-      });
+      this.fetchIssueDetail(issueId);
       return true;
     }
     if (!this.peekTrailingTimers.has(issueId)) {
@@ -439,9 +462,7 @@ export class LiveWorkItemsApplier {
           this.peekTrailingTimers.delete(issueId);
           if (this.disposed || !this.getOpenIssueIds().includes(issueId)) return;
           this.lastPeekFetch.set(issueId, Date.now());
-          issueDetail.fetchIssue(workspaceSlug, projectId, issueId).catch((error: unknown) => {
-            console.error("live detail fetch failed", error);
-          });
+          this.fetchIssueDetail(issueId);
         },
         Math.max(0, PEEK_FETCH_THROTTLE_MS - (now - last))
       );

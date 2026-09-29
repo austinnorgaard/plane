@@ -53,6 +53,12 @@ test("helpers", () => {
   assert.equal(A.listContainsIssue({ a: { b: ["1", "2"] }, c: ["3"] }, "2"), true);
   assert.equal(A.listContainsIssue({ a: ["1"] }, "9"), false);
   assert.equal(A.listContainsIssue(undefined, "9"), false);
+  assert.equal(A.hasIssueDeleted(["issue:deleted"]), true);
+  assert.equal(A.hasIssueDeleted(["comment:deleted", "issue:updated"]), false);
+  assert.equal(A.isNotFoundError({ error: "Issue not found" }), true);
+  assert.equal(A.isNotFoundError({ status: 404 }), true);
+  assert.equal(A.isNotFoundError({ error: "boom" }), false);
+  assert.equal(A.isNotFoundError(undefined), false);
   assert.equal(A.isFilterExpressionActive({}), false);
   assert.equal(A.isFilterExpressionActive(undefined), false);
   assert.equal(A.isFilterExpressionActive({ and: [1] }), true);
@@ -130,7 +136,7 @@ function setup(t, { route = {}, peek, present = {}, listed = [], filtered = fals
     issueDetail: detail,
     onIssueMissingFromPeek: () => calls.push(["toast"]),
   });
-  return { applier, calls, retrieved };
+  return { applier, calls, retrieved, detail };
 }
 const tick = async (t, ms) => {
   t.mock.timers.tick(ms);
@@ -150,7 +156,8 @@ test("debounce, dedupe, 50-id chunks; new issue is added, missing removed list-f
   globalThis.__resp = (ids) => ids.filter((i) => i !== "gone").map((id) => ({ id, project_id: "p" }));
   const ids = Array.from({ length: 60 }, (_, i) => "n" + i);
   applier.handle(ev(ids.slice(0, 30)));
-  applier.handle(ev([...ids.slice(20), "gone"]));
+  applier.handle(ev(ids.slice(20)));
+  applier.handle(ev(["gone"], "issue:deleted"));
   await tick(t, 299);
   assert.equal(retrieved.length, 0);
   await tick(t, 2);
@@ -202,6 +209,51 @@ test("full_refresh / resync -> coarse", async (t) => {
   applier.handle({ type: "events", project_id: "p", items: [], full_refresh: true });
   await tick(t, 1000);
   assert.equal(calls.filter((c) => c[0] === "coarse").length, 1);
+});
+test("archived or intake id the list endpoint omits: list entry removed, map entry kept, peek stays open", async (t) => {
+  const { applier, calls } = setup(t, {
+    peek: { projectId: "p", issueId: "arch", workspaceSlug: "w" },
+    present: { arch: { id: "arch", project_id: "p" }, intake: { id: "intake", project_id: "p" } },
+    listed: ["arch", "intake"],
+  });
+  globalThis.__resp = () => [];
+  applier.handle(ev(["arch"], "comment:created"));
+  applier.handle(ev(["intake"], "issue:updated"));
+  await tick(t, 400);
+  assert.deepEqual(
+    calls
+      .filter((c) => c[0] === "removeFromList")
+      .map((c) => c[1])
+      .toSorted(),
+    ["arch", "intake"]
+  );
+  assert.equal(calls.filter((c) => c[0] === "map.remove").length, 0);
+  assert.equal(calls.filter((c) => c[0] === "setPeek" || c[0] === "toast").length, 0);
+  assert.equal(calls.filter((c) => c[0] === "fetchIssue").length, 1, "the peek is refreshed as usual");
+});
+test("peek closes when fetchIssue reports the issue as not found", async (t) => {
+  const { applier, calls, detail } = setup(t, {
+    peek: { projectId: "p", issueId: "arch", workspaceSlug: "w" },
+    present: { arch: { id: "arch" } },
+  });
+  detail.fetchIssue = async () => {
+    throw { error: "Issue not found" };
+  };
+  globalThis.__resp = () => [];
+  applier.handle(ev(["arch"], "issue:updated"));
+  await tick(t, 400);
+  assert.deepEqual(
+    calls.filter((c) => c[0] === "setPeek" || c[0] === "toast"),
+    [["setPeek", undefined], ["toast"]]
+  );
+});
+test("delete verb drops the map entry after the list entry", async (t) => {
+  const { applier, calls } = setup(t, { present: { gone: { id: "gone" } }, listed: ["gone"] });
+  globalThis.__resp = () => [];
+  applier.handle(ev(["gone"], "issue:deleted"));
+  await tick(t, 400);
+  const rm = calls.findIndex((c) => c[0] === "removeFromList");
+  assert.ok(rm >= 0 && rm < calls.findIndex((c) => c[0] === "map.remove"));
 });
 test("peek: missing id closes peek + toast, never fetchIssue", async (t) => {
   const { applier, calls } = setup(t, {
