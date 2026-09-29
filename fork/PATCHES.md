@@ -10,5 +10,7 @@ One line per touched upstream file: ticket id and the reason.
 - `apps/api/plane/api/serializers/__init__.py`: PLN-8, export the project pages serializers.
 - `apps/api/plane/utils/order_queryset.py`: PLN-8, add the page list `order_by` allowlist.
 - `apps/api/plane/bgtasks/page_version_task.py`: PLN-8, read `page.description_json` instead of the non-existent `page.description` (unconditional fix, two lines).
+- `apps/web/app/(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/layout.tsx` (PLN-5): mounts the `useLiveWorkItems` hook for the project.
+- `apps/web/core/store/issue/helpers/base-issues.store.ts` (PLN-5): adds `updateIssueList` to the `IBaseIssuesStore` interface (implementation already existed).
 
 New files (not upstream): `apps/live/src/controllers/events.controller.ts`, `apps/live/src/events/{config,origin,auth,hub}.ts`, `apps/live/tests/events/*`; `apps/api/plane/api/{urls,views,serializers}/page.py`, `apps/api/plane/utils/live_pages.py`, `apps/api/plane/tests/contract/api/test_pages.py`, `fork/PAGES.md`.
