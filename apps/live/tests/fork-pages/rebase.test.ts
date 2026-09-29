@@ -1,0 +1,102 @@
+/**
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
+import { describe, expect, it } from "vitest";
+import * as Y from "yjs";
+import {
+  convertBase64StringToBinaryData,
+  getBinaryDataFromDocumentEditorHTMLString,
+  getAllDocumentFormatsFromDocumentEditorBinaryData,
+} from "@plane/editor/lib";
+import { InvalidBaseStateError, rebase } from "@/fork-pages/rebase";
+
+const textOf = (html: string) =>
+  html
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+const occurrences = (haystack: string, needle: string) => haystack.split(needle).length - 1;
+
+const baseState = () => getBinaryDataFromDocumentEditorHTMLString("<p>old body</p>", "Old title");
+const formats = (state: Uint8Array) => getAllDocumentFormatsFromDocumentEditorBinaryData(state, true);
+
+describe("rebase", () => {
+  it("replaces body and title in the base lineage without duplicating content", () => {
+    const base = baseState();
+    // an editor that cached the base state before the rebase
+    const cachedClient = new Y.Doc();
+    Y.applyUpdate(cachedClient, base);
+
+    const result = rebase({ baseBinary: base, descriptionHtml: "<p>new body</p>", name: "New title" });
+    Y.applyUpdate(cachedClient, convertBase64StringToBinaryData(result.description_binary));
+
+    const merged = formats(Y.encodeStateAsUpdate(cachedClient));
+    expect(textOf(merged.contentHTML)).toBe("new body");
+    expect(occurrences(merged.contentHTML, "new body")).toBe(1);
+    expect(merged.contentHTML).not.toContain("old body");
+    expect(merged.titleHTML).toBe("New title");
+    expect(textOf(result.description_html)).toBe("new body");
+  });
+
+  it("CONTROL: fresh conversion merged onto the old cached state duplicates content", () => {
+    // Standing evidence for why the rebase keeps the stored lineage instead of converting from scratch.
+    const base = baseState();
+    const cachedClient = new Y.Doc();
+    Y.applyUpdate(cachedClient, base);
+
+    const fresh = getBinaryDataFromDocumentEditorHTMLString("<p>new body</p>", "New title");
+    Y.applyUpdate(cachedClient, fresh);
+
+    const merged = formats(Y.encodeStateAsUpdate(cachedClient));
+    expect(occurrences(merged.contentHTML, "new body")).toBe(1);
+    expect(occurrences(merged.contentHTML, "old body")).toBe(1); // old content survives next to the new
+    expect(textOf(merged.contentHTML)).toContain("old body");
+    expect(textOf(merged.contentHTML)).toContain("new body");
+  });
+
+  it("keeps the base state when merged with a client that made concurrent unrelated edits", () => {
+    const base = baseState();
+    const result = rebase({ baseBinary: base, descriptionHtml: "<p>new body</p>", name: null });
+    const again = rebase({
+      baseBinary: convertBase64StringToBinaryData(result.description_binary),
+      descriptionHtml: "<p>new body</p>",
+      name: null,
+    });
+    expect(occurrences(again.description_html, "new body")).toBe(1);
+  });
+
+  it("leaves the title untouched when name is null", () => {
+    const result = rebase({ baseBinary: baseState(), descriptionHtml: "<p>x</p>", name: null });
+    expect(formats(convertBase64StringToBinaryData(result.description_binary)).titleHTML).toBe("Old title");
+  });
+
+  it("leaves the body untouched when description_html is null", () => {
+    const result = rebase({ baseBinary: baseState(), descriptionHtml: null, name: "Renamed" });
+    expect(textOf(result.description_html)).toBe("old body");
+    expect(formats(convertBase64StringToBinaryData(result.description_binary)).titleHTML).toBe("Renamed");
+  });
+
+  it("clears the title for an empty name and returns json in the same shape as the html", () => {
+    const result = rebase({ baseBinary: baseState(), descriptionHtml: "<p>a</p>", name: "" });
+    expect(formats(convertBase64StringToBinaryData(result.description_binary)).titleHTML).toBe("");
+    expect(JSON.stringify(result.description_json)).toContain("a");
+  });
+
+  it("applies both changes in one transaction (single update event)", () => {
+    const base = baseState();
+    const result = rebase({ baseBinary: base, descriptionHtml: "<p>b</p>", name: "T" });
+    const observer = new Y.Doc();
+    Y.applyUpdate(observer, base);
+    let updates = 0;
+    observer.on("update", () => (updates += 1));
+    Y.applyUpdate(observer, convertBase64StringToBinaryData(result.description_binary));
+    expect(updates).toBe(1);
+  });
+
+  it("rejects a base that is not a Yjs update", () => {
+    expect(() =>
+      rebase({ baseBinary: new Uint8Array([255, 255, 255, 9]), descriptionHtml: "<p>x</p>", name: null })
+    ).toThrow(InvalidBaseStateError);
+  });
+});
