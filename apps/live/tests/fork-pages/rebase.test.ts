@@ -9,6 +9,7 @@ import * as Y from "yjs";
 import {
   convertBase64StringToBinaryData,
   getBinaryDataFromDocumentEditorHTMLString,
+  generateTitleProsemirrorJson,
   getAllDocumentFormatsFromDocumentEditorBinaryData,
 } from "@plane/editor/lib";
 import { TITLE_EDITOR_EXTENSIONS } from "@plane/editor";
@@ -53,6 +54,10 @@ describe("rebase", () => {
 
     const titleJson = TiptapTransformer.extensions(TITLE_EDITOR_EXTENSIONS as AnyExtension[]).fromYdoc(doc, "title");
     expect(collect(titleJson)).toBe("Round trip title");
+
+    // Pin the node structure too (a level 1 heading holding the text). The transformer output is identical
+    // to the generated JSON with no extra default attrs, so a plain toEqual is enough.
+    expect(titleJson).toEqual(generateTitleProsemirrorJson("Round trip title"));
   });
 
   it("CONTROL: fresh conversion merged onto the old cached state duplicates content", () => {
