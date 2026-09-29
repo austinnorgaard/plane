@@ -149,7 +149,7 @@ export class EventsHub {
     this.config = deps.config;
     this.auth = deps.auth;
     this.createSubscriber = deps.createSubscriber;
-    this.allowlist = buildAllowlist([...deps.config.allowedOrigins, deps.config.webUrl]);
+    this.allowlist = buildAllowlist([...deps.config.allowedOrigins, ...deps.config.corsOrigins, deps.config.webUrl]);
   }
 
   get socketCount() {

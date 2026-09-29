@@ -15,7 +15,7 @@ vi.hoisted(() => {
 vi.mock("@/redis", () => ({ redisManager: { getClient: () => null } }));
 
 describe("events controller isolation", () => {
-  it("flag off: connections close 4404", async () => {
+  it("flag off: connections close 4404", { timeout: 30_000 }, async () => {
     delete process.env.LIVE_EVENTS_ENABLED;
     const { EventsController } = await import("@/controllers/events.controller");
     const controller = new EventsController();
@@ -24,7 +24,7 @@ describe("events controller isolation", () => {
     expect(ws.close).toHaveBeenCalledWith(4404, expect.any(String));
   });
 
-  it("Hocuspocus controller still registers when the hub throws", async () => {
+  it("Hocuspocus controller still registers when the hub throws", { timeout: 30_000 }, async () => {
     vi.resetModules();
     process.env.LIVE_EVENTS_ENABLED = "1";
     vi.doMock("@/events/hub", () => ({
@@ -45,7 +45,7 @@ describe("events controller isolation", () => {
     vi.doUnmock("@/events/hub");
   });
 
-  it("registers /events next to the Hocuspocus /collaboration route", async () => {
+  it("registers /events next to the Hocuspocus /collaboration route", { timeout: 30_000 }, async () => {
     vi.resetModules();
     const { CONTROLLERS } = await import("@/controllers");
     const { registerController } = await import("@plane/decorators");

@@ -54,8 +54,19 @@ describe("origin allowlist", () => {
     expect(ok("https://app.example.org:8443", "app.example.org", undefined, empty)).toBe(false);
   });
 
-  it("does not read CORS_ALLOWED_ORIGINS", () => {
-    const cfg = parseEventsConfig({ CORS_ALLOWED_ORIGINS: "https://cors.example.net" });
-    expect(JSON.stringify(cfg)).not.toContain("cors.example.net");
+  it("reads CORS_ALLOWED_ORIGINS as part of the union, and an empty value adds nothing", () => {
+    const cfg = parseEventsConfig({
+      LIVE_EVENTS_ALLOWED_ORIGINS: "https://a.example.test",
+      CORS_ALLOWED_ORIGINS: " https://cors.example.test ,, ",
+      WEB_URL: "https://web.example.test",
+    });
+    const list = buildAllowlist([...cfg.allowedOrigins, ...cfg.corsOrigins, cfg.webUrl]);
+    expect([...list].toSorted()).toEqual([
+      "https://a.example.test",
+      "https://cors.example.test",
+      "https://web.example.test",
+    ]);
+    const empty = parseEventsConfig({ CORS_ALLOWED_ORIGINS: "" });
+    expect(buildAllowlist([...empty.allowedOrigins, ...empty.corsOrigins, empty.webUrl]).size).toBe(0);
   });
 });

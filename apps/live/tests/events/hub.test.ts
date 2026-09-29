@@ -79,6 +79,21 @@ describe("config and flag", () => {
   });
 });
 
+describe("origin allowlist from the environment", () => {
+  it("accepts an origin present only in CORS_ALLOWED_ORIGINS", async () => {
+    const { hub } = await started({ WEB_URL: "", CORS_ALLOWED_ORIGINS: "https://cors.example.test" });
+    const ws = await connect(hub, ALICE, { origin: "https://cors.example.test", host: "upstream.example.test" });
+    expect(ws.closeCode).toBeNull();
+  });
+
+  it("an empty CORS_ALLOWED_ORIGINS adds nothing and does not open everything", async () => {
+    const { hub } = await started({ WEB_URL: "", CORS_ALLOWED_ORIGINS: "" });
+    const foreign = new FakeSocket();
+    hub.handleConnection(foreign, headers({ origin: "https://cors.example.test", host: "upstream.example.test" }));
+    expect(foreign.closeCode).toBe(4403);
+  });
+});
+
 describe("handshake", () => {
   it("subscribes once to the pattern", async () => {
     const { sub } = await started();
