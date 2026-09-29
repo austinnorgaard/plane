@@ -69,6 +69,7 @@ from plane.utils.grouper import (
     issue_queryset_grouper,
 )
 from plane.utils.host import base_host
+from plane.utils.live_events import publish_work_item_event
 from plane.utils.issue_filters import issue_filters
 from plane.utils.order_queryset import order_issue_queryset
 from plane.utils.paginator import GroupedOffsetPaginator, SubGroupedOffsetPaginator
@@ -781,6 +782,8 @@ class BulkDeleteIssuesEndpoint(BaseAPIView):
         issues = Issue.issue_objects.filter(workspace__slug=slug, project_id=project_id, pk__in=issue_ids)
 
         total_issues = len(issues)
+        # Capture the ids before the rows are gone
+        deleted_issue_ids = [str(i) for i in issues.values_list("id", flat=True)]
 
         # First, delete all related cycle issues
         CycleIssue.objects.filter(issue__in=issues).delete()
@@ -790,6 +793,8 @@ class BulkDeleteIssuesEndpoint(BaseAPIView):
 
         # Finally, delete the issues themselves
         issues.delete()
+
+        publish_work_item_event(project_id, deleted_issue_ids, "issue", "deleted", request.user.id)
 
         return Response(
             {"message": f"{total_issues} issues were deleted"},
@@ -1179,6 +1184,8 @@ class IssueBulkUpdateDateEndpoint(BaseAPIView):
 
         # Bulk update issues
         Issue.objects.bulk_update(issues_to_update, ["start_date", "target_date"])
+
+        publish_work_item_event(project_id, [str(i.id) for i in issues_to_update], "issue", "updated", request.user.id)
 
         return Response({"message": "Issues updated successfully"}, status=status.HTTP_200_OK)
 
