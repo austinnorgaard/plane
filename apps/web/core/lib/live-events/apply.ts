@@ -11,7 +11,7 @@ import type { TIssue } from "@plane/types";
 // services
 import { IssueService } from "@/services/issue/issue.service";
 // local imports
-import type { TLiveEvent, TLiveIssueKind } from "./client";
+import type { TLiveEvent, TLiveItem } from "./client";
 import type { IProjectIssues } from "@/store/issue/project";
 import type { ICycleIssues } from "@/store/issue/cycle";
 import type { IModuleIssues } from "@/store/issue/module";
@@ -89,9 +89,30 @@ export const chunkIds = (ids: string[], size: number = CHUNK_SIZE): string[][] =
   return chunks;
 };
 
-/** Comment update or delete invalidates the cached comment list of the issue. */
-export const shouldResetComments = (kinds: Iterable<TLiveIssueKind>): boolean => {
-  for (const kind of kinds) if (kind === "comment_updated" || kind === "comment_deleted") return true;
+export const changeKey = (kind: string, verb: string) => `${kind}:${verb}`;
+
+/** kinds x verbs of one hub item, as the keys the applier accumulates per issue */
+export const itemChangeKeys = (item: Pick<TLiveItem, "kinds" | "verbs">): string[] => {
+  const kinds = item.kinds.length > 0 ? item.kinds : ["issue"];
+  const verbs = item.verbs.length > 0 ? item.verbs : ["updated"];
+  return kinds.flatMap((kind) => verbs.map((verb) => changeKey(kind, verb)));
+};
+
+/** True when every actor of the item is the current user (an item without actors is never "own"). */
+export const isOwnItem = (item: Pick<TLiveItem, "actor_ids">, currentUserId: string | undefined): boolean =>
+  !!currentUserId && item.actor_ids.length > 0 && item.actor_ids.every((id) => id === currentUserId);
+
+const isCommentKey = (key: string) => key.startsWith("comment:") || key.startsWith("comment_reaction:");
+
+/** A comment was updated, deleted or reacted to: the cached comment list of the issue is stale. */
+export const shouldResetComments = (keys: Iterable<string>): boolean => {
+  for (const key of keys) if (isCommentKey(key) && key !== changeKey("comment", "created")) return true;
+  return false;
+};
+
+/** Any comment change at all. */
+export const hasCommentChange = (keys: Iterable<string>): boolean => {
+  for (const key of keys) if (isCommentKey(key)) return true;
   return false;
 };
 
@@ -125,7 +146,7 @@ type TListTarget = {
 
 export class LiveWorkItemsApplier {
   private issueService = new IssueService();
-  private pending = new Map<string, Set<TLiveIssueKind>>();
+  private pending = new Map<string, Set<string>>();
   private debounceTimer: ReturnType<typeof setTimeout> | undefined;
   private debounceStartedAt = 0;
   private coarseTimer: ReturnType<typeof setTimeout> | undefined;
@@ -135,7 +156,11 @@ export class LiveWorkItemsApplier {
   private peekTrailingTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private disposed = false;
 
-  constructor(private deps: ILiveApplierDeps) {}
+  private deps: ILiveApplierDeps;
+
+  constructor(deps: ILiveApplierDeps) {
+    this.deps = deps;
+  }
 
   dispose() {
     this.disposed = true;
@@ -152,32 +177,44 @@ export class LiveWorkItemsApplier {
   handle(event: TLiveEvent) {
     if (this.disposed || event.project_id !== this.deps.projectId) return;
 
-    if (event.type === "full_refresh" || event.type === "resync") {
+    if (event.type === "revoked") {
+      // access lost: close an open peek, the lists follow through the coarse refresh
+      if (this.getOpenIssueIds().length > 0) {
+        this.deps.issueDetail.setPeekIssue(undefined);
+        this.deps.onIssueMissingFromPeek();
+      }
+      this.scheduleCoarse(true);
+      return;
+    }
+
+    if (event.type === "resync" || event.full_refresh) {
       this.scheduleCoarse(true);
       // an open peek is not part of any list, refresh it too
       const peeked = this.getOpenIssueIds();
-      if (peeked.length > 0) this.enqueue(peeked, "updated");
+      if (peeked.length > 0) this.enqueue(peeked, [changeKey("issue", "updated")]);
       return;
     }
 
     const currentUserId = this.deps.getCurrentUserId();
-    if (event.actor_id && currentUserId && event.actor_id === currentUserId) {
-      // the user's own change is already applied locally: delay it, never drop it
-      const timer = setTimeout(() => {
-        this.ownActorTimers.delete(timer);
-        this.enqueue(event.issue_ids, event.kind);
-      }, OWN_ACTOR_DELAY_MS);
-      this.ownActorTimers.add(timer);
-      return;
+    const own: TLiveItem[] = [];
+    for (const item of event.items) {
+      if (isOwnItem(item, currentUserId)) own.push(item);
+      else this.enqueue([item.issue_id], itemChangeKeys(item));
     }
-    this.enqueue(event.issue_ids, event.kind);
+    if (own.length === 0) return;
+    // the user's own change is already applied locally: delay it, never drop it
+    const timer = setTimeout(() => {
+      this.ownActorTimers.delete(timer);
+      own.forEach((item) => this.enqueue([item.issue_id], itemChangeKeys(item)));
+    }, OWN_ACTOR_DELAY_MS);
+    this.ownActorTimers.add(timer);
   }
 
-  private enqueue(issueIds: string[], kind: TLiveIssueKind) {
+  private enqueue(issueIds: string[], keys: string[]) {
     if (issueIds.length === 0) return;
     for (const id of issueIds) {
-      const kinds = this.pending.get(id) ?? new Set<TLiveIssueKind>();
-      kinds.add(kind);
+      const kinds = this.pending.get(id) ?? new Set<string>();
+      keys.forEach((key) => kinds.add(key));
       this.pending.set(id, kinds);
     }
     const now = Date.now();
@@ -338,7 +375,7 @@ export class LiveWorkItemsApplier {
 
   // ---- peek / detail ----
 
-  private async refreshOpenIssues(batch: Map<string, Set<TLiveIssueKind>>, missing: Set<string>) {
+  private async refreshOpenIssues(batch: Map<string, Set<string>>, missing: Set<string>) {
     const refreshes: Promise<void>[] = [];
     for (const issueId of this.getOpenIssueIds()) {
       const kinds = batch.get(issueId);
@@ -354,9 +391,9 @@ export class LiveWorkItemsApplier {
     await Promise.all(refreshes);
   }
 
-  private async refreshIssueDetail(issueId: string, kinds: Set<TLiveIssueKind>) {
+  private async refreshIssueDetail(issueId: string, kinds: Set<string>) {
     const { workspaceSlug, projectId, issueDetail } = this.deps;
-    const hasCommentEvent = [...kinds].some((kind) => kind.startsWith("comment_"));
+    const hasCommentEvent = hasCommentChange(kinds);
     // fetchIssue refetches activities and comments itself; otherwise they are refetched here
     const fetchedIssue = this.throttledFetchIssue(issueId, () => {
       if (shouldResetComments(kinds)) this.resetComments(issueId);

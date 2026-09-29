@@ -64,6 +64,7 @@ export const useLiveWorkItems = (workspaceSlug: string | undefined, projectId: s
         return filters?.richFilters;
       },
       issueDetail: s.issueDetail,
+      // TODO: move the text to i18n keys (needs packages/i18n locale entries)
       onIssueMissingFromPeek: () =>
         setToast({
           type: TOAST_TYPE.INFO,
@@ -71,7 +72,7 @@ export const useLiveWorkItems = (workspaceSlug: string | undefined, projectId: s
           message: "This work item was deleted or you no longer have access to it.",
         }),
     });
-    const unsubscribe = getLiveEventsClient().subscribe(projectId, (event) => applier.handle(event));
+    const unsubscribe = getLiveEventsClient().subscribe(workspaceSlug, projectId, (event) => applier.handle(event));
     return () => {
       unsubscribe();
       applier.dispose();

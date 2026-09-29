@@ -8,42 +8,57 @@
 import { LIVE_BASE_PATH, LIVE_BASE_URL } from "@plane/constants";
 
 /**
- * Frame contract (ids only, no content on the wire).
+ * Frame contract, mirrored from the live hub (apps/live/src/events/hub.ts). Ids only, no content on the wire.
  *
- * server -> client
- *  - { type: "ping" }                                     keep-alive, sent periodically by the server
- *  - { type: "issues", project_id, issue_ids, kind, actor_id? }
- *  - { type: "full_refresh", project_id }                 the server lost track, refetch everything
  * client -> server
- *  - { type: "subscribe", project_id }
- *  - { type: "unsubscribe", project_id }
+ *  - { type: "subscribe", workspace_slug, project_ids }
+ *  - { type: "unsubscribe", project_ids }
+ *  - { type: "pong" }                       answer to a server ping
+ * server -> client
+ *  - { type: "ping" }
+ *  - { type: "events", project_id, items: [{ issue_id, kinds, verbs, actor_ids }], full_refresh? }
+ *  - { type: "resync" }                     the hub lost its Redis subscription, every project must resync
+ *  - { type: "subscribed", project_ids, denied }
+ *  - { type: "unsubscribed", project_ids }
+ *  - { type: "revoked", project_ids }       access to these projects was lost
  */
-export type TLiveIssueKind =
-  | "created"
-  | "updated"
-  | "deleted"
-  | "comment_created"
-  | "comment_updated"
-  | "comment_deleted"
-  | "activity";
+export type TLiveKind =
+  | "issue"
+  | "comment"
+  | "cycle"
+  | "module"
+  | "link"
+  | "attachment"
+  | "issue_relation"
+  | "issue_reaction"
+  | "comment_reaction"
+  | "intake";
+export type TLiveVerb = "created" | "updated" | "deleted" | "removed" | "archived" | "unarchived" | "restored";
 
-export type TLiveIssuesFrame = {
-  type: "issues";
-  project_id: string;
-  issue_ids: string[];
-  kind: TLiveIssueKind;
-  actor_id?: string;
-};
-export type TLiveFullRefreshFrame = { type: "full_refresh"; project_id: string };
-/** emitted locally, never sent by the server: the socket was re-established, so anything may have been missed */
+export type TLiveItem = { issue_id: string; kinds: string[]; verbs: string[]; actor_ids: string[] };
+
+export type TLiveEventsFrame = { type: "events"; project_id: string; items: TLiveItem[]; full_refresh?: boolean };
+/** emitted locally: the socket was re-established or the hub resynced, so anything may have been missed */
 export type TLiveResyncFrame = { type: "resync"; project_id: string };
+/** emitted locally: access to the project was lost, the project is no longer subscribed */
+export type TLiveRevokedFrame = { type: "revoked"; project_id: string };
 
-export type TLiveEvent = TLiveIssuesFrame | TLiveFullRefreshFrame | TLiveResyncFrame;
+export type TLiveEvent = TLiveEventsFrame | TLiveResyncFrame | TLiveRevokedFrame;
 export type TLiveListener = (event: TLiveEvent) => void;
 
+type TServerFrame =
+  | TLiveEventsFrame
+  | { type: "ping" }
+  | { type: "resync" }
+  | { type: "subscribed"; project_ids: string[]; denied: string[] }
+  | { type: "unsubscribed" }
+  | { type: "revoked"; project_ids: string[] };
+
+export const LIVE_CLOSE_BAD_MESSAGE = 4400;
 export const LIVE_CLOSE_UNAUTHENTICATED = 4401;
 export const LIVE_CLOSE_FORBIDDEN = 4403;
 export const LIVE_CLOSE_NOT_FOUND = 4404;
+export const LIVE_CLOSE_TOO_LARGE = 4413;
 export const LIVE_CLOSE_RATE_LIMITED = 4429;
 
 export const BACKOFF_MIN_MS = 1000;
@@ -67,8 +82,12 @@ export const decideOnClose = (code: number): TCloseDecision => {
   switch (code) {
     case LIVE_CLOSE_UNAUTHENTICATED:
       return "pause";
+    // 4403 origin not allowed, 4404 live events disabled: stopped until the next full page load
     case LIVE_CLOSE_FORBIDDEN:
     case LIVE_CLOSE_NOT_FOUND:
+    // 4400 and 4413 mean the server rejected what this client sent; retrying would only repeat it
+    case LIVE_CLOSE_BAD_MESSAGE:
+    case LIVE_CLOSE_TOO_LARGE:
       return "stop";
     case LIVE_CLOSE_RATE_LIMITED:
       return "retry-max";
@@ -79,8 +98,11 @@ export const decideOnClose = (code: number): TCloseDecision => {
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
 
-/** Validates a raw text frame. Returns undefined for keep-alives and anything malformed. */
-export const parseFrame = (raw: unknown): TLiveIssuesFrame | TLiveFullRefreshFrame | "ping" | undefined => {
+const stringArray = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+
+/** Validates a raw text frame. Returns undefined for anything malformed or unknown. */
+export const parseFrame = (raw: unknown): TServerFrame | undefined => {
   if (typeof raw !== "string") return undefined;
   let data: unknown;
   try {
@@ -89,23 +111,36 @@ export const parseFrame = (raw: unknown): TLiveIssuesFrame | TLiveFullRefreshFra
     return undefined;
   }
   if (!isRecord(data)) return undefined;
-  if (data.type === "ping") return "ping";
-  if (typeof data.project_id !== "string") return undefined;
-  if (data.type === "full_refresh") return { type: "full_refresh", project_id: data.project_id };
-  if (data.type === "issues" && Array.isArray(data.issue_ids) && typeof data.kind === "string") {
-    return {
-      type: "issues",
-      project_id: data.project_id,
-      issue_ids: data.issue_ids.filter((id): id is string => typeof id === "string"),
-      kind: data.kind as TLiveIssueKind,
-      actor_id: typeof data.actor_id === "string" ? data.actor_id : undefined,
-    };
+  switch (data.type) {
+    case "ping":
+    case "resync":
+    case "unsubscribed":
+      return { type: data.type };
+    case "subscribed":
+      return { type: "subscribed", project_ids: stringArray(data.project_ids), denied: stringArray(data.denied) };
+    case "revoked":
+      return { type: "revoked", project_ids: stringArray(data.project_ids) };
+    case "events": {
+      if (typeof data.project_id !== "string" || !Array.isArray(data.items)) return undefined;
+      const items: TLiveItem[] = [];
+      for (const item of data.items) {
+        if (!isRecord(item) || typeof item.issue_id !== "string") continue;
+        items.push({
+          issue_id: item.issue_id,
+          kinds: stringArray(item.kinds),
+          verbs: stringArray(item.verbs),
+          actor_ids: stringArray(item.actor_ids),
+        });
+      }
+      return { type: "events", project_id: data.project_id, items, full_refresh: data.full_refresh === true };
+    }
+    default:
+      return undefined;
   }
-  return undefined;
 };
 
 /** Number of ids a frame adds to the hidden-tab buffer (a full refresh counts as one). */
-const frameWeight = (event: TLiveEvent) => (event.type === "issues" ? Math.max(1, event.issue_ids.length) : 1);
+const frameWeight = (event: TLiveEvent) => (event.type === "events" ? Math.max(1, event.items.length) : 1);
 
 export const buildLiveEventsUrl = (): string | undefined => {
   if (typeof window === "undefined") return undefined;
@@ -127,6 +162,9 @@ export const buildLiveEventsUrl = (): string | undefined => {
  */
 export class LiveEventsClient {
   private listeners = new Map<string, Set<TLiveListener>>();
+  private workspaceSlugs = new Map<string, string>();
+  /** projects the hub refused; not re-requested until every subscriber of the project is gone */
+  private denied = new Set<string>();
   private socket: WebSocket | undefined;
   private socketAbort: AbortController | undefined;
   private attempt = 0;
@@ -144,7 +182,7 @@ export class LiveEventsClient {
   private globalListenersAttached = false;
 
   /** Subscribes to a project. Returns the unsubscribe function. */
-  subscribe(projectId: string, listener: TLiveListener): () => void {
+  subscribe(workspaceSlug: string, projectId: string, listener: TLiveListener): () => void {
     let set = this.listeners.get(projectId);
     const isFirstForProject = !set;
     if (!set) {
@@ -156,7 +194,8 @@ export class LiveEventsClient {
     // a navigation counts as user activity: it lifts a 4401 pause
     this.pausedUntilActivity = false;
 
-    if (isFirstForProject) this.send({ type: "subscribe", project_id: projectId });
+    this.workspaceSlugs.set(projectId, workspaceSlug);
+    if (isFirstForProject) this.sendSubscribe([projectId]);
     this.ensureConnected();
 
     let active = true;
@@ -168,7 +207,9 @@ export class LiveEventsClient {
       current.delete(listener);
       if (current.size > 0) return;
       this.listeners.delete(projectId);
-      this.send({ type: "unsubscribe", project_id: projectId });
+      this.workspaceSlugs.delete(projectId);
+      this.denied.delete(projectId);
+      this.send({ type: "unsubscribe", project_ids: [projectId] });
       if (this.listeners.size === 0) this.shutdown();
     };
   }
@@ -210,7 +251,9 @@ export class LiveEventsClient {
         this.attempt = 0;
         this.forceMaxBackoff = false;
         this.resetWatchdog();
-        for (const projectId of this.listeners.keys()) this.send({ type: "subscribe", project_id: projectId });
+        // roles may have changed while the socket was down: ask again
+        this.denied.clear();
+        this.sendSubscribe([...this.listeners.keys()]);
         // anything may have been missed while the socket was down
         if (this.needsResync) {
           this.needsResync = false;
@@ -224,8 +267,7 @@ export class LiveEventsClient {
       (message) => {
         this.resetWatchdog();
         const frame = parseFrame(message.data);
-        if (!frame || frame === "ping") return;
-        this.dispatch(frame);
+        if (frame) this.handleFrame(frame);
       },
       { signal }
     );
@@ -249,6 +291,9 @@ export class LiveEventsClient {
     const decision = decideOnClose(code);
     if (decision === "stop") {
       this.stopped = true;
+      if (code === LIVE_CLOSE_BAD_MESSAGE || code === LIVE_CLOSE_TOO_LARGE) {
+        console.error(`live events stopped: the server rejected a message (close code ${code})`);
+      }
       return;
     }
     if (decision === "pause") {
@@ -293,12 +338,55 @@ export class LiveEventsClient {
     this.attempt = 0;
     this.forceMaxBackoff = false;
     this.needsResync = false;
+    this.denied.clear();
     this.hiddenBuffer = [];
     this.hiddenBufferWeight = 0;
     this.hiddenOverflow = false;
   }
 
-  private send(payload: { type: "subscribe" | "unsubscribe"; project_id: string }) {
+  /** one subscribe message per workspace, denied projects are skipped */
+  private sendSubscribe(projectIds: string[]) {
+    const bySlug = new Map<string, string[]>();
+    for (const projectId of projectIds) {
+      const slug = this.workspaceSlugs.get(projectId);
+      if (!slug || this.denied.has(projectId)) continue;
+      bySlug.set(slug, [...(bySlug.get(slug) ?? []), projectId]);
+    }
+    for (const [workspace_slug, project_ids] of bySlug) this.send({ type: "subscribe", workspace_slug, project_ids });
+  }
+
+  private handleFrame(frame: TServerFrame) {
+    switch (frame.type) {
+      case "ping":
+        this.send({ type: "pong" });
+        return;
+      case "events":
+        this.dispatch(frame);
+        return;
+      case "resync":
+        // sent by the hub without a project: every project resyncs
+        this.emitResync();
+        return;
+      case "subscribed":
+        frame.denied.forEach((projectId) => this.denied.add(projectId));
+        return;
+      case "revoked":
+        for (const projectId of frame.project_ids) {
+          this.denied.add(projectId);
+          this.emit({ type: "revoked", project_id: projectId });
+        }
+        return;
+      case "unsubscribed":
+        return;
+    }
+  }
+
+  private send(
+    payload:
+      | { type: "subscribe"; workspace_slug: string; project_ids: string[] }
+      | { type: "unsubscribe"; project_ids: string[] }
+      | { type: "pong" }
+  ) {
     if (this.socket?.readyState !== 1) return; // subscriptions are re-sent on open
     try {
       this.socket.send(JSON.stringify(payload));
