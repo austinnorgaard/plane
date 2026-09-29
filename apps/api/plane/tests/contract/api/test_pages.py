@@ -818,3 +818,42 @@ class TestConcurrentCreate:
             t.join(timeout=60)
         assert sorted(results) == [201, 409, 409, 409]
         assert Page.objects.filter(external_id="race").count() == 1
+
+
+@pytest.mark.contract
+class TestRebaseResultStorage:
+    """What is stored when the live service returns empty or partial values (branch b)."""
+
+    def _patch(self, session_client, project, create_user, mocker, answer, body):
+        live = mocker.patch(LIVE)
+        live.LiveServiceError = live_pages.LiveServiceError
+        live.rebase_page.return_value = answer
+        live.is_page_loaded.return_value = False
+        page = binary_page(project, create_user)
+        response = session_client.patch(detail(project, page), body, format="json")
+        page.refresh_from_db()
+        return response, page
+
+    def test_returned_empty_html_is_stored_as_empty_paragraph(self, session_client, project, create_user, mocker):
+        answer = {**rebase_answer(), "description_html": ""}
+        response, page = self._patch(session_client, project, create_user, mocker, answer, {"name": "n"})
+        assert response.status_code == 200
+        assert page.description_html == "<p></p>"
+
+    def test_returned_empty_json_is_stored(self, session_client, project, create_user, mocker):
+        answer = {**rebase_answer(), "description_json": {}}
+        page_json = {"type": "doc"}
+        live = mocker.patch(LIVE)
+        live.LiveServiceError = live_pages.LiveServiceError
+        live.rebase_page.return_value = answer
+        live.is_page_loaded.return_value = False
+        page = binary_page(project, create_user, description_json=page_json)
+        assert session_client.patch(detail(project, page), {"name": "n"}, format="json").status_code == 200
+        page.refresh_from_db()
+        assert page.description_json == {}
+
+    def test_missing_html_and_json_keep_stored_values(self, session_client, project, create_user, mocker):
+        answer = {"description_binary": rebase_answer()["description_binary"]}
+        response, page = self._patch(session_client, project, create_user, mocker, answer, {"name": "n"})
+        assert response.status_code == 200
+        assert page.description_html == "<p>hello</p>"

@@ -275,11 +275,13 @@ class PageDetailAPIEndpoint(PageBaseAPIEndpoint):
                 if "name" in data:
                     page.name = data["name"]
                     update_fields.append("name")
-                new_html = validated.get("description_html") or data.get("description_html")
-                if new_html:
-                    page.description_html = new_html
+                if "description_html" in validated:
+                    page.description_html = validated["description_html"] or "<p></p>"
                     update_fields.append("description_html")
-                if validated.get("description_json"):
+                elif data.get("description_html"):
+                    page.description_html = data["description_html"]
+                    update_fields.append("description_html")
+                if validated.get("description_json") is not None:
                     page.description_json = validated["description_json"]
                     update_fields.append("description_json")
 
