@@ -3,12 +3,15 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { TiptapTransformer } from "@hocuspocus/transformer";
+import type { AnyExtension } from "@tiptap/core";
 import * as Y from "yjs";
 import {
   convertBase64StringToBinaryData,
   getBinaryDataFromDocumentEditorHTMLString,
   getAllDocumentFormatsFromDocumentEditorBinaryData,
 } from "@plane/editor/lib";
+import { TITLE_EDITOR_EXTENSIONS } from "@plane/editor";
 import { InvalidBaseStateError, rebase } from "@/fork-pages/rebase";
 
 const textOf = (html: string) =>
@@ -17,6 +20,10 @@ const textOf = (html: string) =>
     .replace(/\s+/g, " ")
     .trim();
 const occurrences = (haystack: string, needle: string) => haystack.split(needle).length - 1;
+
+type JsonNode = { text?: string; content?: unknown[] };
+const collect = (node: JsonNode): string =>
+  typeof node.text === "string" ? node.text : (node.content ?? []).map((c) => collect(c as JsonNode)).join("");
 
 const baseState = () => getBinaryDataFromDocumentEditorHTMLString("<p>old body</p>", "Old title");
 const formats = (state: Uint8Array) => getAllDocumentFormatsFromDocumentEditorBinaryData(state, true);
@@ -37,6 +44,15 @@ describe("rebase", () => {
     expect(merged.contentHTML).not.toContain("old body");
     expect(merged.titleHTML).toBe("New title");
     expect(textOf(result.description_html)).toBe("new body");
+  });
+
+  it("round-trips the new title through the real title editor extensions", () => {
+    const result = rebase({ baseBinary: baseState(), descriptionHtml: "<p>new body</p>", name: "Round trip title" });
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, convertBase64StringToBinaryData(result.description_binary));
+
+    const titleJson = TiptapTransformer.extensions(TITLE_EDITOR_EXTENSIONS as AnyExtension[]).fromYdoc(doc, "title");
+    expect(collect(titleJson)).toBe("Round trip title");
   });
 
   it("CONTROL: fresh conversion merged onto the old cached state duplicates content", () => {
