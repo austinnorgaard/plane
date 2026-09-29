@@ -44,7 +44,7 @@ def make_issues(db, workspace, project, create_user):
 @pytest.fixture
 def redis_mock(monkeypatch):
     monkeypatch.setenv("LIVE_EVENTS_ENABLED", "1")
-    with mock.patch("plane.utils.live_events.redis_instance") as factory:
+    with mock.patch("plane.utils.live_events._publish_client") as factory:
         yield factory.return_value
 
 
@@ -120,7 +120,7 @@ class TestBulkEndpointPublishes:
         monkeypatch.delenv("LIVE_EVENTS_ENABLED", raising=False)
         ids = [str(i.id) for i in make_issues(1)]
         url = f"/api/workspaces/{workspace.slug}/projects/{project.id}/bulk-delete-issues/"
-        with mock.patch("plane.utils.live_events.redis_instance") as factory:
+        with mock.patch("plane.utils.live_events._publish_client") as factory:
             assert session_client.delete(url, {"issue_ids": ids}, format="json").status_code == 200
             factory.assert_not_called()
 

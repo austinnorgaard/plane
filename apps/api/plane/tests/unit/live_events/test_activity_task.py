@@ -86,6 +86,13 @@ class TestIssueActivityLiveEvent:
             assert run("comment.activity.created", issue_id=str(uuid.uuid4())) is None
         publish.assert_not_called()
 
+    def test_backstop_logs_exception_type(self, publish, db_mocks, caplog):
+        publish.side_effect = RuntimeError("redis://:pw-marker@host-marker")
+        with mock.patch.object(task, "create_comment_activity"), caplog.at_level("WARNING"):
+            run("comment.activity.created", issue_id=str(uuid.uuid4()))
+        assert "RuntimeError" in caplog.text
+        assert "pw-marker" not in caplog.text
+
     def test_in_memory_activities_feed_the_extractor(self, publish, db_mocks):
         a, b = str(uuid.uuid4()), str(uuid.uuid4())
 

@@ -17,7 +17,7 @@ ACTOR = str(uuid.uuid4())
 
 @pytest.fixture
 def redis_mock():
-    with mock.patch.object(live_events, "redis_instance") as factory:
+    with mock.patch.object(live_events, "_publish_client") as factory:
         yield factory.return_value
 
 
@@ -58,7 +58,7 @@ class TestPublishWorkItemEvent:
             monkeypatch.delenv("LIVE_EVENTS_ENABLED", raising=False)
         else:
             monkeypatch.setenv("LIVE_EVENTS_ENABLED", value)
-        with mock.patch.object(live_events, "redis_instance") as factory:
+        with mock.patch.object(live_events, "_publish_client") as factory:
             assert publish_work_item_event(PROJECT, [str(uuid.uuid4())], "issue", "updated", ACTOR) is False
             factory.assert_not_called()
 
@@ -67,7 +67,7 @@ class TestPublishWorkItemEvent:
         assert publish_work_item_event(PROJECT, [str(uuid.uuid4())], "issue", "updated", ACTOR) is False
 
     def test_redis_connect_failure_is_swallowed(self, enabled):
-        with mock.patch.object(live_events, "redis_instance", side_effect=RuntimeError("no url")):
+        with mock.patch.object(live_events, "_publish_client", side_effect=RuntimeError("no url")):
             assert publish_work_item_event(PROJECT, [str(uuid.uuid4())], "issue", "updated", ACTOR) is False
 
     def test_unserialisable_input_is_swallowed(self, enabled, redis_mock):
@@ -80,3 +80,37 @@ class TestPublishWorkItemEvent:
             publish_work_item_event(PROJECT, [str(uuid.uuid4())], "issue", "updated", ACTOR)
         assert "pw-marker" not in caplog.text
         assert "host-marker" not in caplog.text
+
+
+@pytest.mark.unit
+class TestPublishClient:
+    def test_client_has_short_timeouts(self, settings):
+        settings.REDIS_SSL = False
+        settings.REDIS_URL = "redis://localhost:6379/"
+        with mock.patch.object(live_events.redis.Redis, "from_url") as from_url:
+            live_events._publish_client()
+        kwargs = from_url.call_args.kwargs
+        assert kwargs["socket_connect_timeout"] == live_events.SOCKET_TIMEOUT_SECONDS
+        assert kwargs["socket_timeout"] == live_events.SOCKET_TIMEOUT_SECONDS
+
+    def test_ssl_client_has_short_timeouts(self, settings):
+        settings.REDIS_SSL = True
+        settings.REDIS_URL = "rediss://:pw-marker@host-marker:6380/0"
+        with mock.patch.object(live_events.redis, "Redis") as cls:
+            live_events._publish_client()
+        kwargs = cls.call_args.kwargs
+        assert kwargs["ssl"] is True
+        assert kwargs["socket_timeout"] == live_events.SOCKET_TIMEOUT_SECONDS
+
+    def test_client_is_closed_after_publish(self, enabled, redis_mock):
+        publish_work_item_event(PROJECT, [str(uuid.uuid4())], "issue", "updated", ACTOR)
+        redis_mock.close.assert_called_once()
+
+    def test_client_is_closed_after_publish_failure(self, enabled, redis_mock):
+        redis_mock.publish.side_effect = ConnectionError("down")
+        publish_work_item_event(PROJECT, [str(uuid.uuid4())], "issue", "updated", ACTOR)
+        redis_mock.close.assert_called_once()
+
+    def test_close_failure_is_swallowed(self, enabled, redis_mock):
+        redis_mock.close.side_effect = RuntimeError("x")
+        assert publish_work_item_event(PROJECT, [str(uuid.uuid4())], "issue", "updated", ACTOR) is True

@@ -4,6 +4,7 @@
 
 # Python imports
 import json
+import logging
 
 
 # Third Party imports
@@ -1500,6 +1501,8 @@ def create_intake_activity(
         )
 
 
+logger = logging.getLogger("plane.worker")
+
 LIVE_EVENT_KINDS = {
     "issue",
     "comment",
@@ -1534,8 +1537,8 @@ def _publish_live_event(type, requested_data, current_instance, issue_id, actor_
             actor_id,
             settle=type in LIVE_EVENT_SETTLE_TYPES,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("live event publish skipped: %s", e.__class__.__name__)
 
 
 # Receive message from room group

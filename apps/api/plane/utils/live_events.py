@@ -29,17 +29,33 @@ import logging
 import os
 import re
 import uuid
+from urllib.parse import urlparse
 
-# Module imports
-from plane.settings.redis import redis_instance
+# Third party imports
+import redis
+
+# Django imports
+from django.conf import settings
 
 logger = logging.getLogger("plane.worker")
 
 CHANNEL_PREFIX = "plane:live-events:"
 MAX_IDS = 500
+SOCKET_TIMEOUT_SECONDS = 1
 ALL_IDS = "*"
 
 _UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
+def _publish_client():
+    """A short-timeout Redis client, so a hung Redis cannot stall a request or task."""
+    timeouts = {"socket_connect_timeout": SOCKET_TIMEOUT_SECONDS, "socket_timeout": SOCKET_TIMEOUT_SECONDS}
+    if settings.REDIS_SSL:
+        url = urlparse(settings.REDIS_URL)
+        return redis.Redis(
+            host=url.hostname, port=url.port, password=url.password, ssl=True, ssl_cert_reqs=None, **timeouts
+        )
+    return redis.Redis.from_url(settings.REDIS_URL, db=0, **timeouts)
 
 
 def live_events_enabled():
@@ -48,6 +64,7 @@ def live_events_enabled():
 
 def publish_work_item_event(project_id, issue_ids, kind, verb, actor_id, settle=False):
     """Publish an ids-only event for a project. Never raises."""
+    client = None
     try:
         if not live_events_enabled():
             return False
@@ -64,12 +81,19 @@ def publish_work_item_event(project_id, issue_ids, kind, verb, actor_id, settle=
             "actor_id": str(actor_id) if actor_id else None,
             "settle": bool(settle),
         }
-        redis_instance().publish(CHANNEL_PREFIX + str(project_id), json.dumps(payload))
+        client = _publish_client()
+        client.publish(CHANNEL_PREFIX + str(project_id), json.dumps(payload))
         return True
     except Exception as e:
         # Log the exception type only; connection errors can carry the Redis URL.
         logger.warning("live event publish failed: %s", type(e).__name__)
         return False
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
 
 
 def _load(value):
