@@ -8,6 +8,7 @@ These need the database (run with fork/test/api-tests.sh).
 """
 
 import json
+import time
 import uuid
 from unittest import mock
 
@@ -67,7 +68,8 @@ class TestBulkEndpointPublishes:
         channel, payload = published(redis_mock)
         assert channel == f"plane:live-events:{project.id}"
         assert (payload["kind"], payload["verb"]) == ("issue", "deleted")
-        assert sorted(payload["ids"]) == ids
+        assert sorted(payload["issue_ids"]) == ids
+        assert isinstance(payload["ts"], (int, float)) and abs(payload["ts"] - time.time()) < 60
 
     def test_bulk_delete_400_publishes_nothing(self, session_client, workspace, project, redis_mock):
         url = f"/api/workspaces/{workspace.slug}/projects/{project.id}/bulk-delete-issues/"
@@ -86,7 +88,7 @@ class TestBulkEndpointPublishes:
         assert Issue.objects.filter(pk__in=ids, archived_at__isnull=False).count() == 2
         _, payload = published(redis_mock)
         assert (payload["kind"], payload["verb"]) == ("issue", "updated")
-        assert sorted(payload["ids"]) == ids
+        assert sorted(payload["issue_ids"]) == ids
 
     def test_bulk_archive_invalid_state_publishes_nothing(
         self, session_client, workspace, project, make_issues, redis_mock
@@ -107,7 +109,7 @@ class TestBulkEndpointPublishes:
             response = session_client.post(url, {"updates": updates}, format="json")
         assert response.status_code == status.HTTP_200_OK
         _, payload = published(redis_mock)
-        assert sorted(payload["ids"]) == sorted(str(i.id) for i in issues)
+        assert sorted(payload["issue_ids"]) == sorted(str(i.id) for i in issues)
 
     def test_redis_down_does_not_fail_the_mutation(self, session_client, workspace, project, make_issues, redis_mock):
         redis_mock.publish.side_effect = ConnectionError("down")

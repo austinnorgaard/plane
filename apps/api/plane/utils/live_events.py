@@ -13,9 +13,10 @@ Channel: ``plane:live-events:<project_id>``
 Payload (JSON)::
 
     {"v": 1, "project_id": "<uuid>", "kind": "<entity>", "verb": "<verb>",
-     "ids": ["<uuid>", ...] | "*", "actor_id": "<uuid>" | null, "settle": bool}
+     "issue_ids": ["<uuid>", ...] | "*", "actor_id": "<uuid>" | null,
+     "ts": <epoch seconds, float>, "settle": bool}
 
-``ids`` is ``"*"`` when the affected set is unknown or larger than
+``ts`` is the publish time. ``issue_ids`` is ``"*"`` when the affected set is unknown or larger than
 ``MAX_IDS``, meaning "refetch everything in the project". ``settle`` asks the
 subscriber to also refetch after a short delay, for deletes whose rows may
 still be visible to a read that races the write.
@@ -28,6 +29,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from urllib.parse import urlparse
 
@@ -77,8 +79,9 @@ def publish_work_item_event(project_id, issue_ids, kind, verb, actor_id, settle=
             "project_id": str(project_id),
             "kind": kind,
             "verb": verb,
-            "ids": issue_ids,
+            "issue_ids": issue_ids,
             "actor_id": str(actor_id) if actor_id else None,
+            "ts": time.time(),
             "settle": bool(settle),
         }
         client = _publish_client()

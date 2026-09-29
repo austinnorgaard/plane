@@ -3,6 +3,7 @@
 # See the LICENSE file for details.
 
 import json
+import time
 import uuid
 from unittest import mock
 
@@ -33,19 +34,23 @@ class TestPublishWorkItemEvent:
         assert publish_work_item_event(PROJECT, [a, b], "cycle", "deleted", ACTOR, settle=True) is True
         channel, body = redis_mock.publish.call_args.args
         assert channel == f"plane:live-events:{PROJECT}"
-        assert json.loads(body) == {
+        before = time.time()
+        payload = json.loads(body)
+        ts = payload.pop("ts")
+        assert isinstance(ts, float) and abs(ts - before) < 5
+        assert payload == {
             "v": 1,
             "project_id": PROJECT,
             "kind": "cycle",
             "verb": "deleted",
-            "ids": [a, str(b)],
+            "issue_ids": [a, str(b)],
             "actor_id": ACTOR,
             "settle": True,
         }
 
     def test_wildcard_ids(self, enabled, redis_mock):
         publish_work_item_event(PROJECT, "*", "issue", "updated", ACTOR)
-        assert json.loads(redis_mock.publish.call_args.args[1])["ids"] == "*"
+        assert json.loads(redis_mock.publish.call_args.args[1])["issue_ids"] == "*"
         assert json.loads(redis_mock.publish.call_args.args[1])["settle"] is False
 
     def test_empty_ids_publishes_nothing(self, enabled, redis_mock):
