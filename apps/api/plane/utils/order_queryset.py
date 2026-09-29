@@ -63,6 +63,14 @@ PROJECT_ORDER_BY_ALLOWLIST = frozenset({
     "sort_order",
 })
 
+# Page list queryset.
+PAGE_ORDER_BY_ALLOWLIST = frozenset({
+    "created_at",
+    "updated_at",
+    "name",
+    "sort_order",
+})
+
 # Saved view (IssueView) list queryset.
 VIEW_ORDER_BY_ALLOWLIST = frozenset({
     "created_at",
