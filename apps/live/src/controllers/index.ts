@@ -4,6 +4,7 @@
  * See the LICENSE file for details.
  */
 
+import { PagesController } from "@/fork-pages/pages.controller";
 import { CollaborationController } from "./collaboration.controller";
 import { DocumentController } from "./document.controller";
 import { EventsController } from "./events.controller";
@@ -16,4 +17,5 @@ export const CONTROLLERS = [
   EventsController,
   HealthController,
   PdfExportController,
+  PagesController,
 ];
