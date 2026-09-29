@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Fork API image: the stock makeplane backend with the fork's Python package
+# laid over it. Nothing is compiled or installed here, so build time is one
+# COPY layer and the dependency set is exactly upstream's.
+#
+# Build context is the repository root:
+#   podman build -f fork/docker/Dockerfile.fork-api -t localhost/plane-fork-api:<tag> .
+#
+# Use --build-arg BASE_TAG=<upstream tag> when rebasing the fork onto a new
+# upstream release. Only apps/api/plane is copied; if a fork change ever needs
+# templates/, bin/, manage.py or a new requirement, this overlay is the wrong
+# tool and the full apps/api/Dockerfile.api build is required.
+ARG BASE_TAG=v1.4.2
+FROM docker.io/makeplane/plane-backend:${BASE_TAG}
+
+COPY apps/api/plane /code/plane
