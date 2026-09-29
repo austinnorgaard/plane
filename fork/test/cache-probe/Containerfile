@@ -1,0 +1,8 @@
+# syntax=docker/dockerfile:1.7
+# SPDX-License-Identifier: AGPL-3.0-only
+# LU-02 probe: proves the podman build path accepts the syntax line and that
+# RUN --mount=type=cache persists between builds (run the build twice).
+FROM docker.io/library/alpine:3.20
+ARG BUST=0
+RUN --mount=type=cache,id=probe,target=/c \
+    if [ -f /c/marker ]; then echo "CACHE-HIT: $(cat /c/marker)"; else echo "CACHE-MISS: writing marker"; date +%s > /c/marker; fi
