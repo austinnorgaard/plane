@@ -18,15 +18,17 @@
 #              PEM bundle of a TLS-intercepting proxy CA. Default: env
 #              BUILD_CA_BUNDLE. When set, the copies of apps/web/Dockerfile.web
 #              and apps/live/Dockerfile.live inside the temporary build tree
-#              (never the ones in the repo) are patched so every RUN that calls
-#              apk mounts the file as a build secret over
-#              /etc/ssl/certs/ca-certificates.crt, and the build gets
+#              (never the ones in the repo) are patched so every RUN
+#              mounts the file as a build secret over
+#              /etc/ssl/certs/ca-certificates.crt and runs with
+#              NODE_EXTRA_CA_CERTS and SSL_CERT_FILE pointing at it (set in
+#              the RUN's own shell, no ENV), and the build gets
 #              --secret id=build_ca,src=FILE. The CA exists only while those
 #              RUN steps execute and is not written to any layer.
 #   --build-proxy
 #              for hosts whose build containers can only reach the network
 #              through a proxy on the host's loopback: build web and live with
-#              --network host and pass HTTPS_PROXY/NO_PROXY (from this shell's
+#              --network host and pass HTTPS_PROXY/NO_PROXY (and lowercase) (from this shell's
 #              environment) as build args. Those are predefined proxy args, so
 #              they are not stored in the image config.
 #   --dry-run  print the commands instead of running them (nothing is executed,
@@ -47,7 +49,7 @@ die() {
 }
 
 usage() {
-  sed -n '4,38p' "$0" | sed 's/^# \{0,1\}//' >&2
+  sed -n '4,40p' "$0" | sed 's/^# \{0,1\}//' >&2
 }
 
 sha=""
@@ -171,22 +173,29 @@ else
 fi
 
 # 2b. With --ca-bundle: patch the build tree's copies of the two Dockerfiles that
-# run apk. Only lines that start with RUN and call apk get the secret mount.
-patch_dockerfile() { # patch_dockerfile FILE (relative to the build tree)
-  local f="$1"
-  sed -i -E '/^RUN (.*[ ;&|(])?apk([ ;&|)]|$)/ s#^RUN #RUN --mount=type=secret,id=build_ca,target=/etc/ssl/certs/ca-certificates.crt #' "$f" ||
+# need the CA (apk uses the system store, node uses NODE_EXTRA_CA_CERTS).
+patch_dockerfile() { # patch_dockerfile FILE (a path in the build tree)
+  local f="$1" ca=/etc/ssl/certs/ca-certificates.crt
+  # Shell-form, single-line RUN only; anything else cannot be prefixed safely.
+  if grep -Eq '^RUN (\[|.*\\$)' "$f" || grep -Eq '^RUN .*<<' "$f"; then
+    echo "ERROR: $f has an exec-form, multi-line or heredoc RUN; cannot patch" >&2
+    return 1
+  fi
+  # RUN [flags] cmd  ->  RUN --mount=<secret> [flags] export CA vars; cmd
+  # The variables are set inside that one RUN's shell, not with ENV or ARG.
+  sed -i -E "s#^RUN ((--[^ ]+ )*)#RUN --mount=type=secret,id=build_ca,target=$ca \\1export NODE_EXTRA_CA_CERTS=$ca SSL_CERT_FILE=$ca; #" "$f" ||
     return 1
   head -n1 "$f" | grep -q '^# syntax=' || sed -i '1i # syntax=docker/dockerfile:1' "$f" || return 1
-  grep -q 'id=build_ca' "$f" || return 1
+  [ "$(grep -c '^RUN ' "$f")" -eq "$(grep -c '^RUN --mount=type=secret,id=build_ca,' "$f")" ] || return 1
 }
 if [ -n "$ca_bundle" ]; then
   if [ "$dry_run" -eq 1 ]; then
-    echo "+ patch apk RUN lines of $build_dir/apps/web/Dockerfile.web and $build_dir/apps/live/Dockerfile.live (build tree copies only) to mount secret build_ca"
+    echo "+ patch every RUN line of $build_dir/apps/web/Dockerfile.web and $build_dir/apps/live/Dockerfile.live (build tree copies only) to mount secret build_ca"
   else
     for f in apps/web/Dockerfile.web apps/live/Dockerfile.live; do
       patch_dockerfile "$build_dir/$f" || die "Patching $f for --ca-bundle failed"
     done
-    echo "Patched apk steps of the web and live Dockerfiles in the build tree to use secret build_ca"
+    echo "Patched every RUN of the web and live Dockerfiles in the build tree to use secret build_ca"
   fi
 fi
 
@@ -218,7 +227,7 @@ for b in "${builds[@]}"; do
   if [ "$b" != api ]; then
     [ -z "$ca_bundle" ] || flags+=(--secret "id=build_ca,src=$ca_bundle")
     if [ "$build_proxy" -eq 1 ]; then
-      flags+=(--network host --build-arg HTTPS_PROXY --build-arg NO_PROXY)
+      flags+=(--network host --build-arg HTTPS_PROXY --build-arg https_proxy --build-arg NO_PROXY --build-arg no_proxy)
     fi
   fi
   cmd=(fork/test/measure.sh "$b" "$engine" build ${flags[@]+"${flags[@]}"} --label "$build_label"

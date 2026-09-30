@@ -156,10 +156,10 @@ echo "$out" | grep -q -- 'docker save -o '; check "dry-run: docker save command 
 
 # 2b. --ca-bundle in dry-run prints the patch and the secret, touches nothing
 run_build --sha $SHA --n 2 --out-dir "$work/out2c" --engine docker --ca-bundle "$work/ca.pem" --dry-run
-[ $rc -eq 0 ] && echo "$out" | grep -q 'patch apk RUN lines' && [ "$(echo "$out" | grep -c -- "--secret id=build_ca..\?src=$work/ca.pem")" -eq 2 ]; check "dry-run --ca-bundle: patch and two --secret shown" $?
+[ $rc -eq 0 ] && echo "$out" | grep -q 'patch every RUN line' && [ "$(echo "$out" | grep -c -- "--secret id=build_ca..\?src=$work/ca.pem")" -eq 2 ]; check "dry-run --ca-bundle: patch and two --secret shown" $?
 [ ! -s "$CALLS" ] && [ ! -e "$repo/work" ]; check "dry-run --ca-bundle: nothing executed or created" $?
 run_build --sha $SHA --n 2 --out-dir "$work/out2d" --engine docker --dry-run
-! echo "$out" | grep -q -e 'build_ca' -e 'patch apk'; check "dry-run without --ca-bundle: no patch, no secret" $?
+! echo "$out" | grep -q -e 'build_ca' -e 'patch every'; check "dry-run without --ca-bundle: no patch, no secret" $?
 
 # 3. build failure gives a non-zero exit
 FAKE_FAIL_BUILD=live run_build --sha $SHA --n 3 --out-dir "$work/out3" --engine docker
@@ -221,9 +221,12 @@ run_build --sha $SHA --n 1 --out-dir "$work/out4b" --engine docker --ca-bundle "
 bt="$repo/work/$SHA"
 [ $rc -eq 0 ]; check "ca-bundle: exit 0" $?
 M='RUN --mount=type=secret,id=build_ca,target=/etc/ssl/certs/ca-certificates.crt'
-[ "$(grep -c "^$M " "$bt/apps/web/Dockerfile.web")" -eq 2 ] && [ "$(grep -c "^$M " "$bt/apps/live/Dockerfile.live")" -eq 2 ]; check "ca-bundle: every apk RUN in web and live mounts the secret" $?
-grep -q "^RUN corepack enable\$" "$bt/apps/web/Dockerfile.web" && grep -q '^RUN echo "capkx"' "$bt/apps/web/Dockerfile.web" && grep -q '^COPY apk /apk$' "$bt/apps/live/Dockerfile.live"; check "ca-bundle: non-apk lines untouched" $?
-grep -q "^$M --mount=type=cache,id=x,target=/x apk add foo\$" "$bt/apps/live/Dockerfile.live"; check "ca-bundle: existing RUN flags kept" $?
+X='export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt; '
+[ "$(grep -c "^$M " "$bt/apps/web/Dockerfile.web")" -eq 4 ] && [ "$(grep -c "^RUN " "$bt/apps/web/Dockerfile.web")" -eq 4 ] &&
+  [ "$(grep -c "^$M " "$bt/apps/live/Dockerfile.live")" -eq 2 ] && [ "$(grep -c "^RUN " "$bt/apps/live/Dockerfile.live")" -eq 2 ]; check "ca-bundle: every RUN (apk or not) in web and live mounts the secret" $?
+grep -q "^$M ${X}apk add --no-cache libc6-compat\$" "$bt/apps/web/Dockerfile.web" && grep -q "^$M ${X}corepack enable\$" "$bt/apps/web/Dockerfile.web" && grep -q "^$M ${X}echo \"capkx\"\$" "$bt/apps/web/Dockerfile.web" && grep -q '^COPY apk /apk$' "$bt/apps/live/Dockerfile.live"; check "ca-bundle: CA env exported inside each RUN, other lines untouched" $?
+! grep -Eq '^(ENV|ARG) .*(NODE_EXTRA_CA_CERTS|SSL_CERT_FILE)' "$bt/apps/web/Dockerfile.web" "$bt/apps/live/Dockerfile.live"; check "ca-bundle: no ENV or ARG for the CA" $?
+grep -q "^$M --mount=type=cache,id=x,target=/x ${X}apk add foo\$" "$bt/apps/live/Dockerfile.live"; check "ca-bundle: existing RUN flags kept before the export" $?
 [ "$(head -n1 "$bt/apps/web/Dockerfile.web")" = '# syntax=docker/dockerfile:1.7' ] && [ "$(head -n1 "$bt/apps/live/Dockerfile.live")" = '# syntax=docker/dockerfile:1' ]; check "ca-bundle: syntax line kept or added" $?
 cmp -s "$tree/apps/web/Dockerfile.web" "$work/web.orig" && cmp -s "$tree/apps/live/Dockerfile.live" "$work/live.orig"; check "ca-bundle: source Dockerfiles in the repo tree untouched" $?
 [ "$(grep '^docker build ' "$CALLS" | grep -c -- "--secret id=build_ca,src=$work/ca.pem")" -eq 2 ] && ! grep '^docker build ' "$CALLS" | grep 'plane-fork-api' | grep -q -- '--secret'; check "ca-bundle: --secret on web and live only" $?
@@ -235,12 +238,18 @@ grep -q 'id=build_ca' "$repo/work/$SHA/apps/live/Dockerfile.live" && [ "$(grep -
 run_build --sha $SHA --n 1 --out-dir "$work/out4d" --engine docker
 ! grep -rq 'build_ca' "$repo/work/$SHA/apps" && ! grep -q -- '--secret' "$CALLS" && cmp -s "$repo/work/$SHA/apps/web/Dockerfile.web" "$work/web.orig"; check "no --ca-bundle: nothing patched, no --secret" $?
 run_build --sha $SHA --n 1 --out-dir "$work/out4e" --engine docker --ca-bundle "$work/ca.pem" --build-proxy
-[ "$(grep '^docker build ' "$CALLS" | grep -c -- '--network host --build-arg HTTPS_PROXY --build-arg NO_PROXY')" -eq 2 ]; check "build-proxy: host network and proxy build args on web and live" $?
+[ "$(grep '^docker build ' "$CALLS" | grep -c -- '--network host --build-arg HTTPS_PROXY --build-arg https_proxy --build-arg NO_PROXY --build-arg no_proxy')" -eq 2 ]; check "build-proxy: host network, proxy and NO_PROXY build args on web and live" $?
 run_build --sha $SHA --n 1 --out-dir "$work/out4f" --engine docker --ca-bundle "$work/missing.pem"
 [ $rc -ne 0 ] && [ ! -s "$CALLS" ]; check "ca-bundle: missing file rejected before any work" $?
 : > "$work/empty.pem"
 run_build --sha $SHA --n 1 --out-dir "$work/out4g" --engine docker --ca-bundle "$work/empty.pem"
 [ $rc -ne 0 ] && [ ! -s "$CALLS" ]; check "ca-bundle: file without a certificate rejected" $?
+
+# 4b2. unpatchable RUN forms are refused
+printf '%s\n' 'FROM x' 'RUN apk add \\' '  foo' > "$tree/apps/live/Dockerfile.live"
+run_build --sha $SHA --n 1 --out-dir "$work/out4m" --engine docker --ca-bundle "$work/ca.pem"
+[ $rc -ne 0 ] && echo "$out" | grep -q 'cannot patch' && [ "$(calls_of docker)" -eq 0 ]; check "ca-bundle: multi-line RUN refused before building" $?
+cp "$work/live.orig" "$tree/apps/live/Dockerfile.live"
 
 # 4c. n is normalized: 007 is build 7
 FAKE_TAG=v1.4.2-live.7 run_build --sha $SHA --n 007 --out-dir "$work/out4h" --engine docker
