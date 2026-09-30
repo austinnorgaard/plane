@@ -13,6 +13,7 @@ Every host-specific value is a variable supplied by the operator at run time. No
 | `PVE_STAGING_DIR`   | scratch directory on the hypervisor for the image archive                                    |
 | `CT_STAGING_DIR`    | scratch directory in the container for the image archive                                     |
 | `BUILD_HOST`        | machine where the images were built with podman                                              |
+| `STOCK_RELEASE`     | tag of the stock `makeplane/*` images running before the deploy, taken from the inspection   |
 | `FORK_N`            | fork build number; tag is `v1.4.2-live.$FORK_N`                                              |
 | `PUBLIC_URL`        | origin users open from outside the LAN                                                       |
 | `LAN_URL`           | origin users open from the LAN                                                               |
@@ -45,6 +46,8 @@ Exit 0 means no STOP lines. Exit 2 means at least one STOP line: do not continue
 
 - `LIVE_SERVER_SECRET_KEY` is the shipped placeholder, empty or undefined. Rotating it is the owner's decision.
 - `LIVE_BASE_URL` is already set on `worker` or `beat-worker`: the page-duplicate live sync would already be active.
+- `worker` or `beat-worker` is not running, so `LIVE_BASE_URL` cannot be verified.
+- The compose file mentions `LIVE_BASE_URL` at all (the stock file does not).
 
 Fill in the table below from the output (values `set`, `unset`, `match`, `no-match`, `works`, `fails`; URLs only as the variable names `PUBLIC_URL` / `LAN_URL`; no addresses, hostnames or secrets). Also record the origins users actually use as `PUBLIC_URL` and `LAN_URL` for step 5.
 
@@ -67,6 +70,7 @@ Fill in the table below from the output (values `set`, `unset`, `match`, `no-mat
 | `LIVE_BASE_URL` on running beat-worker (must be unset)      |        |
 | `plane-redis` publishes ports                               |        |
 | `pct listsnapshot` works                                    |        |
+| `STOCK_RELEASE` (tag of the stock images now running)       |        |
 | Free disk in `$PLANE_APP_DIR` filesystem                    |        |
 | Free disk for the container image store                     |        |
 | Origins users use (variable names only)                     |        |
@@ -125,15 +129,30 @@ LIVE_EVENTS_ALLOWED_ORIGINS=<PUBLIC_URL>,<LAN_URL>
 
 `WEB_URL` must already be defined in `plane.env` (see inspection). `CORS_ALLOWED_ORIGINS` stays as it is; the override never passes it into live.
 
-## 5. Env key-name check (names only)
+## 5. Validate
 
-Before applying, validate quietly:
+Validate quietly (prints nothing on success, and never prints values):
 
 ```
 $C config -q && echo config-ok
 ```
 
-After step 6, check the running containers. These print names, never values:
+Do not continue unless `config-ok` is printed.
+
+## 6. Apply, image-tag check and env key-name check
+
+```
+$C up -d
+$C ps --format '{{.Service}} {{.Image}}'
+```
+
+Expected images: `web`, `live`, `api`, `worker`, `beat-worker` all `localhost/plane-fork-*:v1.4.2-live.$FORK_N` (web -> `plane-fork-web`, live -> `plane-fork-live`, the other three -> `plane-fork-api`). Every other service keeps its stock image. Exactly one `live` container must be running. If any of the five shows a stock image, the stack was started without the override (for example through `setup.sh`): rerun `$C up -d`.
+
+Wait for `api` to be healthy: `$C logs --tail 30 api`.
+
+### Env key-name check (after the apply)
+
+Env key-name check on the running containers. These print names, never values:
 
 ```
 for s in live api worker beat-worker; do
@@ -151,17 +170,6 @@ Expected:
 | `beat-worker` |                                                                                                            | `LIVE_BASE_URL`, `PAGES_API_ENABLED` |
 
 If `LIVE_BASE_URL` shows on `worker` or `beat-worker`, run rollback L1 (below) at once and stop.
-
-## 6. Apply and image-tag check
-
-```
-$C up -d
-$C ps --format '{{.Service}} {{.Image}}'
-```
-
-Expected images: `web`, `live`, `api`, `worker`, `beat-worker` all `localhost/plane-fork-*:v1.4.2-live.$FORK_N` (web -> `plane-fork-web`, live -> `plane-fork-live`, the other three -> `plane-fork-api`). Every other service keeps its stock image. Exactly one `live` container must be running. If any of the five shows a stock image, the stack was started without the override (for example through `setup.sh`): rerun `$C up -d`.
-
-Wait for `api` to be healthy: `$C logs --tail 30 api`.
 
 ## 7. Smoke tests
 
@@ -194,6 +202,17 @@ $C exec -T api python -c "import os,requests;h={'live-server-secret-key':os.envi
 
 prints `{"loaded":false}`. With an added header `X-Forwarded-For: 1.2.3.4` the same request returns 403.
 
+Guard checks without the key (both must match exactly; any other status means the guard is not what the code says, so run rollback L1 and escalate):
+
+```
+# direct to live, no secret header: 401
+$C exec -T api python -c "import requests;print(requests.get('http://live:3000/live/fork/pages/00000000-0000-0000-0000-000000000000/loaded',timeout=3).status_code)"
+# public route through the proxy, no key: 403
+curl -sS -o /dev/null -w '%{http_code}\n' "$PUBLIC_URL/live/fork/pages/00000000-0000-0000-0000-000000000000/loaded"
+```
+
+Why: the live guard answers 401 to a request with a missing or wrong `live-server-secret-key` (`apps/live/src/fork-pages/auth.ts`, tests in `apps/live/tests/fork-pages/auth.test.ts`), and answers 403 to any request that carries `X-Forwarded-For` or `X-Forwarded-Host` before it looks at the key. The proxy adds `X-Forwarded-For` to everything it forwards, so the public route is 403 with or without a key. Repeat the second call from `$LAN_URL`.
+
 Duplicate a page in the UI: it must still work and the copy must open normally (the worker has no `LIVE_BASE_URL`, so the live sync stays off).
 
 ## 8. Rehearsal of rollback L1 and L2, then roll forward
@@ -203,7 +222,7 @@ Targets are estimates; record the measured times here.
 | Step | Target | Measured |
 | ---- | ------ | -------- |
 | L1   | 1 to 2 min |      |
-| L2   | 2 to 4 min |      |
+| L2   | 60 s or less |      |
 | Roll forward | 1 to 2 min |  |
 
 ## 9. Hard reload
@@ -214,25 +233,32 @@ The web bundle changed. Tabs opened before the deploy keep running the old code 
 
 Choose the smallest level that fixes the problem.
 
-**L1: both flags off (about 1 to 2 min).** Keeps the fork images, turns the behaviour off. Live events stop (the socket closes with 4404) and the pages API answers 404.
+**L1: both flags off (about 1 to 2 min).** Keeps the fork images, turns the behaviour off. Live events stop (the socket closes with 4404) and the pages API answers 404. The L1 file is generated on the spot and deleted after the roll-forward.
 
 ```
 sed -e 's/LIVE_EVENTS_ENABLED: "1"/LIVE_EVENTS_ENABLED: "0"/' \
     -e 's/PAGES_API_ENABLED: "1"/PAGES_API_ENABLED: "0"/' \
     docker-compose.override.yaml > docker-compose.override.l1.yaml
-docker compose -f docker-compose.yaml -f docker-compose.override.l1.yaml --env-file plane.env up -d api worker live
+off=$(grep -cE '^ +(LIVE_EVENTS_ENABLED|PAGES_API_ENABLED): "0"$' docker-compose.override.l1.yaml)
+on=$(grep -cE '^ +(LIVE_EVENTS_ENABLED|PAGES_API_ENABLED): ' docker-compose.override.l1.yaml | tr -d ' ')
+left=$(grep -cE '^ +(LIVE_EVENTS_ENABLED|PAGES_API_ENABLED): .*1' docker-compose.override.l1.yaml)
+if [ "$off" = 5 ] && [ "$on" = 5 ] && [ "$left" = 0 ]; then
+  docker compose -f docker-compose.yaml -f docker-compose.override.l1.yaml --env-file plane.env up -d api worker live
+else
+  echo "STOP: expected exactly 5 flag lines set to \"0\" (3 LIVE_EVENTS_ENABLED + 2 PAGES_API_ENABLED) and none left on; got off=$off left=$left. Do not run up; edit the L1 file by hand and recheck."
+fi
 ```
 
-Roll forward: rerun step 6 with the normal override.
+Roll forward: rerun step 6 with the normal override, then `rm docker-compose.override.l1.yaml`.
 
-**L2: stock images (about 2 to 4 min).** Run the stack from the upstream file alone. The stock images `makeplane/*` are still in the local image store because they are never pruned.
+**L2: stock images (target 60 s or less, measured with `time`).** Run the stack from the upstream file alone. The stock images `makeplane/*` are still in the local image store because they are never pruned. `STOCK_RELEASE` is the tag recorded in the inspection table; check that the images exist before the window (`docker image ls makeplane/plane-backend`).
 
 ```
-APP_RELEASE=v1.4.2 docker compose -f docker-compose.yaml --env-file plane.env up -d
-docker compose -f docker-compose.yaml --env-file plane.env ps --format '{{.Service}} {{.Image}}'
+time APP_RELEASE=$STOCK_RELEASE docker compose -f docker-compose.yaml --env-file plane.env up -d --pull never --wait --wait-timeout 60
+APP_RELEASE=$STOCK_RELEASE docker compose -f docker-compose.yaml --env-file plane.env ps --format '{{.Service}} {{.Image}}'
 ```
 
-Use the release tag that was running before (see the "Image line" rows in the inspection table). Then hard-reload (step 9). Do not use `setup.sh` for this either.
+Every service must show a `makeplane/*:$STOCK_RELEASE` image (or its original stock image). Then hard-reload (step 9). Do not use `setup.sh` for this either. If the time exceeds 60 s in the rehearsal, record it and tell the owner.
 
 **L3: restore the snapshot (about 5 to 10 min, data loss).** Everything written after the snapshot is lost (work items, pages, uploads), so use it only if L2 does not recover the system.
 

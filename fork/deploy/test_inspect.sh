@@ -16,6 +16,8 @@ bad() { echo "FAIL $1"; FAIL=1; }
 cat >"$T/bin/pct" <<'EOF'
 #!/bin/sh
 echo "pct $*" >>"$STUB_LOG"
+# like the real pct exec, which forwards stdin: optionally swallow it
+[ -n "${STUB_PCT_READS_STDIN:-}" ] && cat >/dev/null
 case "$1" in
   status) echo "status: running" ;;
   listsnapshot) exit "${STUB_SNAP_RC:-0}" ;;
@@ -31,7 +33,7 @@ case "$1" in
     case "$*" in
       *"{{.Image}}"*) echo "localhost/plane-fork-$svc:v1.4.2-live.1" ;;
       *"{{.Ports}}"*) [ -n "${STUB_REDIS_PORTS:-}" ] && echo "$STUB_REDIS_PORTS" ;;
-      *) echo "c_$svc" ;;
+      *) case " ${STUB_DOWN:-} " in *" $svc "*) ;; *) echo "c_$svc" ;; esac ;;
     esac ;;
   inspect) id=$(eval echo "\${$#}"); cat "$STUB_DIR/env.${id#c_}" 2>/dev/null ;;
 esac
@@ -100,6 +102,28 @@ printf 'A=b\n' >"$T/env.beat-worker"
 printf 'LIVE_BASE_URL=http://live:3000\n' >"$T/env.api"
 run
 [ "$RC" = 0 ] && echo "$OUT" | grep -q '^api: set' && ok "api LIVE_BASE_URL is allowed" || bad "api rc=$RC"
+
+STUB_DOWN=worker run
+[ "$RC" = 2 ] && echo "$OUT" | grep -q '^STOP: worker is not running.*cannot verify' && ok "worker not running -> STOP" || bad "worker down rc=$RC"
+STUB_DOWN=beat-worker run
+[ "$RC" = 2 ] && echo "$OUT" | grep -q '^STOP: beat-worker is not running.*cannot verify' && ok "beat-worker not running -> STOP" || bad "beat-worker down rc=$RC"
+STUB_DOWN=api run
+[ "$RC" = 0 ] && ok "api not running is not a STOP" || bad "api down rc=$RC"
+
+cp "$T/app/docker-compose.yaml" "$T/compose.good"
+printf '    environment:\n      LIVE_BASE_URL: http://live:3000\n' >>"$T/app/docker-compose.yaml"
+run
+[ "$RC" = 2 ] && echo "$OUT" | grep -q '^STOP: the compose file mentions LIVE_BASE_URL' && ok "compose mention -> STOP" || bad "compose mention rc=$RC"
+cp "$T/compose.good" "$T/app/docker-compose.yaml"
+run
+[ "$RC" = 0 ] && ok "restored compose is clean" || bad "restored compose rc=$RC"
+
+# The documented use feeds the script on stdin (bash -s < inspect.sh). A pct that
+# reads stdin must not eat the rest of the script: the RESULT line must still print.
+: >"$STUB_LOG"
+OUT=$(STUB_PCT_READS_STDIN=1 bash -s <"$HERE/inspect.sh" 2>&1); RC=$?
+[ "$RC" = 0 ] && echo "$OUT" | grep -q '^RESULT: no STOP lines' && ok "stdin-fed script survives a stdin-reading pct" || bad "stdin-fed script truncated (rc=$RC)"
+[ "$(grep -c '^pct exec' "$STUB_LOG")" -ge 12 ] && ok "all pct exec calls ran" || bad "pct exec calls missing"
 
 STUB_REDIS_PORTS='0.0.0.0:6379->6379/tcp' run
 echo "$OUT" | grep -q 'plane-redis: publishes-ports' && ok "redis ports detected" || bad "redis ports"
