@@ -45,8 +45,29 @@ use different paths, add aliases here and in `api/urls/page.py`. This is confirm
 - After commit: `page_transaction` and `track_page_version` are queued, and a best-effort presence re-check logs a warning
   (page id only) if the page was opened during the write.
 - Archive and unarchive: the page owner or a project admin only. POST by another member is 400; DELETE by another member is 403.
+- Create ignores unknown keys; only the documented fields are read. PATCH rejects unknown keys with 400.
 
-## Live service calls (assumed contract)
+## Deploy rules
+
+- `PAGES_API_ENABLED=1` is set on the api and live containers only.
+- `LIVE_BASE_URL` is set on the api container ONLY, never on the worker or beat-worker. Reason: `apps/api/plane/bgtasks/copy_s3_object.py` (around lines 73-78) returns early while `LIVE_BASE_URL` is unset; with it set, page duplicate would start calling the live service's convert-document path from the worker.
+- `LIVE_BASE_URL` must be a direct internal URL of the live container (for example `http://live:3000`), not the public proxy URL, because the live pages endpoints answer 403 to any request carrying `X-Forwarded-For` or `X-Forwarded-Host` (`apps/live/src/fork-pages/auth.ts`), which would make PATCH return 409 (no stored binary) or 503 (stored binary).
+- `LIVE_SERVER_SECRET_KEY` must be set (not the shipped placeholder) on api and live; the value is never logged.
+- Only one live replica is supported (presence is per process).
+
+## Failure modes
+
+- **F1:** Live down, `LIVE_URL` unset, or presence unanswerable: For a page with NO stored binary, presence is checked first and returns 409 `{"error": "page is open in an editor; retry later"}`. For a page WITH a stored binary, the rebase runs first: live down, `LIVE_URL` unset or a rebase failure returns 503 `{"error": "live service unavailable, page not updated"}`; 409 only when the rebase succeeded but presence is loaded or unknown. Create, list, retrieve and archive still work.
+- **F2:** A page opened in a browser between the presence answer and the commit: the editor's next store may overwrite the API change (lost, not duplicated); the window is milliseconds because presence is checked after the rebase; a post-commit presence re-check logs a warning with the page id.
+- **F3:** Unload in progress (last tab closing, final store running): the document stays in the documents map until its final store resolves, so presence says loaded and PATCH returns 409; retry later.
+- **F4:** Empty stored binary while a browser still has a cached, unsaved document for the page (after a failed first-open write-back): a direct write followed by the next open can duplicate content in that browser; rare, same exposure as stock.
+- **F5:** Replace semantics: `description_html` replaces the whole body and `name` replaces the title; offline edits held only in a browser merge into the new state on reconnect.
+- **F6:** Schema normalisation: HTML the document schema cannot represent is dropped; the response returns the normalised HTML.
+- **F7:** Single live replica only: presence is per process.
+- **F8:** A page open in any tab, including a background tab with a connected socket, refuses API PATCH until closed.
+- **F9:** Block-level ids are regenerated for replaced content.
+
+## Live service calls
 
 Both send the `live-server-secret-key` header taken from `LIVE_SERVER_SECRET_KEY`. Neither the key nor page content is logged.
 
@@ -70,7 +91,7 @@ Guard order: `PAGES_API_ENABLED != '1'` -> 404; empty or placeholder secret -> 5
 Paths are relative to `node_modules/@hocuspocus/server/src/`.
 
 1. **Map of documents still loading:** `loadingDocuments: Map<string, Promise<Document>>` at `Hocuspocus.ts:75`. It is filled at `Hocuspocus.ts:436` (`createDocument`) and cleared at `:440` / `:442`. Note that `documents` (`Hocuspocus.ts:77`) is also populated early: `loadDocument` runs the `onCreateDocument` hook first (`:453`) and only then does `documents.set` (`:467`), before `onLoadDocument` runs. So `loadingDocuments` is the only signal during the `onCreateDocument` window; afterwards both maps hold the page (`Document.isLoading` is true until `onLoadDocument` finishes, `Document.ts:54`).
-2. **Does a document stay in `instance.documents` until its final `onStoreDocument` resolves on unload? Yes.** The only place a document leaves the map is `unloadDocument` (`Hocuspocus.ts:592-601`, `documents.delete` at `:598`). It is called from `storeDocumentHooks` (`:527-548`) only after `onStoreDocument` has resolved and `afterStoreDocument` has run (`:531-541`), from the last-connection close handler (`:372-378`) only when no store is scheduled, and from the `onLoadDocument` failure path (`:494`), where the document never finished loading and nothing is stored. So there is no window where a store is pending and the document is absent from the map, and no extra pending-store signal is needed. The endpoint therefore checks `documents` and `loadingDocuments` only. A test holds `onStoreDocument` open and asserts `loaded: true` during that window.
+2. **Does a document stay in `instance.documents` until its final `onStoreDocument` resolves on unload? Yes.** The only place a document leaves the map is `unloadDocument` (`Hocuspocus.ts:592-601`, `documents.delete` at `:598`). It is called from `storeDocumentHooks` (`:527-548`) only after `onStoreDocument` has resolved and `afterStoreDocument` has run (`:531-541`), from the last-connection close handler (`:375-378`) when no store is scheduled or the document is still loading, and from the `onLoadDocument` failure path (`:494`), where the document never finished loading and nothing is stored. So there is no window where a store is pending and the document is absent from the map, and no extra pending-store signal is needed. The endpoint therefore checks `documents` and `loadingDocuments` only. A test holds `onStoreDocument` open and asserts `loaded: true` during that window.
 3. **`prosemirrorJSONToYXmlFragment` in y-prosemirror ^1.3.7: yes.** Installed version 1.3.7; defined at `src/lib.js:317` and re-exported from `src/y-prosemirror.js:8` (the package entry point).
 
 ## Running the tests
