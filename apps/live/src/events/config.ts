@@ -15,12 +15,13 @@ const intFrom = (fallback: number, min = 1) =>
 
 // The live events hub reads its own settings straight from the environment so that
 // env.ts stays untouched. The Origin allowlist for the events socket is the union of
-// LIVE_EVENTS_ALLOWED_ORIGINS, CORS_ALLOWED_ORIGINS and WEB_URL. CORS_ALLOWED_ORIGINS is
-// only read here; the stock cors() middleware setup in server.ts is not changed.
+// LIVE_EVENTS_ALLOWED_ORIGINS and WEB_URL (plus the host-equality fallback in origin.ts).
+// CORS_ALLOWED_ORIGINS is deliberately not read: server.ts feeds it to the stock cors()
+// middleware, so the deploy must not pass it into live. LIVE_EVENTS_ALLOWED_ORIGINS is the
+// explicit allowlist.
 const eventsEnvSchema = z.object({
   LIVE_EVENTS_ENABLED: z.string().optional(),
   LIVE_EVENTS_ALLOWED_ORIGINS: z.string().default(""),
-  CORS_ALLOWED_ORIGINS: z.string().default(""),
   WEB_URL: z.string().default(""),
   LIVE_EVENTS_SETTLE_MS: intFrom(2000, 0),
   LIVE_EVENTS_PROJECT_RATE_PER_SEC: intFrom(50),
@@ -32,7 +33,6 @@ const eventsEnvSchema = z.object({
 export type EventsConfig = {
   enabled: boolean;
   allowedOrigins: string[];
-  corsOrigins: string[];
   webUrl: string;
   settleMs: number;
   projectRatePerSec: number;
@@ -58,7 +58,6 @@ export const parseEventsConfig = (source: Record<string, string | undefined> = p
   return {
     enabled: parsed.LIVE_EVENTS_ENABLED === "1",
     allowedOrigins: parsed.LIVE_EVENTS_ALLOWED_ORIGINS.split(","),
-    corsOrigins: parsed.CORS_ALLOWED_ORIGINS.split(","),
     webUrl: parsed.WEB_URL,
     settleMs: parsed.LIVE_EVENTS_SETTLE_MS,
     projectRatePerSec: parsed.LIVE_EVENTS_PROJECT_RATE_PER_SEC,
