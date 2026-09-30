@@ -17,7 +17,7 @@ One line per touched upstream file: ticket id and the reason.
 - `apps/api/plane/app/views/issue/base.py`: PLN-3, publish after bulk delete (ids captured first) and after bulk date update.
 - `apps/api/plane/app/views/issue/archive.py`: PLN-3, publish after bulk archive.
 
-New files (not upstream): `apps/live/src/controllers/events.controller.ts`, `apps/live/src/events/{config,origin,auth,hub}.ts`, `apps/live/tests/events/*`; `apps/api/plane/api/{urls,views,serializers}/page.py`, `apps/api/plane/utils/live_pages.py`, `apps/api/plane/utils/live_events.py`, `apps/api/plane/tests/unit/live_events/*`, `apps/api/plane/tests/contract/api/test_pages.py`, `fork/PAGES.md`, `apps/live/src/fork-pages/*`, `apps/live/tests/fork-pages/*`.
+New files (not upstream): `apps/live/src/controllers/events.controller.ts`, `apps/live/src/events/{config,origin,auth,hub}.ts`, `apps/live/tests/events/*`; `apps/api/plane/api/{urls,views,serializers}/page.py`, `apps/api/plane/utils/live_pages.py`, `apps/api/plane/utils/live_events.py`, `apps/api/plane/tests/unit/live_events/*`, `apps/api/plane/tests/contract/api/test_pages.py`, `fork/PAGES.md`, `apps/live/src/fork-pages/*`, `apps/live/tests/fork-pages/*`, `fork/tools/*`.
 
 ## Drift points (new files that mirror private upstream code)
 
