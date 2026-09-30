@@ -35,7 +35,9 @@
 #   DB_HOST DB_PORT DB_USER DB_PASS DB_NAME    [127.0.0.1 5432 plane plane plane]
 #   REDIS_HOST REDIS_PORT                      [127.0.0.1 6379]
 #   MQ_HOST MQ_PORT MQ_USER MQ_PASS MQ_VHOST   [127.0.0.1 5672 plane plane plane]
-#   PG_IMAGE REDIS_IMAGE MQ_IMAGE              docker mode images
+#   PG_IMAGE REDIS_IMAGE MQ_IMAGE              docker mode images (postgres 15.7 alpine, valkey 7.2.11, rabbitmq 3.13.6)
+#   PLANE_TEST_SKIP_SETUP=1                    test seam: skip service start and venv setup, use PLANE_VENV as is
+# apt and docker modes accept loopback hosts only (use --services external for anything else).
 # The credentials are throwaway test values, never real secrets.
 #
 # Outputs in OUT_DIR: cloud-api-tests.pytest.log, .pip.log, .junit.xml, .summary.txt.
@@ -88,7 +90,7 @@ REDIS_HOST=${REDIS_HOST:-127.0.0.1} REDIS_PORT=${REDIS_PORT:-6379}
 MQ_HOST=${MQ_HOST:-127.0.0.1} MQ_PORT=${MQ_PORT:-5672} MQ_USER=${MQ_USER:-plane} MQ_PASS=${MQ_PASS:-plane} MQ_VHOST=${MQ_VHOST:-plane}
 S3_KEY=access-key S3_SECRET=secret-key S3_BUCKET=uploads
 
-PG_IMAGE=${PG_IMAGE:-docker.io/library/postgres:16-alpine}
+PG_IMAGE=${PG_IMAGE:-docker.io/library/postgres:15.7-alpine}
 REDIS_IMAGE=${REDIS_IMAGE:-docker.io/valkey/valkey:7.2.11-alpine}
 MQ_IMAGE=${MQ_IMAGE:-docker.io/library/rabbitmq:3.13.6-management-alpine}
 C_DB=plane-cloudtest-db C_REDIS=plane-cloudtest-redis C_MQ=plane-cloudtest-mq
@@ -96,8 +98,28 @@ C_DB=plane-cloudtest-db C_REDIS=plane-cloudtest-redis C_MQ=plane-cloudtest-mq
 [ -d "$SRC/apps/api/plane" ] || { echo "no apps/api under PLANE_SRC=$SRC" >&2; exit 2; }
 mkdir -p "$OUT_DIR"
 
+is_loopback() { case "$1" in 127.*|localhost|::1) return 0 ;; *) return 1 ;; esac; }
+
 log() { echo "[cloud-api-tests $(date +%H:%M:%S)] $*"; }
 die() { log "ERROR: $*"; exit 2; }
+
+# apt and docker modes create throwaway services with throwaway credentials: only ever on loopback,
+# and only with plain values, because the values reach SQL and rabbitmqctl arguments.
+guard_config() {
+  [ "$SERVICES" = external ] && return 0
+  local v h
+  for h in DB_HOST REDIS_HOST MQ_HOST; do
+    is_loopback "${!h}" || die "--services $SERVICES only manages local throwaway services; $h=${!h} is not a loopback address (use --services external)"
+  done
+  if [ "$SERVICES" = apt ]; then
+    for v in DB_USER DB_PASS DB_NAME MQ_USER MQ_PASS MQ_VHOST; do
+      case "${!v}" in
+        ''|*[!A-Za-z0-9_.@-]*) die "$v must be non-empty and use only letters, digits and _ . @ - in apt mode" ;;
+      esac
+    done
+  fi
+}
+guard_config
 
 CREATED=()
 # shellcheck disable=SC2329  # invoked via trap
@@ -152,9 +174,13 @@ apt_start_postgres() {
   wait_for postgres 60 pg_up || die "postgres not reachable"
   # test runs create a test database, so the role must be a superuser
   as_postgres "psql -qtAc \"SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'\"" | grep -q 1 \
-    || as_postgres "psql -qc \"CREATE ROLE $DB_USER LOGIN SUPERUSER PASSWORD '$DB_PASS'\"" || die "create role failed"
+    || { log "WARNING: creating throwaway SUPERUSER role '$DB_USER' in the local postgres cluster on port $DB_PORT"
+         as_postgres "psql -qc \"CREATE ROLE $DB_USER LOGIN SUPERUSER PASSWORD '$DB_PASS'\"" || die "create role failed"; }
   as_postgres "psql -qtAc \"SELECT 1 FROM pg_database WHERE datname='$DB_NAME'\"" | grep -q 1 \
     || as_postgres "psql -qc 'CREATE DATABASE $DB_NAME OWNER $DB_USER'" || die "create database failed"
+  # an existing role keeps its old password: fail here rather than in the middle of the tests
+  PGPASSWORD=$DB_PASS psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -qtAc 'SELECT 1' >/dev/null 2>&1 \
+    || die "postgres role '$DB_USER' cannot log in to '$DB_NAME' at $DB_HOST:$DB_PORT with the configured DB_PASS; set DB_USER/DB_PASS to a working login or reset the role password"
 }
 
 apt_start_redis() {
@@ -175,6 +201,8 @@ apt_start_rabbitmq() {
   rabbitmqctl list_vhosts -q 2>/dev/null | grep -qx "$MQ_VHOST" || rabbitmqctl add_vhost "$MQ_VHOST" >/dev/null || die "add_vhost failed"
   rabbitmqctl list_users -q 2>/dev/null | awk '{print $1}' | grep -qx "$MQ_USER" \
     || rabbitmqctl add_user "$MQ_USER" "$MQ_PASS" >/dev/null || die "add_user failed"
+  rabbitmqctl authenticate_user "$MQ_USER" "$MQ_PASS" >/dev/null 2>&1 \
+    || die "rabbitmq user '$MQ_USER' cannot authenticate with the configured MQ_PASS; set MQ_USER/MQ_PASS to a working login or reset the user password"
   rabbitmqctl set_permissions -p "$MQ_VHOST" "$MQ_USER" ".*" ".*" ".*" >/dev/null || die "set_permissions failed"
 }
 
@@ -270,8 +298,14 @@ setup_venv() {
   fi
 }
 
-start_services
-setup_venv
+# Test seam (used by cloud-tests.selftest.sh): skip service start and the venv/pip step and use the
+# venv given in PLANE_VENV as is.
+if [ "${PLANE_TEST_SKIP_SETUP:-0}" = 1 ]; then
+  [ -x "$VENV/bin/python" ] || die "PLANE_TEST_SKIP_SETUP=1 needs an existing venv in PLANE_VENV"
+else
+  start_services
+  setup_venv
+fi
 
 export DJANGO_SETTINGS_MODULE=plane.settings.test SECRET_KEY=test-only-not-a-secret
 export DATABASE_URL="postgresql://$DB_USER:$DB_PASS@$DB_HOST:$DB_PORT/$DB_NAME" POSTGRES_HOST=$DB_HOST

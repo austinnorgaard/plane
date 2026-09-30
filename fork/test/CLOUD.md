@@ -2,9 +2,9 @@
 
 # Running the fork tests natively (no podman)
 
-`node-tests.sh` and `api-tests.sh` need podman. On a plain Linux VM (root or a sudo-capable user, no
-container runtime required) use the native variants instead. They run the same steps, the same
-pytest paths and the same environment.
+`node-tests.sh` and `api-tests.sh` need podman. On a plain Linux VM (no container runtime required) use the native variants instead. They run the same steps, the same
+pytest paths and the same environment. The node script works as a normal user; the api script with
+`--services apt` needs root (or services already installed and running).
 
 | Podman                    | Native                          |
 | ------------------------- | ------------------------------- |
@@ -50,12 +50,19 @@ fork/test/cloud-api-tests.sh --services apt -- -m unit         # "--" ends the s
   `libpq-dev`, needed because `psycopg-c` compiles) are installed with `apt-get` when running as root.
   The script starts the postgres cluster, redis and rabbitmq if their ports are closed, then creates
   the `plane` role (SUPERUSER, the tests create a test database), the `plane` database, and the
-  rabbitmq vhost, user and permissions, each only if missing. Services it started are left running.
+  rabbitmq vhost, user and permissions, each only if missing, and prints a warning when it creates the
+  role. An existing role or rabbitmq user that cannot log in with the configured password makes the
+  script stop at setup with a message; it never changes an existing password. Services it started are
+  left running.
 - `docker`: containers `plane-cloudtest-db`, `-redis`, `-mq`, published on 127.0.0.1 only, on tmpfs.
-  Images: `PG_IMAGE` (postgres 16 alpine), `REDIS_IMAGE` (valkey 7.2.11 alpine, as in the pod),
+  Images: `PG_IMAGE` (postgres 15.7 alpine, as in the pod), `REDIS_IMAGE` (valkey 7.2.11 alpine, as in the pod),
   `MQ_IMAGE` (rabbitmq 3.13.6 alpine, as in the pod). Containers the run created are removed at exit
   unless `--keep`; existing containers are reused or restarted.
 - `external`: nothing is started; the script fails if a service does not answer.
+
+`apt` and `docker` modes accept loopback hosts only (`127.*`, `localhost`, `::1`) and refuse any other
+`DB_HOST`, `REDIS_HOST` or `MQ_HOST`; `apt` also rejects credential values other than letters, digits
+and `_ . @ -`. Use `--services external` for a service on another address.
 
 In every mode a service that already answers on its port is reused, so re-running is safe.
 Ports, hosts and the throwaway credentials are overridable (`DB_PORT`, `REDIS_PORT`, `MQ_PORT`,
@@ -73,7 +80,7 @@ with pytest's exit code (2 for a setup failure).
 
 |              | podman pod (`api-tests.sh`)                       | native reference run                                                  |
 | ------------ | ------------------------------------------------- | --------------------------------------------------------------------- |
-| postgres     | 15.7                                              | 16.x (Ubuntu 24.04 apt)                                               |
+| postgres     | 15.7                                              | 16.x (Ubuntu 24.04 apt); 15.7 with `--services docker`                |
 | redis        | valkey 7.2.11                                     | redis 7.0.15 (apt); `--services docker` defaults to valkey 7.2.11     |
 | rabbitmq     | 3.13.6                                            | distro package (apt); 3.13.6 with `--services docker`                 |
 | python       | 3.12 (backend image)                              | 3.12                                                                  |
@@ -96,5 +103,8 @@ Ubuntu 24.04, node 22, pnpm 11.3.0, python 3.12, on `live-updates/v1.4.2`.
 | API `plane/tests/unit plane/tests/contract`  | 747 passed, 0 failed (about 4 minutes) |
 | API `plane/tests/contract/api/test_pages.py` | 97 passed                              |
 
-`fork/test/cloud-tests.selftest.sh` checks the argument parsing and exit codes of both scripts with
-stubs (no node, database or network needed).
+`fork/test/cloud-tests.selftest.sh` checks the argument parsing and exit codes of both scripts (including a failing pytest, through
+the `PLANE_TEST_SKIP_SETUP=1` seam) with stubs (no node, database or network needed).
+
+The callsites tests are not part of either script: run `python3 -m pytest fork/tools/test_callsites.py`
+separately (no Django needed).

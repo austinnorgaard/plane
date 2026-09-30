@@ -113,11 +113,13 @@ finish() {
 [ "$#" -eq 0 ] && set -- all
 
 # validate step names before doing any work
-for a in "$@"; do
-  case "$a" in
+args=("$@")
+for ((n = 0; n < ${#args[@]}; n++)); do
+  case "${args[n]}" in
     all|install|build-libs|live-test|live-types|web-types|web-lint|live-events) ;;
-    sh) break ;;
-    *) echo "unknown step: $a (steps: ${ALL_STEPS[*]} all sh)" >&2; exit 2 ;;
+    sh) [ -n "${args[n + 1]:-}" ] || { echo "usage: cloud-node-tests.sh sh 'command'" >&2; exit 2; }
+        break ;;
+    *) echo "unknown step: ${args[n]} (steps: ${ALL_STEPS[*]} all sh)" >&2; exit 2 ;;
   esac
 done
 
