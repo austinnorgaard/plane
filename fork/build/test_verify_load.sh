@@ -177,6 +177,61 @@ echo "Test 12: sha256 field is not 64 hex characters..."
 echo "abc123  plane-fork-live.1.tar" > "$test_dir/short.sha256"
 run_test "short digest" "$tag_tar" "$test_dir/short.sha256" 0
 
+# Docker engine: a fake docker whose `image inspect REF` succeeds only for a line
+# of $FAKE_DOCKER_IMAGES. `image exists` is not a docker command and must not be used.
+docker_fake="$test_dir/docker"
+cat > "$docker_fake" << 'EOF2'
+#!/bin/bash
+list="${FAKE_DOCKER_IMAGES:-localhost/plane-fork-web:v1.4.2-live.1
+localhost/plane-fork-live:v1.4.2-live.1
+localhost/plane-fork-api:v1.4.2-live.1}"
+case "$1 $2" in
+  "load -i") exit 0 ;;
+  "image inspect") printf '%s\n' "$list" | grep -qxF -- "$3"; exit $? ;;
+  *) exit 1 ;;
+esac
+EOF2
+chmod +x "$docker_fake"
+
+echo "Test 13: CONTAINER_ENGINE=docker, all three tags..."
+CONTAINER_ENGINE=docker run_test "docker engine" "$tag_tar" "$tag_sha" 1
+
+echo "Test 14: CONTAINER_ENGINE=docker, one image missing..."
+CONTAINER_ENGINE=docker FAKE_DOCKER_IMAGES="$web1
+$live1" run_test "docker missing api image" "$tag_tar" "$tag_sha" 0
+
+echo "Test 15: CONTAINER_ENGINE=docker ignores what podman has..."
+CONTAINER_ENGINE=docker FAKE_DOCKER_IMAGES="$web1" run_test "docker uses docker only" "$tag_tar" "$tag_sha" 0
+
+echo "Test 16: unknown CONTAINER_ENGINE..."
+CONTAINER_ENGINE=rkt run_test "unknown engine" "$tag_tar" "$tag_sha" 0
+
+# Autodetect with only docker installed: PATH holds the fake docker and the few
+# tools the script needs, but no podman.
+only_docker="$test_dir/only-docker"
+mkdir -p "$only_docker"
+cp "$docker_fake" "$only_docker/docker"
+for tool in awk basename sha256sum tr grep; do
+  ln -s "$(command -v $tool)" "$only_docker/$tool"
+done
+echo "Test 17: autodetect falls back to docker when podman is absent..."
+if PATH="$only_docker" "$BASH" "$verify_load" "$tag_tar" "$tag_sha" > /dev/null 2>&1; then
+  ((test_count++)); ((pass_count++)); echo -e "${GREEN}PASS${NC} docker autodetect"
+else
+  ((test_count++)); ((fail_count++)); echo -e "${RED}FAIL${NC} docker autodetect"
+fi
+
+echo "Test 18: autodetect prefers podman when both are installed..."
+docker_marker="$test_dir/docker-was-called"
+cat > "$test_dir/docker" << EOF2
+#!/bin/bash
+touch "$docker_marker"
+exit 1
+EOF2
+run_test "podman preferred" "$tag_tar" "$tag_sha" 1
+((test_count++))
+if [ ! -e "$docker_marker" ]; then ((pass_count++)); echo -e "${GREEN}PASS${NC} docker not invoked"; else ((fail_count++)); echo -e "${RED}FAIL${NC} docker invoked"; fi
+
 # Summary
 echo ""
 echo "========================================="

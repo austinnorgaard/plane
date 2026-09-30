@@ -22,9 +22,9 @@ availlog="$dir/$label.avail.log"
 : > "$freelog"
 : > "$availlog"
 
-( while :; do echo "--- $(date +%s)"; free -m; sleep 5; done ) >> "$freelog" &
+( while :; do echo "--- $(date +%s)"; free -m; sleep 5; done ) >> "$freelog" 2>&1 &
 s1=$!
-( while :; do echo "$(date +%s) $(awk '/^MemAvailable/{print int($2/1024)}' /proc/meminfo)"; sleep 1; done ) >> "$availlog" &
+( while :; do echo "$(date +%s) $(awk '/^MemAvailable/{print int($2/1024)}' /proc/meminfo)"; sleep 1; done ) >> "$availlog" 2>&1 &
 s2=$!
 
 start=$(date +%s)
