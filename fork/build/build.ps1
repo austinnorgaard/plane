@@ -4,7 +4,7 @@
 Build fork images v1.4.2-live.N and save to tar archive.
 
 .DESCRIPTION
-Builds three Docker images (web, live, backend) from a specific commit,
+Builds three Docker images (frontend, live, backend) from a specific commit,
 records build metrics, and saves them to a tar archive with sha256 checksum.
 Process counts are checked to ensure no windows were opened.
 
@@ -16,8 +16,7 @@ origin/live-updates/v1.4.2. Required.
 The build number (live.<N>). Used in image tags and output filenames. Required.
 
 .PARAMETER Distro
-The WSL distro name to run builds in (e.g., 'podman-uosserver'). Required
-unless using -DryRun.
+The WSL distro name to run builds in. Required unless using -DryRun.
 
 .PARAMETER OutDir
 Output directory inside the distro for the tar archive. Defaults to /root/out.
@@ -26,7 +25,7 @@ Output directory inside the distro for the tar archive. Defaults to /root/out.
 Print commands instead of running them. Useful for validation.
 
 .EXAMPLE
-.\build.ps1 -Sha ec33e4fb6d9e41972b03d33fd0fac2595f138ac2 -N 1 -Distro podman-uosserver
+.\build.ps1 -Sha ec33e4fb6d9e41972b03d33fd0fac2595f138ac2 -N 1 -Distro <distro>
 
 .EXAMPLE
 .\build.ps1 -Sha ec33e4fb6d9e41972b03d33fd0fac2595f138ac2 -N 1 -DryRun
@@ -155,9 +154,9 @@ if (-not $DryRun) {
 }
 
 $buildCommands = @(
-  "bash -c `"cd /root/plane-build/$Sha && fork/test/measure.sh web podman build --cpu-period=100000 --cpu-quota=800000 -f apps/web/Dockerfile.web -t localhost/plane-fork-web:$imageTag .`"",
+  "bash -c `"cd /root/plane-build/$Sha && fork/test/measure.sh frontend podman build --cpu-period=100000 --cpu-quota=800000 -f apps/web/Dockerfile.web -t localhost/plane-fork-frontend:$imageTag .`"",
   "bash -c `"cd /root/plane-build/$Sha && fork/test/measure.sh live podman build --cpu-period=100000 --cpu-quota=800000 -f apps/live/Dockerfile.live -t localhost/plane-fork-live:$imageTag .`"",
-  "bash -c `"cd /root/plane-build/$Sha && podman build -f fork/docker/Dockerfile.fork-api -t localhost/plane-fork-backend:$imageTag .`""
+  "bash -c `"cd /root/plane-build/$Sha && fork/test/measure.sh backend podman build -f fork/docker/Dockerfile.fork-api -t localhost/plane-fork-backend:$imageTag .`""
 )
 
 foreach ($buildCmd in $buildCommands) {
@@ -170,7 +169,7 @@ if (-not $DryRun) {
   Write-Host "Saving images to $OutDir/$tarName..."
 }
 
-$saveCmd = "mkdir -p $OutDir && podman save -m --format docker-archive -o $OutDir/$tarName localhost/plane-fork-web:$imageTag localhost/plane-fork-live:$imageTag localhost/plane-fork-backend:$imageTag"
+$saveCmd = "mkdir -p $OutDir && podman save -m --format docker-archive -o $OutDir/$tarName localhost/plane-fork-frontend:$imageTag localhost/plane-fork-live:$imageTag localhost/plane-fork-backend:$imageTag"
 $rc = Invoke-Sh $saveCmd
 if ($rc -ne 0) { throw "Failed to save images to tar" }
 
