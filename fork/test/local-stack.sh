@@ -21,8 +21,8 @@
 # Compose provider, first match wins: $COMPOSE_CMD, `podman compose` (only when it
 # has a provider), docker-compose, podman-compose, `docker compose`. `podman compose`
 # only works when a provider is installed (fork/SPIKE.md: none was installed on the
-# build host); install docker-compose or podman-compose there. docker-compose needs
-# the podman socket (`systemctl enable --now podman.socket`).
+# build host). Recommended: the docker-compose v2 binary with DOCKER_HOST pointing at the
+# podman socket; alternative: `pip install podman-compose`. See the PR for the commands.
 #
 # Settings (environment, all optional):
 #   FORK_N                     image build number, default 1 (tag v1.4.2-live.1)
@@ -198,6 +198,16 @@ wait_settled() {
 
 # ------------------------------------------------------------------ up
 
+image_exists() {
+  if command -v podman >/dev/null 2>&1; then
+    podman image exists "$1"
+  elif command -v docker >/dev/null 2>&1; then
+    docker image inspect "$1" >/dev/null 2>&1
+  else
+    return 0
+  fi
+}
+
 SEED_USERS=$(
   cat <<'PY'
 from django.conf import settings
@@ -303,6 +313,11 @@ cmd_up() {
   MODE=fork
   dc config -q >/dev/null 2>"$TMP/cfg.err" || { log "compose config failed:"; head -n 5 "$TMP/cfg.err" >&2; return 1; }
   log "compose config: ok"
+  local svc missing=0
+  for svc in web live api; do
+    image_exists "localhost/plane-fork-$svc:v1.4.2-live.$(envval FORK_N)" || { log "missing image localhost/plane-fork-$svc:v1.4.2-live.$(envval FORK_N); build or load it first"; missing=1; }
+  done
+  [ "$missing" -eq 0 ] || return 1
   dc up -d || { log "compose up failed"; return 1; }
   wait_code "$url/api/instances/" '^200$' 300 || { log "api did not answer within 300 s"; return 1; }
   wait_code "$url/live/health" '^200$' 120 || { log "live health did not answer within 120 s"; return 1; }
@@ -391,7 +406,58 @@ print("GUARD loaded_nokey=%s loaded_key=%s loaded_xff=%s rebase_nokey=%s loaded_
 PY
 )
 
-count_fork_images() { dc ps 2>/dev/null | grep -c 'plane-fork-'; }
+FORK_SVCS=(web live api worker beat-worker)
+L1_SVCS=(api worker live)
+
+# switch MODE SERVICE...: apply the file set MODE to the named services. --force-recreate
+# makes the result independent of the provider (podman-compose does not recreate a
+# container whose configuration changed); --no-deps keeps the databases untouched.
+switch() {
+  MODE=$1
+  shift
+  dc up -d --force-recreate --no-deps "$@" >/dev/null 2>&1
+}
+
+# settle LABEL URL API KEY SECONDS: wait for api and live after a switch; a timeout is a FAIL
+settle() {
+  wait_settled "$3/pages/" "$4" "$5" || bad "$1: api did not answer within $5 s" "timeout"
+  wait_code "$2/live/health" '^200$' 90 || bad "$1: live health did not answer within 90 s" "timeout"
+}
+
+# running_images: images of the running containers of this compose project, one per line
+running_images() {
+  local eng label out
+  for eng in podman docker; do
+    command -v "$eng" >/dev/null 2>&1 || continue
+    for label in io.podman.compose.project com.docker.compose.project; do
+      out=$("$eng" ps --filter "label=$label=$PROJECT" --format '{{.Image}}' 2>/dev/null | tr -d '\r' | grep -v '^$')
+      if [ -n "$out" ]; then
+        printf '%s\n' "$out"
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
+IMG_TOTAL=0
+IMG_FORK=0
+count_images() {
+  local list
+  list=$(running_images) || list=""
+  IMG_TOTAL=$(printf '%s' "$list" | grep -c .)
+  IMG_FORK=$(printf '%s' "$list" | grep -c 'plane-fork-')
+}
+# image_check NAME WANT_FORK: FAIL when no image list is available, so it never passes vacuously
+image_check() {
+  if [ "$IMG_TOTAL" -lt 5 ]; then
+    bad "$1" "image list unavailable (saw $IMG_TOTAL running containers)"
+  elif [ "$IMG_FORK" = "$2" ]; then
+    ok "$1"
+  else
+    bad "$1" "found $IMG_FORK fork images"
+  fi
+}
 
 cmd_smoke() {
   [ -f "$STATE_FILE" ] || die "no $(basename "$STATE_FILE"); run '$0 up' first"
@@ -476,13 +542,11 @@ cmd_smoke() {
   expect_code "proxy /live/fork/pages/rebase without key: 403" '^403$'
 
   report "-- rollback L1 (both flags off)"
-  MODE=l1
   gen_l1
-  if dc up -d api worker live >/dev/null 2>&1; then
-    wait_settled "$api/pages/" "$mk" 120
+  if switch l1 "${L1_SVCS[@]}"; then
+    settle "L1" "$url" "$api" "$mk" 120
     req GET "$api/pages/" "$mk"
     expect_code "L1 pages API answers 404" '^404$'
-    wait_code "$url/live/health" '^200$' 60
     out=$(WS_COOKIE="session-id=$(stateval MEMBER_SESSION)" probe --mode connect --url "$ws" --origin "$origin" --slug "$WORKSPACE_SLUG" --project "$pid")
     [ "$(pj "$out" close)" = 4404 ] && ok "L1 events socket closes with 4404" || bad "L1 events socket closes with 4404" "close=$(pj "$out" close) http=$(pj "$out" http_status)"
     req PATCH "$api/issues/$iid/" "$mk" '{"name":"lu smoke issue l1"}'
@@ -490,9 +554,8 @@ cmd_smoke() {
   else
     bad "L1 apply" "compose up failed"
   fi
-  MODE=fork
-  if dc up -d api worker live >/dev/null 2>&1; then
-    wait_settled "$api/pages/" "$mk" 120
+  if switch fork "${L1_SVCS[@]}"; then
+    settle "roll forward after L1" "$url" "$api" "$mk" 120
     req GET "$api/pages/" "$mk"
     expect_code "roll forward after L1: pages API answers 200" '^200$'
   else
@@ -501,14 +564,13 @@ cmd_smoke() {
 
   report "-- rollback L2 (stock images)"
   MODE=fork
-  local n
-  n=$(count_fork_images)
-  [ "$n" = 5 ] && ok "before L2: 5 services run fork images" || bad "before L2: 5 services run fork images" "found $n"
-  MODE=stock
-  if dc up -d >/dev/null 2>&1; then
-    wait_settled "$api/pages/" "$mk" 180
-    n=$(count_fork_images)
-    [ "$n" = 0 ] && ok "L2: no service runs a fork image" || bad "L2: no service runs a fork image" "found $n"
+  count_images
+  image_check "before L2: 5 services run fork images" 5
+  if switch stock "${FORK_SVCS[@]}"; then
+    settle "L2" "$url" "$api" "$mk" 180
+    MODE=stock
+    count_images
+    image_check "L2: no service runs a fork image" 0
     req GET "$api/pages/" "$mk"
     expect_code "L2 pages API answers 404" '^404$'
     req PATCH "$api/issues/$iid/" "$mk" '{"name":"lu smoke issue l2"}'
@@ -518,20 +580,20 @@ cmd_smoke() {
   else
     bad "L2 apply" "compose up failed"
   fi
-  MODE=fork
-  if dc up -d >/dev/null 2>&1; then
-    wait_settled "$api/pages/" "$mk" 180
+  if switch fork "${FORK_SVCS[@]}"; then
+    settle "roll forward after L2" "$url" "$api" "$mk" 180
     req GET "$api/pages/" "$mk"
     expect_code "roll forward after L2: pages API answers 200" '^200$'
-    n=$(count_fork_images)
-    [ "$n" = 5 ] && ok "roll forward after L2: 5 services run fork images" || bad "roll forward after L2: 5 services run fork images" "found $n"
+    count_images
+    image_check "roll forward after L2: 5 services run fork images" 5
   else
     bad "roll forward after L2" "compose up failed"
   fi
 
-  report "-- info: pages paths seen in the api log (method and path templates)"
+  report "-- MCP page-path confirmation: NOT COVERED (optional PC step)"
+  report "   observed api-log method and path templates (from this script's own calls):"
   dc logs --tail 400 api 2>/dev/null | tr -d '\r' | grep -o '"[A-Z]* /api/v1/[^ ]*pages[^ ]*' \
-    | sed -E 's/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/<id>/g; s#/workspaces/[^/]+#/workspaces/<slug>#' | sort -u | while IFS= read -r l; do report "  $l"; done
+    | sed -E 's/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/<id>/g; s#/workspaces/[^/]+#/workspaces/<slug>#' | sort -u | while IFS= read -r l; do report "   $l"; done
 
   # a page for the browser steps
   local mpage=""

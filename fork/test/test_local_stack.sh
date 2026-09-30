@@ -40,6 +40,7 @@ cat >"$T/bin/podman" <<'STUB'
 echo "podman $*" >>"$STUB_DIR/podman.log"
 case "$*" in
   "compose version"*) exit 0 ;;
+  "image exists "*) [ -z "${STUB_MISSING_IMAGE:-}" ]; exit $? ;;
 esac
 args=" $* "
 if [[ $args == *" -f "*"local-stack.l1.yaml"* ]]; then echo l1 >"$STUB_DIR/phase"
@@ -47,12 +48,13 @@ elif [[ $args == *"docker-compose.override.yaml"* ]]; then echo fork >"$STUB_DIR
 elif [[ $args == *" up "* ]]; then echo stock >"$STUB_DIR/phase"; fi
 phase=$(cat "$STUB_DIR/phase" 2>/dev/null || echo fork)
 case "$args" in
-  *" ps "*)
+  *" ps --filter "*)
+    [ -n "${STUB_NO_IMAGES:-}" ] && exit 0
     if [ "$phase" = stock ]; then
-      for s in web live api worker beat-worker; do echo "x_${s}_1 makeplane/plane-$s:v1.4.2 Up"; done
+      for s in web live api worker beat-worker proxy; do echo "makeplane/plane-$s:v1.4.2"; done
     else
-      for s in web live api worker beat-worker; do echo "x_${s}_1 localhost/plane-fork-$s:v1.4.2-live.1 Up"; done
-      echo "x_proxy_1 makeplane/plane-proxy:v1.4.2 Up"
+      for s in web live api worker beat-worker; do echo "localhost/plane-fork-$s:v1.4.2-live.1"; done
+      echo "makeplane/plane-proxy:v1.4.2"
     fi ;;
   *" exec "*"manage.py shell"*)
     if [[ $* == *"PROJECT_ID ="* ]]; then echo "STATE MEMBERS_SEEDED=1"; exit 0; fi
@@ -218,6 +220,29 @@ check "a frame slower than 2 s makes smoke exit non-zero" "$([ "$rc" -ne 0 ] && 
 STUB_GUARD_BAD=1 "$SCRIPT" smoke >"$T/smoke-fail3.out" 2>&1
 rc=$?
 check "a live guard answering 200 without a key makes smoke exit non-zero" "$([ "$rc" -ne 0 ] && has "$T/smoke-fail3.out" '^FAIL direct live /loaded without key' && echo 0 || echo 1)"
+
+# ------------------------------------------------------------------ provider-independent switching
+new_dir
+"$SCRIPT" up >/dev/null 2>&1
+: >"$T/podman.log"
+"$SCRIPT" smoke >/dev/null 2>&1
+ups=$(grep -c ' up -d ' "$T/podman.log")
+noflag=$(grep ' up -d ' "$T/podman.log" | grep -vc -- '--force-recreate --no-deps')
+check "smoke switches L1, roll forward, L2, roll forward with up -d (4 calls)" "$([ "$ups" = 4 ] && echo 0 || echo 1)"
+check "every smoke up -d passes --force-recreate and --no-deps" "$([ "$noflag" = 0 ] && echo 0 || echo 1)"
+check "L1 switch names api worker live" "$(grep ' up -d ' "$T/podman.log" | head -n 1 | grep -q -- '--no-deps api worker live$' && echo 0 || echo 1)"
+check "L2 switch names all five overridden services" "$(grep ' up -d ' "$T/podman.log" | sed -n 3p | grep -q -- '--no-deps web live api worker beat-worker$' && echo 0 || echo 1)"
+
+STUB_NO_IMAGES=1 "$SCRIPT" smoke >"$T/smoke-noimg.out" 2>&1
+rc=$?
+check "no image list makes the image checks FAIL, not pass" "$([ "$rc" -ne 0 ] && grep -c 'image list unavailable' "$T/smoke-noimg.out" | grep -q '^3$' && echo 0 || echo 1)"
+
+# ------------------------------------------------------------------ precheck of the fork images
+new_dir
+STUB_MISSING_IMAGE=1 "$SCRIPT" up >"$T/up-missing.out" 2>&1
+rc=$?
+check "up stops when a fork image is missing" "$([ "$rc" -ne 0 ] && has "$T/up-missing.out" 'missing image localhost/plane-fork-web:v1.4.2-live.1' && echo 0 || echo 1)"
+check "up did not start the stack when an image is missing" "$(grep -q ' up -d' "$T/podman.log" && echo 1 || echo 0)"
 
 # ------------------------------------------------------------------ down
 new_dir
