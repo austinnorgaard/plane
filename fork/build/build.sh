@@ -5,7 +5,8 @@
 # to a docker-archive tar. Linux counterpart of build.ps1, same contract.
 #
 # Usage:
-#   build.sh --sha <40-hex> --n <int> [--out-dir DIR] [--engine docker|podman] [--dry-run]
+#   build.sh --sha <40-hex> --n <int> [--out-dir DIR] [--engine docker|podman]
+#                [--ca-bundle FILE] [--build-proxy] [--dry-run]
 #
 #   --sha      full commit sha to build; must be contained in
 #              origin/live-updates/v1.4.2 (checked after a fetch). Required.
@@ -13,6 +14,21 @@
 #   --out-dir  where plane-fork-live.<N>.tar and .sha256 are written.
 #              Default /root/out.
 #   --engine   docker or podman. Default: podman if installed, else docker.
+#   --ca-bundle FILE
+#              PEM bundle of a TLS-intercepting proxy CA. Default: env
+#              BUILD_CA_BUNDLE. When set, the copies of apps/web/Dockerfile.web
+#              and apps/live/Dockerfile.live inside the temporary build tree
+#              (never the ones in the repo) are patched so every RUN that calls
+#              apk mounts the file as a build secret over
+#              /etc/ssl/certs/ca-certificates.crt, and the build gets
+#              --secret id=build_ca,src=FILE. The CA exists only while those
+#              RUN steps execute and is not written to any layer.
+#   --build-proxy
+#              for hosts whose build containers can only reach the network
+#              through a proxy on the host's loopback: build web and live with
+#              --network host and pass HTTPS_PROXY/NO_PROXY (from this shell's
+#              environment) as build args. Those are predefined proxy args, so
+#              they are not stored in the image config.
 #   --dry-run  print the commands instead of running them (nothing is executed,
 #              no fetch, no README change).
 #
@@ -31,7 +47,7 @@ die() {
 }
 
 usage() {
-  sed -n '4,22p' "$0" | sed 's/^# \{0,1\}//' >&2
+  sed -n '4,38p' "$0" | sed 's/^# \{0,1\}//' >&2
 }
 
 sha=""
@@ -39,20 +55,24 @@ n=""
 out_dir="/root/out"
 engine=""
 dry_run=0
+ca_bundle="${BUILD_CA_BUNDLE:-}"
+build_proxy=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --sha|--n|--out-dir|--engine)
+    --sha|--n|--out-dir|--engine|--ca-bundle)
       [ $# -ge 2 ] || die "$1 needs a value"
       case "$1" in
         --sha) sha="$2" ;;
         --n) n="$2" ;;
         --out-dir) out_dir="$2" ;;
         --engine) engine="$2" ;;
+        --ca-bundle) ca_bundle="$2" ;;
       esac
       shift 2
       ;;
     --dry-run) dry_run=1; shift ;;
+    --build-proxy) build_proxy=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage; die "unknown argument: $1" ;;
   esac
@@ -62,8 +82,18 @@ done
 [ -n "$n" ] || { usage; die "--n is required"; }
 [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || die "Invalid SHA format: must be 40 hex characters, got '$sha'"
 [[ "$n" =~ ^[0-9]+$ ]] || die "N must be a non-negative integer, got '$n'"
+n=$((10#$n)) # 007 and 7 are the same build; also avoids octal parsing
 out_dir="${out_dir%/}"
 [[ "$out_dir" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "Invalid --out-dir: must be an absolute path, got '$out_dir'"
+
+if [ -n "$ca_bundle" ]; then
+  [[ "$ca_bundle" =~ ^[A-Za-z0-9._/@+-]+$ ]] || die "Invalid --ca-bundle path '$ca_bundle'"
+  if [ "$dry_run" -eq 0 ]; then
+    [ -f "$ca_bundle" ] && [ -r "$ca_bundle" ] || die "--ca-bundle '$ca_bundle' is not a readable file"
+    grep -q -- '-----BEGIN CERTIFICATE-----' "$ca_bundle" || die "--ca-bundle '$ca_bundle' contains no PEM certificate"
+    ca_bundle="$(cd "$(dirname "$ca_bundle")" && pwd)/$(basename "$ca_bundle")"
+  fi
+fi
 
 if [ -n "$engine" ]; then
   case "$engine" in
@@ -125,7 +155,7 @@ if [ "$dry_run" -eq 1 ]; then
   echo "extracted file count is compared with: git ls-tree -r $sha (minus submodule entries)"
 else
   echo "Archiving $sha into $build_dir..."
-  rm -rf "$build_dir"
+  rm -rf "$build_dir" || die "Cannot remove old $build_dir"
   mkdir -p "$build_dir" || die "Cannot prepare $build_dir"
   git -C "$repo_root" -c core.autocrlf=false archive --format=tar "$sha" |
     tar -x --no-same-owner -C "$build_dir" || die "git archive or extraction failed"
@@ -140,6 +170,26 @@ else
   echo "Extraction verified: $actual_files files"
 fi
 
+# 2b. With --ca-bundle: patch the build tree's copies of the two Dockerfiles that
+# run apk. Only lines that start with RUN and call apk get the secret mount.
+patch_dockerfile() { # patch_dockerfile FILE (relative to the build tree)
+  local f="$1"
+  sed -i -E '/^RUN (.*[ ;&|(])?apk([ ;&|)]|$)/ s#^RUN #RUN --mount=type=secret,id=build_ca,target=/etc/ssl/certs/ca-certificates.crt #' "$f" ||
+    return 1
+  head -n1 "$f" | grep -q '^# syntax=' || sed -i '1i # syntax=docker/dockerfile:1' "$f" || return 1
+  grep -q 'id=build_ca' "$f" || return 1
+}
+if [ -n "$ca_bundle" ]; then
+  if [ "$dry_run" -eq 1 ]; then
+    echo "+ patch apk RUN lines of $build_dir/apps/web/Dockerfile.web and $build_dir/apps/live/Dockerfile.live (build tree copies only) to mount secret build_ca"
+  else
+    for f in apps/web/Dockerfile.web apps/live/Dockerfile.live; do
+      patch_dockerfile "$build_dir/$f" || die "Patching $f for --ca-bundle failed"
+    done
+    echo "Patched apk steps of the web and live Dockerfiles in the build tree to use secret build_ca"
+  fi
+fi
+
 # 3. Build the three images through measure.sh. --label marks the images so the
 # prune below only touches this build's leftovers. The CPU cap that build.ps1
 # uses to keep a shared PC responsive is applied for podman only; a cloud host
@@ -148,9 +198,12 @@ cpu_flags=()
 [ "$engine" = podman ] && cpu_flags=(--cpu-period=100000 --cpu-quota=800000)
 
 measure_dir="$build_root/logs"
-measure_out="$(mktemp)" || die "mktemp failed"
-trap 'rm -f "$measure_out"' EXIT
-run mkdir -p "$measure_dir"
+measure_out=""
+if [ "$dry_run" -eq 0 ]; then
+  measure_out="$(mktemp)" || die "mktemp failed"
+  trap 'rm -f "$measure_out"' EXIT
+fi
+run mkdir -p "$measure_dir" || die "Cannot create $measure_dir"
 
 echo "Building images with tag $image_tag..."
 declare -A dockerfile=(
@@ -162,6 +215,12 @@ builds=(web live api)
 for b in "${builds[@]}"; do
   flags=()
   [ "$b" = api ] || flags=(${cpu_flags[@]+"${cpu_flags[@]}"})
+  if [ "$b" != api ]; then
+    [ -z "$ca_bundle" ] || flags+=(--secret "id=build_ca,src=$ca_bundle")
+    if [ "$build_proxy" -eq 1 ]; then
+      flags+=(--network host --build-arg HTTPS_PROXY --build-arg NO_PROXY)
+    fi
+  fi
   cmd=(fork/test/measure.sh "$b" "$engine" build ${flags[@]+"${flags[@]}"} --label "$build_label"
     -f "${dockerfile[$b]}" -t "localhost/plane-fork-$b:$image_tag" .)
   if [ "$dry_run" -eq 1 ]; then
@@ -178,7 +237,7 @@ done
 # 4. Save as docker-archive and checksum.
 refs=("localhost/plane-fork-web:$image_tag" "localhost/plane-fork-live:$image_tag" "localhost/plane-fork-api:$image_tag")
 echo "Saving images to $out_dir/$tar_name..."
-run mkdir -p "$out_dir"
+run mkdir -p "$out_dir" || die "Cannot create $out_dir"
 if [ "$engine" = podman ]; then
   run podman save -m --format docker-archive -o "$out_dir/$tar_name" "${refs[@]}" || die "Saving images failed"
 else
