@@ -22,7 +22,7 @@ subscriber to also refetch after a short delay, for deletes whose rows may
 still be visible to a read that races the write.
 
 Affected ids come from ``extract_issue_ids``, which also covers the parent of a
-sub-issue (``issue.`` types) and the ``related_issue`` of a relation delete.
+sub-issue on assign, create with parent and reparent (``issue.`` types) and the ``related_issue`` of a relation delete.
 
 Publishing is gated by ``LIVE_EVENTS_ENABLED == "1"`` and never raises.
 """
@@ -162,6 +162,7 @@ def extract_issue_ids(type, issue_id, requested_data, current_instance, activiti
     updated_cycle_issues / updated_module_issues, (f) created_cycle_issues /
     created_module_issues, (g) the in-memory activity rows, (h) for ``issue.``
     types only, the sub-issue parent in requested_data and current_instance
+    (sub-issue assign, create with parent, reparent through update; not delete)
     (``parent``: an id or a dict with an ``id``), (i) for ``issue_relation``
     types only, requested_data ``related_issue`` (the relation delete shape).
     """
@@ -192,7 +193,8 @@ def extract_issue_ids(type, issue_id, requested_data, current_instance, activiti
         # (g)
         found += [_uuid_or_none(getattr(a, "issue_id", None)) for a in (activities or [])]
 
-        # (h) sub-issue parent: assign, reparent, create with parent, delete
+        # (h) sub-issue parent: assign, create with parent, reparent through update
+        # (delete sends current_instance={} so the parent is not published; known limit)
         if str(type).startswith("issue."):
             for source in (req, cur):
                 parent = source.get("parent")
