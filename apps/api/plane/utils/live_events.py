@@ -21,6 +21,9 @@ Payload (JSON)::
 subscriber to also refetch after a short delay, for deletes whose rows may
 still be visible to a read that races the write.
 
+Affected ids come from ``extract_issue_ids``, which also covers the parent of a
+sub-issue (``issue.`` types) and the ``related_issue`` of a relation delete.
+
 Publishing is gated by ``LIVE_EVENTS_ENABLED == "1"`` and never raises.
 """
 
@@ -157,7 +160,10 @@ def extract_issue_ids(type, issue_id, requested_data, current_instance, activiti
     Union of: (a) issue_id unless it is really a cycle or module id, (b)
     requested_data issues, (c) cycles_list, (d) modules_list, (e)
     updated_cycle_issues / updated_module_issues, (f) created_cycle_issues /
-    created_module_issues, (g) the in-memory activity rows.
+    created_module_issues, (g) the in-memory activity rows, (h) for ``issue.``
+    types only, the sub-issue parent in requested_data and current_instance
+    (``parent``: an id or a dict with an ``id``), (i) for ``issue_relation``
+    types only, requested_data ``related_issue`` (the relation delete shape).
     """
     try:
         req = _load(requested_data)
@@ -185,6 +191,18 @@ def extract_issue_ids(type, issue_id, requested_data, current_instance, activiti
 
         # (g)
         found += [_uuid_or_none(getattr(a, "issue_id", None)) for a in (activities or [])]
+
+        # (h) sub-issue parent: assign, reparent, create with parent, delete
+        if str(type).startswith("issue."):
+            for source in (req, cur):
+                parent = source.get("parent")
+                if isinstance(parent, dict):
+                    parent = parent.get("id")
+                found.append(_uuid_or_none(parent))
+
+        # (i) relation delete sends the other issue as related_issue
+        if str(type).startswith("issue_relation"):
+            found.append(_uuid_or_none(req.get("related_issue")))
 
         ids = list(dict.fromkeys(i for i in found if i))
         if len(ids) > MAX_IDS or (not ids and issue_id is None):
