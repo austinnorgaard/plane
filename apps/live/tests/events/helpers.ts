@@ -76,6 +76,7 @@ export const evt = (project_id: string, issue_ids: string[] | "*", extra: Record
 export type AuthState = {
   users: Record<string, { id: string } | { status: number }>; // by cookie
   roles: Record<string, Record<string, Record<string, number>>>; // slug -> cookie -> roles
+  rolesError?: Record<string, number>; // slug -> status the roles call fails with
 };
 
 export const fakeAuth = (state: AuthState): EventsAuthApi & { state: AuthState } => ({
@@ -86,6 +87,8 @@ export const fakeAuth = (state: AuthState): EventsAuthApi & { state: AuthState }
     return user;
   },
   async projectRoles(cookie, slug) {
+    const failing = state.rolesError?.[slug];
+    if (failing) throw Object.assign(new Error("roles"), { statusCode: failing });
     const roles = state.roles[slug]?.[cookie];
     if (!roles) throw Object.assign(new Error("roles"), { statusCode: 403 });
     return roles;
@@ -107,11 +110,15 @@ export const flushPromises = async () => {
   await vi.advanceTimersByTimeAsync(0);
 };
 
-export const makeHub = (env: Record<string, string> = {}, state: AuthState = defaultState()) => {
+export const makeHub = (
+  env: Record<string, string> = {},
+  state: AuthState = defaultState(),
+  log?: { warn: (message: string) => unknown }
+) => {
   const config = parseEventsConfig({ LIVE_EVENTS_ENABLED: "1", WEB_URL: WEB, ...env });
   const sub = new FakeSubscriber();
   const auth = fakeAuth(state);
-  const hub = new EventsHub({ config, auth, createSubscriber: () => sub });
+  const hub = new EventsHub({ config, auth, createSubscriber: () => sub, log });
   return { hub, sub, auth, config };
 };
 

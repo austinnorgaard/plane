@@ -84,3 +84,16 @@ export const isSessionGone = (error: unknown): boolean => {
   const status = (error as { statusCode?: number } | null)?.statusCode;
   return status === 401 || status === 403;
 };
+
+/**
+ * How a failed call should be treated. For the current-user call a 401 or 403 means the session is
+ * dead. For the project-roles call only a 401 does: a 403 means no access to that workspace.
+ */
+export type AuthFailure = "session" | "denied" | "transient";
+
+export const classifyRolesError = (error: unknown): AuthFailure => {
+  const status = (error as { statusCode?: number } | null)?.statusCode;
+  if (status === 401) return "session";
+  if (status === 403) return "denied";
+  return "transient";
+};
