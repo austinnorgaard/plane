@@ -53,6 +53,27 @@ class TestPublishWorkItemEvent:
         assert json.loads(redis_mock.publish.call_args.args[1])["issue_ids"] == "*"
         assert json.loads(redis_mock.publish.call_args.args[1])["settle"] is False
 
+    def test_over_cap_publishes_wildcard(self, enabled, redis_mock):
+        ids = [str(uuid.uuid4()) for _ in range(live_events.MAX_IDS + 1)]
+        assert publish_work_item_event(PROJECT, ids, "issue", "deleted", ACTOR, settle=True) is True
+        payload = json.loads(redis_mock.publish.call_args.args[1])
+        assert payload["issue_ids"] == "*"
+        assert payload["kind"] == "issue"
+        assert payload["verb"] == "deleted"
+        assert payload["actor_id"] == ACTOR
+        assert payload["settle"] is True
+        assert isinstance(payload["ts"], float)
+
+    def test_exactly_cap_publishes_list(self, enabled, redis_mock):
+        ids = [str(uuid.uuid4()) for _ in range(live_events.MAX_IDS)]
+        publish_work_item_event(PROJECT, ids, "issue", "deleted", ACTOR)
+        assert json.loads(redis_mock.publish.call_args.args[1])["issue_ids"] == ids
+
+    def test_duplicates_are_deduped_before_cap(self, enabled, redis_mock):
+        ids = [str(uuid.uuid4()) for _ in range(live_events.MAX_IDS)]
+        publish_work_item_event(PROJECT, ids + [ids[0]], "issue", "deleted", ACTOR)
+        assert json.loads(redis_mock.publish.call_args.args[1])["issue_ids"] == ids
+
     def test_empty_ids_publishes_nothing(self, enabled, redis_mock):
         assert publish_work_item_event(PROJECT, [], "issue", "updated", ACTOR) is False
         redis_mock.publish.assert_not_called()

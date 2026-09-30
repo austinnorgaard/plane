@@ -16,8 +16,9 @@ Payload (JSON)::
      "issue_ids": ["<uuid>", ...] | "*", "actor_id": "<uuid>" | null,
      "ts": <epoch seconds, float>, "settle": bool}
 
-``ts`` is the publish time. ``issue_ids`` is ``"*"`` when the affected set is unknown or larger than
-``MAX_IDS``, meaning "refetch everything in the project". ``settle`` asks the
+``ts`` is the publish time. ``issue_ids`` is ``"*"`` when the affected set is
+unknown or larger than ``MAX_IDS`` (applied both when ids are extracted and
+again at publish time), meaning "refetch everything in the project". ``settle`` asks the
 subscriber to also refetch after a short delay, for deletes whose rows may
 still be visible to a read that races the write.
 
@@ -77,6 +78,8 @@ def publish_work_item_event(project_id, issue_ids, kind, verb, actor_id, settle=
             issue_ids = list(dict.fromkeys(str(i) for i in issue_ids))
             if not issue_ids:
                 return False
+            if len(issue_ids) > MAX_IDS:
+                issue_ids = ALL_IDS
         payload = {
             "v": 1,
             "project_id": str(project_id),
