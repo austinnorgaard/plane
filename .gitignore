@@ -117,3 +117,10 @@ packages/i18n/src/types/keys.generated.ts
 
 # Local security notes (not for version control)
 /security/
+
+# Local pre-deploy stack: generated at run time, throwaway values (fork/test/local-stack.sh)
+fork/test/local-stack.env
+fork/test/local-stack.state
+fork/test/local-stack.report
+fork/test/local-stack.l1.yaml
+fork/test/local-stack.extra.yaml
