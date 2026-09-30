@@ -257,6 +257,31 @@ describe("membership", () => {
     expect(ws.of("subscribed")[1]).toEqual({ type: "subscribed", project_ids: [P1], denied: [] });
   });
 
+  it("projects still pending or denied at the retry never receive events; granted ones do", async () => {
+    const state = defaultState();
+    state.rolesError = { acme: 502 };
+    const { hub, sub } = await started({}, state);
+    const ws = await connect(hub);
+    await subscribe(ws, "acme", [P1, P2, P3]); // P3 is not an ALICE project in acme
+    // still failing at the retry: everything stays pending and nothing is delivered
+    await advanceAlive([ws], 5 * 60_000);
+    for (const p of [P1, P2, P3]) sub.publish(p, evt(p, [I1]));
+    vi.advanceTimersByTime(300);
+    expect(ws.of("events")).toEqual([]);
+    // the retry succeeds: P1 and P2 are granted, P3 is denied
+    delete state.rolesError;
+    await advanceAlive([ws], 5 * 60_000);
+    expect(ws.of("subscribed").at(-1)).toEqual({ type: "subscribed", project_ids: [P1, P2], denied: [P3] });
+    for (const p of [P1, P2, P3]) sub.publish(p, evt(p, [I1]));
+    vi.advanceTimersByTime(300);
+    expect(
+      ws
+        .of("events")
+        .map((f) => f.project_id)
+        .toSorted()
+    ).toEqual([P1, P2].toSorted());
+  });
+
   it("unsubscribe cancels a pending retry", async () => {
     const state = defaultState();
     state.rolesError = { acme: 502 };
@@ -614,6 +639,21 @@ describe("inbound rate map", () => {
     expect(rate.size).toBe(1);
     await advanceAlive([ws], 30_000);
     expect(rate.size).toBe(0);
+  });
+
+  it("a heartbeat mid-window keeps the entry, so a burst spanning it still overflows", async () => {
+    const { hub, sub, config } = await started();
+    const ws = await connect(hub);
+    await subscribe(ws, "acme", [P1]);
+    // land just before the first heartbeat, so it fires inside the burst's one-second window
+    await vi.advanceTimersByTimeAsync(config.pingIntervalMs - 400);
+    for (let i = 0; i < 25; i++) sub.publish(P1, evt(P1, [I1]));
+    await vi.advanceTimersByTimeAsync(500); // heartbeat fires here, window still open
+    ws.emit("pong");
+    expect((hub as any).rate.get(P1)).toBeDefined();
+    for (let i = 0; i < 26; i++) sub.publish(P1, evt(P1, [I1]));
+    vi.advanceTimersByTime(300);
+    expect(ws.of("events").some((f) => f.full_refresh === true)).toBe(true);
   });
 
   it("settle re-emits do not consume the per-project limit", async () => {
