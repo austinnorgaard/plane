@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Fork override for the upstream community compose file
+# (deployments/cli/community/docker-compose.yml, installed as docker-compose.yaml).
+# It is applied with TWO explicit -f flags; see README.fork and RUNBOOK.md:
+#
+#   docker compose -f docker-compose.yaml -f docker-compose.override.yaml \
+#       --env-file plane.env up -d
+#
+# Required variables (from plane.env or the shell):
+#   FORK_N                       fork build number; images are ...:v1.4.2-live.${FORK_N}
+#   WEB_URL                      the public origin users open (already in plane.env)
+#   LIVE_EVENTS_ALLOWED_ORIGINS  comma-separated browser origins allowed on the events socket
+#   LIVE_SERVER_SECRET_KEY       must not be the shipped placeholder (already in plane.env)
+#
+# Rules enforced by fork/deploy/test_override.sh:
+#   - LIVE_EVENTS_ENABLED=1 on api, worker, live.
+#   - PAGES_API_ENABLED=1 on api and live only.
+#   - LIVE_BASE_URL only on api. Never on worker or beat-worker.
+#   - No CORS_ALLOWED_ORIGINS on live.
+#   - live stays at one replica (the pages presence check is per process).
+
+services:
+  web:
+    image: localhost/plane-fork-web:v1.4.2-live.${FORK_N:?set FORK_N}
+
+  live:
+    image: localhost/plane-fork-live:v1.4.2-live.${FORK_N:?set FORK_N}
+    environment:
+      LIVE_EVENTS_ENABLED: "1"
+      LIVE_EVENTS_ALLOWED_ORIGINS: ${LIVE_EVENTS_ALLOWED_ORIGINS:?set LIVE_EVENTS_ALLOWED_ORIGINS}
+      WEB_URL: ${WEB_URL:?set WEB_URL}
+      PAGES_API_ENABLED: "1"
+      # Do NOT add CORS_ALLOWED_ORIGINS here: live feeds it to its stock cors()
+      # middleware. The events socket uses LIVE_EVENTS_ALLOWED_ORIGINS instead.
+
+  api:
+    image: localhost/plane-fork-api:v1.4.2-live.${FORK_N:?set FORK_N}
+    environment:
+      LIVE_EVENTS_ENABLED: "1"
+      PAGES_API_ENABLED: "1"
+      # Direct internal URL of the live container (not the public proxy URL:
+      # live answers 403 to requests that carry X-Forwarded-For/-Host).
+      # api ONLY. Do not copy this line to worker or beat-worker: with
+      # LIVE_BASE_URL set there, the copy_s3_object task would start calling
+      # live's convert-document endpoint on page duplicate (the dormant
+      # "rich" sync in bgtasks/copy_s3_object.py). The pages API needs it on
+      # api alone.
+      LIVE_BASE_URL: http://live:3000
+
+  worker:
+    image: localhost/plane-fork-api:v1.4.2-live.${FORK_N:?set FORK_N}
+    environment:
+      LIVE_EVENTS_ENABLED: "1"
+      # Intentionally no LIVE_BASE_URL (see api above).
+
+  beat-worker:
+    image: localhost/plane-fork-api:v1.4.2-live.${FORK_N:?set FORK_N}
+    # Intentionally no LIVE_BASE_URL and no fork flags: beat only schedules.
