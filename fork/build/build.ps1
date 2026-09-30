@@ -70,49 +70,66 @@ if ($OutDir -notmatch '^/[A-Za-z0-9._/-]+$') {
 $imageTag = "v1.4.2-live.$N"
 $tarName = "plane-fork-live.$N.tar"
 $sha256Name = "plane-fork-live.$N.sha256"
+$buildDir = "/root/plane-build/$Sha"
+$buildLabel = "plane-fork-build=$Sha"
 
-function Invoke-Wsl {
-  param(
-    [Parameter(Mandatory = $true)][string[]]$Arguments
-  )
+# The checkout that holds this script, not the caller's working directory.
+$repoRoot = (Resolve-Path (Join-Path (Join-Path $PSScriptRoot '..') '..')).Path
+$distroShown = if ($Distro) { $Distro } else { '<distro>' }
 
-  if ($DryRun) {
-    $cmd = "wsl.exe -d $Distro -u root -- " + ($Arguments -join ' ')
-    Write-Host $cmd
-    return 0
-  } else {
-    & wsl.exe -d $Distro -u root -- @Arguments
-    return $LASTEXITCODE
-  }
-}
+# MEASURE lines printed by fork/test/measure.sh, collected while the builds run.
+$script:MeasureLines = New-Object System.Collections.Generic.List[string]
 
+# Run a shell command as root in the distro. Output goes to the console, the
+# MEASURE lines are remembered, and a non-zero exit code throws. Returns nothing.
+# No command passed here may contain a double quote (Windows PowerShell 5.1 does
+# not escape embedded quotes when it builds the wsl.exe command line).
 function Invoke-Sh {
   param(
-    [Parameter(Mandatory = $true)][string]$ShellCommand
+    [Parameter(Mandatory = $true)][string]$ShellCommand,
+    [Parameter(Mandatory = $true)][string]$What
   )
 
   if ($DryRun) {
-    $cmd = "wsl.exe -d $Distro -u root -- sh -c `"$ShellCommand`""
-    Write-Host $cmd
-    return 0
-  } else {
-    & wsl.exe -d $Distro -u root -- sh -c $ShellCommand
-    return $LASTEXITCODE
+    Write-Host "wsl.exe -d $distroShown -u root -- sh -c `"$ShellCommand`""
+    return
   }
+  & wsl.exe -d $Distro -u root -- sh -c $ShellCommand | ForEach-Object {
+    Write-Host $_
+    if ("$_" -match '^MEASURE ') { $script:MeasureLines.Add("$_") }
+  }
+  if ($LASTEXITCODE -ne 0) { throw "$What failed (exit code $LASTEXITCODE)" }
+}
+
+# Same, but returns the output lines instead of showing them. Throws on failure.
+function Get-Sh {
+  param(
+    [Parameter(Mandatory = $true)][string]$ShellCommand,
+    [Parameter(Mandatory = $true)][string]$What
+  )
+
+  if ($DryRun) {
+    Write-Host "wsl.exe -d $distroShown -u root -- sh -c `"$ShellCommand`""
+    return , @()
+  }
+  $out = & wsl.exe -d $Distro -u root -- sh -c $ShellCommand
+  if ($LASTEXITCODE -ne 0) { throw "$What failed (exit code $LASTEXITCODE)" }
+  return , @($out | Where-Object { $null -ne $_ } | ForEach-Object { "$_".TrimEnd("`r") })
 }
 
 # Check that Sha is in origin/live-updates/v1.4.2
 if (-not $DryRun) {
   Write-Host "Verifying SHA $Sha is in origin/live-updates/v1.4.2..."
 
-  # First fetch to ensure we have latest remote tracking branch
-  & git fetch origin live-updates/v1.4.2 2>&1 | Out-Null
+  # No 2>&1 here: under $ErrorActionPreference='Stop' Windows PowerShell 5.1 turns
+  # any redirected native stderr line (git fetch prints progress there) into a
+  # terminating error. Let stderr go to the console and rely on the exit code.
+  & git -C $repoRoot fetch origin live-updates/v1.4.2 --quiet
   if ($LASTEXITCODE -ne 0) {
     throw "Failed to fetch origin/live-updates/v1.4.2"
   }
 
-  # Check if SHA is an ancestor of the branch
-  & git merge-base --is-ancestor $Sha origin/live-updates/v1.4.2
+  & git -C $repoRoot merge-base --is-ancestor $Sha origin/live-updates/v1.4.2
   if ($LASTEXITCODE -ne 0) {
     throw "SHA $Sha is not contained in origin/live-updates/v1.4.2. Refusing to build."
   }
@@ -129,133 +146,133 @@ if (-not $DryRun) {
   Write-Host "Process counts at start: WindowsTerminal=$($initialCounts['WindowsTerminal']), OpenConsole=$($initialCounts['OpenConsole'])"
 }
 
-# Build: 1. Archive the source tree
-if (-not $DryRun) {
-  Write-Host "Archiving source tree for SHA $Sha into /root/plane-build/$Sha..."
-}
+# Build: 1. Ship the source tree of $Sha into the distro
+Invoke-Sh "rm -rf $buildDir && mkdir -p $buildDir" 'Preparing the build directory'
 
-$archiveCmd = "rm -rf /root/plane-build/$Sha && mkdir -p /root/plane-build/$Sha && cd /root/plane-build/$Sha"
-$rc = Invoke-Sh $archiveCmd
-if ($rc -ne 0) { throw "Failed to prepare build directory" }
-
-# Use git archive to get the source
 if ($DryRun) {
-  Write-Host "git -C . -c core.autocrlf=false archive --format=tar $Sha | wsl.exe -d $Distro -u root -- tar -x -C /root/plane-build/$Sha"
+  Write-Host "git -C <repo> -c core.autocrlf=false archive --format=tar -o <tempfile> $Sha"
+  Write-Host "cmd.exe /d /s /c `"wsl.exe -d $distroShown -u root -- tar -x --no-same-owner -C $buildDir < <tempfile>`""
+  Write-Host "extracted file count is compared with: git ls-tree -r $Sha (minus submodule entries)"
 } else {
-  Write-Host "Streaming git archive through tar..."
+  Write-Host "Archiving $Sha and extracting it in the distro..."
 
-  # Create a temp file for the archive to preserve git exit code
+  # git writes the tar to a file (so its exit code is seen), and cmd.exe feeds that
+  # file to tar with a raw `<` redirection. A PowerShell pipeline would decode the
+  # bytes as text and corrupt the archive.
   $tempArchive = [System.IO.Path]::GetTempFileName()
   try {
-    # Write git archive to temp file and check exit code
-    & git -c core.autocrlf=false archive --format=tar $Sha -o $tempArchive
+    & git -C $repoRoot -c core.autocrlf=false archive --format=tar -o $tempArchive $Sha
     if ($LASTEXITCODE -ne 0) { throw "git archive failed" }
 
-    # Stream temp file to WSL tar
-    $archiveStream = Get-Content -Raw -LiteralPath $tempArchive -ReadCount 0
-    $archiveStream | & cmd.exe /c "wsl.exe -d $Distro -u root -- tar -x --no-same-owner -C /root/plane-build/$Sha"
-    if ($LASTEXITCODE -ne 0) { throw "Failed to extract archive in distro" }
+    # With /s, cmd.exe strips the outer quotes of the /c string and keeps the
+    # quoted path (which may contain spaces) intact.
+    & cmd.exe /d /s /c "wsl.exe -d $Distro -u root -- tar -x --no-same-owner -C $buildDir < `"$tempArchive`""
+    if ($LASTEXITCODE -ne 0) { throw "Failed to extract the archive in the distro" }
   } finally {
     Remove-Item -LiteralPath $tempArchive -Force -ErrorAction SilentlyContinue
   }
+
+  # Loud failure for a damaged or partial extract: compare the number of files
+  # with the number of blobs in the commit (submodule entries are not archived).
+  $treeLines = @(& git -C $repoRoot ls-tree -r $Sha)
+  if ($LASTEXITCODE -ne 0) { throw "git ls-tree failed" }
+  $expectedFiles = @($treeLines | Where-Object { "$_" -notmatch '^160000 ' }).Count
+  $countOut = Get-Sh "cd $buildDir && find . -type f -o -type l | wc -l" 'Counting extracted files'
+  $actualFiles = [int](("$($countOut[0])").Trim())
+  if ($actualFiles -ne $expectedFiles) {
+    throw "Extraction check failed: $actualFiles files in the distro, $expectedFiles in commit $Sha"
+  }
+  Write-Host "Extraction verified: $actualFiles files"
 }
 
-# Build: 2. Build the three images
-if (-not $DryRun) {
-  Write-Host "Building images with tag $imageTag..."
-}
+# Build: 2. Build the three images. --label marks the images (and any layers that
+# carry the label) so that the prune below only touches this build's leftovers.
+Write-Host "Building images with tag $imageTag..."
 
-$buildCommands = @(
-  "bash -c `"cd /root/plane-build/$Sha && fork/test/measure.sh web podman build --cpu-period=100000 --cpu-quota=800000 -f apps/web/Dockerfile.web -t localhost/plane-fork-web:$imageTag .`"",
-  "bash -c `"cd /root/plane-build/$Sha && fork/test/measure.sh live podman build --cpu-period=100000 --cpu-quota=800000 -f apps/live/Dockerfile.live -t localhost/plane-fork-live:$imageTag .`"",
-  "bash -c `"cd /root/plane-build/$Sha && fork/test/measure.sh api podman build -f fork/docker/Dockerfile.fork-api -t localhost/plane-fork-api:$imageTag .`""
+$cd = "cd $buildDir"
+$m = 'fork/test/measure.sh'
+$builds = @(
+  @{ Label = 'web'; Cmd = "$cd && $m web podman build --cpu-period=100000 --cpu-quota=800000 --label $buildLabel -f apps/web/Dockerfile.web -t localhost/plane-fork-web:$imageTag ." },
+  @{ Label = 'live'; Cmd = "$cd && $m live podman build --cpu-period=100000 --cpu-quota=800000 --label $buildLabel -f apps/live/Dockerfile.live -t localhost/plane-fork-live:$imageTag ." },
+  @{ Label = 'api'; Cmd = "$cd && $m api podman build --label $buildLabel -f fork/docker/Dockerfile.fork-api -t localhost/plane-fork-api:$imageTag ." }
 )
-
-foreach ($buildCmd in $buildCommands) {
-  $rc = Invoke-Sh $buildCmd
-  if ($rc -ne 0) { throw "Build failed: $buildCmd" }
+foreach ($b in $builds) {
+  Invoke-Sh $b.Cmd "Build of $($b.Label)"
 }
 
 # Build: 3. Save images to tar
-if (-not $DryRun) {
-  Write-Host "Saving images to $OutDir/$tarName..."
-}
-
-$saveCmd = "mkdir -p $OutDir && podman save -m --format docker-archive -o $OutDir/$tarName localhost/plane-fork-web:$imageTag localhost/plane-fork-live:$imageTag localhost/plane-fork-api:$imageTag"
-$rc = Invoke-Sh $saveCmd
-if ($rc -ne 0) { throw "Failed to save images to tar" }
+Write-Host "Saving images to $OutDir/$tarName..."
+Invoke-Sh "mkdir -p $OutDir && podman save -m --format docker-archive -o $OutDir/$tarName localhost/plane-fork-web:$imageTag localhost/plane-fork-live:$imageTag localhost/plane-fork-api:$imageTag" 'Saving images'
 
 # Build: 4. Create sha256 checksum
-if (-not $DryRun) {
-  Write-Host "Creating sha256 checksum..."
+Write-Host "Creating sha256 checksum..."
+Invoke-Sh "cd $OutDir && sha256sum $tarName > $sha256Name" 'Creating the checksum'
+
+# Build: 5. Prune. Only dangling (untagged) images that carry this build's label
+# are removed. That frees the leftover images of this build (for example the
+# previous images of the same tags if they were rebuilt). Base images, images of
+# other builds, unlabelled stage layers and the pnpm cache mounts are not touched.
+Write-Host "Pruning this build's dangling images ($buildLabel)..."
+$pruned = @()
+try {
+  $pruned = Get-Sh "podman image prune -f --filter dangling=true --filter label=$buildLabel" 'Pruning'
+} catch {
+  Write-Warning "Prune failed, continuing: $_"
 }
 
-$checksumCmd = "cd $OutDir && sha256sum $tarName > $sha256Name"
-$rc = Invoke-Sh $checksumCmd
-if ($rc -ne 0) { throw "Failed to create checksum" }
-
-# Build: 5. Prune fork-only intermediates (dangling images from these builds)
-# Keep base images and pnpm store/cache mounts
-if (-not $DryRun) {
-  Write-Host "Pruning fork-only build intermediates..."
-}
-
-$pruneCmd = "podman image prune -f --filter 'dangling=true'"
-$rc = Invoke-Sh $pruneCmd
-if ($rc -ne 0) {
-  Write-Warning "Prune command failed, but continuing"
-}
-
-# Verify images exist
+# Verify that exactly the three expected images exist
+$tarSha = ''
+$expectedImages = @("plane-fork-api:$imageTag", "plane-fork-live:$imageTag", "plane-fork-web:$imageTag") | ForEach-Object { "localhost/$_" }
 if (-not $DryRun) {
   Write-Host "Verifying images were created..."
 
-  $verifyCmd = "podman images --filter 'reference=localhost/plane-fork-*:$imageTag' --format '{{.Repository}}:{{.Tag}}'"
-  $images = @()
-  $output = & wsl.exe -d $Distro -u root -- sh -c $verifyCmd
-  if ($LASTEXITCODE -eq 0 -and $output) {
-    $images = $output -split "`n" | Where-Object { $_ }
+  $listed = Get-Sh "podman images --filter 'reference=localhost/plane-fork-*:$imageTag' --format '{{.Repository}}:{{.Tag}}'" 'Listing images'
+  $images = @($listed | Sort-Object)
+  if (($images -join ',') -ne ($expectedImages -join ',')) {
+    throw "Expected images $($expectedImages -join ', ') but found: $($images -join ', ')"
   }
-
-  if ($images.Count -ne 3) {
-    throw "Expected 3 images but found $($images.Count): $images"
-  }
-
   Write-Host "Images verified: $($images -join ', ')"
+
+  $shaLines = Get-Sh "cat $OutDir/$sha256Name" 'Reading the checksum'
+  $tarSha = ("$($shaLines[0])" -split '\s+')[0]
+  if ($tarSha -notmatch '^[0-9a-f]{64}$') { throw "Unexpected checksum file content" }
+  Write-Host "Tar sha256: $tarSha"
 }
 
-# Append results to fork/README.md (create if missing)
+# Append results to fork/README.md (LF line endings, no BOM)
 if (-not $DryRun) {
   Write-Host "Updating fork/README.md with results..."
 
-  $currentDir = Get-Location
-  $repoRoot = git rev-parse --show-toplevel
-  if ($LASTEXITCODE -ne 0) { throw "git rev-parse --show-toplevel failed" }
-  $readmeFile = Join-Path $repoRoot "fork/README.md"
-
-  # Check if file exists, create with header if not
-  if (-not (Test-Path $readmeFile)) {
-    $header = @"
-# Plane Fork Build Results
-
-Build results for plane-fork images v1.4.2-live releases.
-
-## Builds
-
-"@
-    Set-Content -Path $readmeFile -Value $header -Encoding UTF8
+  $measures = @{}
+  foreach ($line in $script:MeasureLines) {
+    $kv = @{}
+    foreach ($mm in [regex]::Matches($line, '(\w+)=(\S+)')) { $kv[$mm.Groups[1].Value] = $mm.Groups[2].Value }
+    $measures[$kv['label']] = $kv
   }
 
-  # Append this build's results (simplified for now, details from measure.sh logs)
-  $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-  $results = @"
-### Build $N - $timestamp
-- SHA: $Sha
-- Output: $tarName ($sha256Name)
+  $timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
+  $out = New-Object System.Collections.Generic.List[string]
+  $out.Add("### Build $N - $timestamp")
+  $out.Add("- SHA: $Sha")
+  $out.Add("- Output: $tarName, sha256 $tarSha ($sha256Name)")
+  $out.Add("- Tags: $($expectedImages -join ', ')")
+  foreach ($b in $builds) {
+    $kv = $measures[$b.Label]
+    if (-not $kv) { throw "No MEASURE line captured for the $($b.Label) build" }
+    $out.Add("- $($b.Label) build: $($kv['wall_s']) s wall, peak RAM used $($kv['peak_used_mb']) MB (+$($kv['peak_delta_mb']) MB over idle), lowest available $($kv['min_available_mb']) MB")
+  }
+  $out.Add("- Prune ($buildLabel, dangling only): $(@($pruned).Count) image(s) removed")
+  $text = ($out -join "`n") + "`n`n"
 
-"@
-
-  Add-Content -Path $readmeFile -Value $results -Encoding UTF8
+  $readmeFile = Join-Path (Join-Path $repoRoot 'fork') 'README.md'
+  $utf8 = New-Object System.Text.UTF8Encoding($false)
+  if (-not (Test-Path -LiteralPath $readmeFile)) {
+    $header = "# Plane Fork Build Results`n`nBuild results for plane-fork images v1.4.2-live releases.`n`n## Builds`n`n"
+    [System.IO.File]::WriteAllText($readmeFile, $header, $utf8)
+  } elseif (-not ([System.IO.File]::ReadAllText($readmeFile).EndsWith("`n"))) {
+    [System.IO.File]::AppendAllText($readmeFile, "`n", $utf8)
+  }
+  [System.IO.File]::AppendAllText($readmeFile, $text, $utf8)
   Write-Host "Results appended to fork/README.md"
 }
 
@@ -270,7 +287,10 @@ if (-not $DryRun) {
 
   if ($finalCounts['WindowsTerminal'] -ne $initialCounts['WindowsTerminal'] -or `
       $finalCounts['OpenConsole'] -ne $initialCounts['OpenConsole']) {
-    throw "Process counts changed during build! Initial: WindowsTerminal=$($initialCounts['WindowsTerminal']), OpenConsole=$($initialCounts['OpenConsole']); Final: WindowsTerminal=$($finalCounts['WindowsTerminal']), OpenConsole=$($finalCounts['OpenConsole'])"
+    throw ("Process counts changed during the build. Initial: WindowsTerminal=$($initialCounts['WindowsTerminal']), OpenConsole=$($initialCounts['OpenConsole']); " +
+      "final: WindowsTerminal=$($finalCounts['WindowsTerminal']), OpenConsole=$($finalCounts['OpenConsole']). " +
+      "The script opens no windows itself, so this can be a false positive if a terminal was opened or closed by hand while the build ran (about 10 minutes). " +
+      "The tar, checksum and README entry were already written and are valid; check for a stray window before re-running.")
   }
 
   Write-Host "Process counts verified: no new windows opened"

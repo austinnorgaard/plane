@@ -1,10 +1,12 @@
 #!/bin/bash
 # SPDX-License-Identifier: AGPL-3.0-only
 #
-# verify-load.sh TAR SHA256_FILE
+# verify-load.sh TAR SHA256_FILE [N]
 #
 # Verifies the tar archive's checksum, loads it into podman, and checks
-# that the three expected image tags exist.
+# that the three exact references localhost/plane-fork-{web,live,api}:v1.4.2-live.N
+# exist. N is the optional third argument; if omitted it is taken from a tar
+# name of the form plane-fork-live.<N>.tar.
 #
 # Exit 0 if all checks pass; exit 1 if any check fails.
 #
@@ -14,13 +16,27 @@
 
 set -u
 
-if [ $# -ne 2 ]; then
-  echo "usage: verify-load.sh TAR SHA256_FILE" >&2
+if [ $# -lt 2 ] || [ $# -gt 3 ]; then
+  echo "usage: verify-load.sh TAR SHA256_FILE [N]" >&2
   exit 1
 fi
 
 tar_file="$1"
 sha256_file="$2"
+n="${3:-}"
+
+if [ -z "$n" ]; then
+  base="$(basename "$tar_file")"
+  case "$base" in
+    plane-fork-live.*.tar) n="${base#plane-fork-live.}"; n="${n%.tar}" ;;
+  esac
+fi
+
+if ! [[ "$n" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: build number N unknown: pass it as the third argument or name the tar plane-fork-live.<N>.tar" >&2
+  exit 1
+fi
+image_tag="v1.4.2-live.$n"
 
 # Verify tar file exists
 if [ ! -f "$tar_file" ]; then
@@ -46,6 +62,12 @@ if [ -z "$expected_hash" ]; then
   exit 1
 fi
 
+if ! [[ "$expected_hash" =~ ^[0-9a-fA-F]{64}$ ]]; then
+  echo "ERROR: sha256 file does not start with a 64-character hex digest: $sha256_file" >&2
+  exit 1
+fi
+expected_hash="$(printf '%s' "$expected_hash" | tr 'A-F' 'a-f')"
+
 echo "Verifying sha256 of $tar_file..."
 echo "Expected: $expected_hash"
 
@@ -69,20 +91,20 @@ fi
 
 echo "Images loaded"
 
-# Verify the three tags exist
-echo "Verifying image tags..."
-expected_tags=(
-  "localhost/plane-fork-web"
-  "localhost/plane-fork-live"
-  "localhost/plane-fork-api"
+# Verify the three exact references exist
+echo "Verifying image tags ($image_tag)..."
+expected_refs=(
+  "localhost/plane-fork-web:$image_tag"
+  "localhost/plane-fork-live:$image_tag"
+  "localhost/plane-fork-api:$image_tag"
 )
 
 failed=0
-for tag_prefix in "${expected_tags[@]}"; do
-  if podman images --filter "reference=$tag_prefix" --quiet | grep -q .; then
-    echo "  ✓ $tag_prefix found"
+for ref in "${expected_refs[@]}"; do
+  if podman image exists "$ref"; then
+    echo "  OK $ref found"
   else
-    echo "  ✗ $tag_prefix NOT FOUND" >&2
+    echo "  MISSING $ref" >&2
     failed=1
   fi
 done
