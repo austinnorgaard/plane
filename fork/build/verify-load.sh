@@ -72,9 +72,9 @@ echo "Images loaded"
 # Verify the three tags exist
 echo "Verifying image tags..."
 expected_tags=(
-  "localhost/plane-fork-frontend"
+  "localhost/plane-fork-web"
   "localhost/plane-fork-live"
-  "localhost/plane-fork-backend"
+  "localhost/plane-fork-api"
 )
 
 failed=0

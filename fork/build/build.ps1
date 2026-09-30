@@ -4,7 +4,7 @@
 Build fork images v1.4.2-live.N and save to tar archive.
 
 .DESCRIPTION
-Builds three Docker images (frontend, live, backend) from a specific commit,
+Builds three Docker images (web, live, api) from a specific commit,
 records build metrics, and saves them to a tar archive with sha256 checksum.
 Process counts are checked to ensure no windows were opened.
 
@@ -143,9 +143,21 @@ if ($DryRun) {
   Write-Host "git -C . -c core.autocrlf=false archive --format=tar $Sha | wsl.exe -d $Distro -u root -- tar -x -C /root/plane-build/$Sha"
 } else {
   Write-Host "Streaming git archive through tar..."
-  $archiveStream = & git -c core.autocrlf=false archive --format=tar $Sha
-  $archiveStream | & cmd.exe /c "wsl.exe -d $Distro -u root -- tar -x --no-same-owner -C /root/plane-build/$Sha"
-  if ($LASTEXITCODE -ne 0) { throw "Failed to archive source tree" }
+
+  # Create a temp file for the archive to preserve git exit code
+  $tempArchive = [System.IO.Path]::GetTempFileName()
+  try {
+    # Write git archive to temp file and check exit code
+    & git -c core.autocrlf=false archive --format=tar $Sha -o $tempArchive
+    if ($LASTEXITCODE -ne 0) { throw "git archive failed" }
+
+    # Stream temp file to WSL tar
+    $archiveStream = Get-Content -Raw -LiteralPath $tempArchive -ReadCount 0
+    $archiveStream | & cmd.exe /c "wsl.exe -d $Distro -u root -- tar -x --no-same-owner -C /root/plane-build/$Sha"
+    if ($LASTEXITCODE -ne 0) { throw "Failed to extract archive in distro" }
+  } finally {
+    Remove-Item -LiteralPath $tempArchive -Force -ErrorAction SilentlyContinue
+  }
 }
 
 # Build: 2. Build the three images
@@ -154,9 +166,9 @@ if (-not $DryRun) {
 }
 
 $buildCommands = @(
-  "bash -c `"cd /root/plane-build/$Sha && fork/test/measure.sh frontend podman build --cpu-period=100000 --cpu-quota=800000 -f apps/web/Dockerfile.web -t localhost/plane-fork-frontend:$imageTag .`"",
+  "bash -c `"cd /root/plane-build/$Sha && fork/test/measure.sh web podman build --cpu-period=100000 --cpu-quota=800000 -f apps/web/Dockerfile.web -t localhost/plane-fork-web:$imageTag .`"",
   "bash -c `"cd /root/plane-build/$Sha && fork/test/measure.sh live podman build --cpu-period=100000 --cpu-quota=800000 -f apps/live/Dockerfile.live -t localhost/plane-fork-live:$imageTag .`"",
-  "bash -c `"cd /root/plane-build/$Sha && fork/test/measure.sh backend podman build -f fork/docker/Dockerfile.fork-api -t localhost/plane-fork-backend:$imageTag .`""
+  "bash -c `"cd /root/plane-build/$Sha && fork/test/measure.sh api podman build -f fork/docker/Dockerfile.fork-api -t localhost/plane-fork-api:$imageTag .`""
 )
 
 foreach ($buildCmd in $buildCommands) {
@@ -169,7 +181,7 @@ if (-not $DryRun) {
   Write-Host "Saving images to $OutDir/$tarName..."
 }
 
-$saveCmd = "mkdir -p $OutDir && podman save -m --format docker-archive -o $OutDir/$tarName localhost/plane-fork-frontend:$imageTag localhost/plane-fork-live:$imageTag localhost/plane-fork-backend:$imageTag"
+$saveCmd = "mkdir -p $OutDir && podman save -m --format docker-archive -o $OutDir/$tarName localhost/plane-fork-web:$imageTag localhost/plane-fork-live:$imageTag localhost/plane-fork-api:$imageTag"
 $rc = Invoke-Sh $saveCmd
 if ($rc -ne 0) { throw "Failed to save images to tar" }
 
@@ -218,6 +230,7 @@ if (-not $DryRun) {
 
   $currentDir = Get-Location
   $repoRoot = git rev-parse --show-toplevel
+  if ($LASTEXITCODE -ne 0) { throw "git rev-parse --show-toplevel failed" }
   $readmeFile = Join-Path $repoRoot "fork/README.md"
 
   # Check if file exists, create with header if not

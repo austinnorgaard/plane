@@ -49,9 +49,9 @@ case "$1" in
     ;;
   images)
     # Return the expected image prefixes
-    echo "localhost/plane-fork-frontend:v1.4.2-live.1"
+    echo "localhost/plane-fork-web:v1.4.2-live.1"
     echo "localhost/plane-fork-live:v1.4.2-live.1"
-    echo "localhost/plane-fork-backend:v1.4.2-live.1"
+    echo "localhost/plane-fork-api:v1.4.2-live.1"
     exit 0
     ;;
   *)
