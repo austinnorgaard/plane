@@ -3,10 +3,13 @@
 #
 # verify-load.sh TAR SHA256_FILE [N]
 #
-# Verifies the tar archive's checksum, loads it into podman, and checks
+# Verifies the tar archive's checksum, loads it into podman (or docker), and checks
 # that the three exact references localhost/plane-fork-{web,live,api}:v1.4.2-live.N
 # exist. N is the optional third argument; if omitted it is taken from a tar
 # name of the form plane-fork-live.<N>.tar.
+#
+# The engine is podman if it is installed, else docker. Set CONTAINER_ENGINE=docker
+# or CONTAINER_ENGINE=podman to choose one.
 #
 # Exit 0 if all checks pass; exit 1 if any check fails.
 #
@@ -37,6 +40,29 @@ if ! [[ "$n" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 image_tag="v1.4.2-live.$n"
+
+engine="${CONTAINER_ENGINE:-}"
+if [ -z "$engine" ]; then
+  if command -v podman >/dev/null 2>&1; then
+    engine=podman
+  elif command -v docker >/dev/null 2>&1; then
+    engine=docker
+  else
+    engine=podman
+  fi
+fi
+case "$engine" in
+  podman|docker) ;;
+  *) echo "ERROR: CONTAINER_ENGINE must be podman or docker, got: $engine" >&2; exit 1 ;;
+esac
+
+image_exists() {
+  if [ "$engine" = podman ]; then
+    podman image exists "$1"
+  else
+    docker image inspect "$1" >/dev/null 2>&1
+  fi
+}
 
 # Verify tar file exists
 if [ ! -f "$tar_file" ]; then
@@ -84,8 +110,8 @@ echo "sha256 verified"
 
 # Load the images
 echo "Loading images from $tar_file..."
-if ! podman load -i "$tar_file"; then
-  echo "ERROR: podman load failed" >&2
+if ! "$engine" load -i "$tar_file"; then
+  echo "ERROR: $engine load failed" >&2
   exit 1
 fi
 
@@ -101,7 +127,7 @@ expected_refs=(
 
 failed=0
 for ref in "${expected_refs[@]}"; do
-  if podman image exists "$ref"; then
+  if image_exists "$ref"; then
     echo "  OK $ref found"
   else
     echo "  MISSING $ref" >&2
