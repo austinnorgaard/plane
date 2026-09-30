@@ -1,0 +1,70 @@
+Fork deploy files (live updates and pages API)
+==============================================
+
+Files in this directory
+  docker-compose.override.yaml  fork images and feature flags, layered over the
+                                upstream community compose file
+  inspect.sh                    read-only pre-deploy inspection (run on the hypervisor)
+  test_override.sh              validates the override against the upstream compose file
+  test_inspect.sh               tests inspect.sh against stub commands
+  RUNBOOK.md                    the deploy procedure, smoke tests and rollback
+
+WARNINGS
+
+1. The community installer (setup.sh, from the upstream release) starts the
+   stack with an explicit "-f docker-compose.yaml". Docker Compose only picks up
+   docker-compose.override.yaml automatically when NO -f is given, so anything
+   started or upgraded through setup.sh (start, restart, upgrade) runs the stock
+   images and drops every fork flag WITHOUT any error. The upgrade action also
+   re-downloads the stock docker-compose.yaml. Never use setup.sh on a fork
+   deployment; use the two-file commands below. After any use of setup.sh, redo
+   the image-tag check in RUNBOOK.md.
+
+2. live must stay at ONE replica (leave LIVE_REPLICAS unset or 1). The pages
+   API asks live whether a page is open in an editor; that state is held per
+   process, so a second replica would answer "not loaded" for pages open on the
+   other one and the API could overwrite an open document.
+
+3. LIVE_BASE_URL is set on api ONLY. Do not set it on worker or beat-worker, in
+   plane.env, or anywhere else that reaches them: with it set, the copy_s3_object
+   task (bgtasks/copy_s3_object.py) starts calling live's convert-document
+   endpoint when a page is duplicated. The value must be the direct internal
+   URL of the live container (http://live:3000), never the public URL: live
+   refuses requests that carry X-Forwarded-For / X-Forwarded-Host.
+
+4. LIVE_SERVER_SECRET_KEY must not be the shipped placeholder
+   (change-this-key-on-deployment); the pages endpoints answer 503 until it is
+   changed. Do not print it. Never run "docker compose config" without -q on
+   the server: it prints every secret.
+
+5. CORS_ALLOWED_ORIGINS must not be passed into live. Browser origins for the
+   events socket go in LIVE_EVENTS_ALLOWED_ORIGINS.
+
+Variables (supplied by the operator; nothing host-specific is stored in the repo)
+  FORK_N                       fork build number, image tag v1.4.2-live.$FORK_N
+  WEB_URL                      public origin (normally already in plane.env)
+  LIVE_EVENTS_ALLOWED_ORIGINS  comma-separated origins users open Plane from
+                               (scheme://host[:port], for example the values of
+                               PUBLIC_URL and LAN_URL)
+  PLANE_APP_DIR                directory containing docker-compose.yaml and plane.env
+
+Commands (run in $PLANE_APP_DIR; FORK_N must be exported or in plane.env)
+
+  C="docker compose -f docker-compose.yaml -f docker-compose.override.yaml --env-file plane.env"
+
+  $C config -q                  # validate, prints nothing on success
+  $C up -d                      # apply (recreates only changed services)
+  $C ps --format '{{.Service}} {{.Image}}'    # image-tag check
+  $C logs --tail 50 live api
+
+Local validation of the override, no server needed
+  fork/deploy/test_override.sh --self-mutate
+Uses docker compose, podman compose or docker-compose if present, and always the
+python3 + PyYAML checks.
+
+Read-only inspection of the target (on the hypervisor; changes nothing)
+  ssh "$PVE_HOST" "PLANE_CTID=$PLANE_CTID PLANE_APP_DIR=$PLANE_APP_DIR bash -s" < fork/deploy/inspect.sh
+  add "-- --dry-run" after "bash -s" to print the commands without running them.
+
+The migrator service keeps the stock backend image: the fork adds no database
+migrations. If that ever changes, add the migrator to the override.
