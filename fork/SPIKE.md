@@ -131,6 +131,8 @@ The api image carries its full 326 MB base in the archive; docker-archive does n
 
 ### 8. Node tests (`fork/test/node-tests.sh`)
 
+Without podman, see `fork/test/CLOUD.md` for the native variants of both scripts.
+
 `node:22-alpine` (node v22.23.3 at run time), corepack pnpm 11.3.0 (from `packageManager`), volume `plane-pnpm-store` at `/pnpm`, source bind-mounted at `/work`.
 
 Clean run of `node-tests.sh all` from a tree with no `node_modules` and no `dist` (pnpm store already populated): 125 s wall, peak RAM 1981 MB used (640 MB baseline, +1341 MB).
