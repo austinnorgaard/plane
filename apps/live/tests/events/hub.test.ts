@@ -40,8 +40,8 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-const started = async (env: Record<string, string> = {}, state = defaultState()) => {
-  const ctx = makeHub(env, state);
+const started = async (env: Record<string, string> = {}, state = defaultState(), log?: { warn: any }) => {
+  const ctx = makeHub(env, state, log);
   await ctx.hub.start();
   return ctx;
 };
@@ -169,12 +169,105 @@ describe("membership", () => {
     expect(ws.of("subscribed")[1].project_ids).toEqual([P3]);
   });
 
-  it("unknown workspace grants nothing", async () => {
+  it("a roles 403 at subscribe denies the projects and keeps the socket", async () => {
     const { hub } = await started();
     const ws = await connect(hub);
     await subscribe(ws, "nowhere", [P1]);
-    expect(ws).toBeDefined();
-    expect(ws.closeCode).toBe(4401); // roles endpoint rejected the session for that workspace
+    expect(ws.closeCode).toBeNull();
+    expect(ws.of("subscribed")[0]).toEqual({ type: "subscribed", project_ids: [], denied: [P1] });
+  });
+
+  it("a roles 401 at subscribe closes 4401", async () => {
+    const state = defaultState();
+    state.rolesError = { acme: 401 };
+    const { hub } = await started({}, state);
+    const ws = await connect(hub);
+    await subscribe(ws, "acme", [P1]);
+    expect(ws.closeCode).toBe(4401);
+  });
+
+  it("a current-user 403 still closes 4401", async () => {
+    const state = defaultState();
+    state.users[ALICE] = { status: 403 } as any;
+    const { hub } = await started({}, state);
+    const ws = await connect(hub);
+    expect(ws.closeCode).toBe(4401);
+  });
+
+  it("a roles 403 at revalidation revokes the projects and keeps the socket", async () => {
+    const state = defaultState();
+    const { hub } = await started({}, state);
+    const ws = await connect(hub);
+    await subscribe(ws, "acme", [P1, P2]);
+    state.rolesError = { acme: 403 };
+    await advanceAlive([ws], 5 * 60_000);
+    expect(ws.closeCode).toBeNull();
+    expect(ws.of("revoked")[0].project_ids.toSorted()).toEqual([P1, P2].toSorted());
+  });
+
+  it("a roles 401 at revalidation closes 4401", async () => {
+    const state = defaultState();
+    const { hub } = await started({}, state);
+    const ws = await connect(hub);
+    await subscribe(ws, "acme", [P1]);
+    state.rolesError = { acme: 401 };
+    await advanceAlive([ws], 5 * 60_000);
+    expect(ws.closeCode).toBe(4401);
+  });
+
+  it("a transient roles failure at subscribe is not denied and is granted at the next revalidation", async () => {
+    const state = defaultState();
+    state.rolesError = { acme: 502 };
+    const { hub, sub } = await started({}, state);
+    const ws = await connect(hub);
+    await subscribe(ws, "acme", [P1, P2]);
+    expect(ws.of("subscribed")[0]).toEqual({ type: "subscribed", project_ids: [], denied: [] });
+    sub.publish(P1, evt(P1, [I1]));
+    vi.advanceTimersByTime(300);
+    expect(ws.of("events")).toEqual([]);
+    delete state.rolesError;
+    await advanceAlive([ws], 5 * 60_000);
+    expect(ws.of("subscribed")[1]).toEqual({ type: "subscribed", project_ids: [P1, P2], denied: [] });
+    sub.publish(P1, evt(P1, [I1]));
+    vi.advanceTimersByTime(300);
+    expect(ws.of("events")).toHaveLength(1);
+  });
+
+  it("a pending project that is not a member is denied when the retry succeeds", async () => {
+    const state = defaultState();
+    state.rolesError = { acme: 502 };
+    const { hub } = await started({}, state);
+    const ws = await connect(hub);
+    await subscribe(ws, "acme", [P1, P3]);
+    delete state.rolesError;
+    await advanceAlive([ws], 5 * 60_000);
+    expect(ws.of("subscribed")[1]).toEqual({ type: "subscribed", project_ids: [P1], denied: [P3] });
+  });
+
+  it("a transient failure at the retry keeps the project pending, and the next subscribe retries it", async () => {
+    const state = defaultState();
+    state.rolesError = { acme: 502 };
+    const { hub } = await started({}, state);
+    const ws = await connect(hub);
+    await subscribe(ws, "acme", [P1]);
+    await advanceAlive([ws], 5 * 60_000);
+    expect(ws.of("subscribed")).toHaveLength(1);
+    delete state.rolesError;
+    await subscribe(ws, "acme", [P1]);
+    expect(ws.of("subscribed")[1]).toEqual({ type: "subscribed", project_ids: [P1], denied: [] });
+  });
+
+  it("unsubscribe cancels a pending retry", async () => {
+    const state = defaultState();
+    state.rolesError = { acme: 502 };
+    const { hub } = await started({}, state);
+    const ws = await connect(hub);
+    await subscribe(ws, "acme", [P1]);
+    ws.say({ type: "unsubscribe", project_ids: [P1] });
+    await flushPromises();
+    delete state.rolesError;
+    await advanceAlive([ws], 5 * 60_000);
+    expect(ws.of("subscribed")).toHaveLength(1);
   });
 
   it("member of A subscribing to B receives nothing from B", async () => {
@@ -508,5 +601,65 @@ describe("settle timers are bounded per project", () => {
     expect(after.some((f) => f.full_refresh === true)).toBe(true);
     vi.advanceTimersByTime(10_000);
     expect(a.of("events")).toHaveLength(after.length);
+  });
+});
+
+describe("inbound rate map", () => {
+  it("prunes expired windows on the heartbeat", async () => {
+    const { hub, sub } = await started();
+    const ws = await connect(hub);
+    await subscribe(ws, "acme", [P1]);
+    sub.publish(P1, evt(P1, [I1]));
+    const rate = (hub as any).rate as Map<string, unknown>;
+    expect(rate.size).toBe(1);
+    await advanceAlive([ws], 30_000);
+    expect(rate.size).toBe(0);
+  });
+
+  it("settle re-emits do not consume the per-project limit", async () => {
+    const { hub, sub } = await started({ LIVE_EVENTS_PROJECT_RATE_PER_SEC: "1", LIVE_EVENTS_SETTLE_MS: "300" });
+    const ws = await connect(hub);
+    await subscribe(ws, "acme", [P1]);
+    sub.publish(P1, evt(P1, [I1], { settle: true }));
+    vi.advanceTimersByTime(400); // the re-emit fires inside the same one-second window
+    const frames = ws.of("events");
+    expect(frames.length).toBeGreaterThan(0);
+    expect(frames.some((f) => f.full_refresh === true)).toBe(false);
+    expect(((hub as any).rate.get(P1) as { count: number }).count).toBe(1);
+  });
+});
+
+describe("warnings", () => {
+  it("warns once when the ws payload cap cannot be applied, without payload content", async () => {
+    const log = { warn: vi.fn() };
+    const { hub } = await started({}, defaultState(), log);
+    await connect(hub); // FakeSocket has no ws receiver
+    await connect(hub, BOB);
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    expect(String(log.warn.mock.calls[0][0])).toContain("payload cap");
+  });
+
+  it("does not warn when the cap applies", async () => {
+    const log = { warn: vi.fn() };
+    const { hub } = await started({}, defaultState(), log);
+    const ws = new FakeSocket() as any;
+    ws._receiver = { _maxPayload: 100 * 1024 * 1024 };
+    hub.handleConnection(ws, headers());
+    await flushPromises();
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  it("warns about dropped invalid messages at most once per minute with the running count", async () => {
+    const log = { warn: vi.fn() };
+    const { sub } = await started({}, defaultState(), log);
+    sub.publish(P1, "not json");
+    sub.publish(P1, "{}");
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    expect(log.warn.mock.calls[0][0]).toContain("count 1");
+    expect(log.warn.mock.calls[0][0]).not.toContain("not json");
+    vi.advanceTimersByTime(61_000);
+    sub.publish(P1, "{}");
+    expect(log.warn).toHaveBeenCalledTimes(2);
+    expect(log.warn.mock.calls[1][0]).toContain("count 3");
   });
 });

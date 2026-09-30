@@ -8,7 +8,14 @@ import type { IncomingHttpHeaders } from "http";
 import { z } from "zod";
 import { logger } from "@plane/logger";
 import type { EventsAuthApi } from "./auth";
-import { CLOSE_AUTH, extractSessionCookie, isSessionGone, isValidWorkspaceSlug, partitionProjects } from "./auth";
+import {
+  CLOSE_AUTH,
+  classifyRolesError,
+  extractSessionCookie,
+  isSessionGone,
+  isValidWorkspaceSlug,
+  partitionProjects,
+} from "./auth";
 import type { EventsConfig } from "./config";
 import { EVENTS_CHANNEL_PATTERN, EVENTS_CHANNEL_PREFIX } from "./config";
 import { buildAllowlist, CLOSE_ORIGIN, isOriginAllowed } from "./origin";
@@ -45,7 +52,12 @@ export type HubDeps = {
   config: EventsConfig;
   auth: EventsAuthApi;
   createSubscriber: () => SubscriberLike | null;
+  log?: WarnLog;
 };
+
+export type WarnLog = { warn: (message: string) => unknown };
+
+const INVALID_WARN_INTERVAL_MS = 60_000;
 
 export const EVENT_KINDS = [
   "issue",
@@ -106,6 +118,7 @@ type Client = {
   authed: Promise<boolean>;
   chain: Promise<void>;
   projects: Map<string, string>; // project id -> workspace slug
+  retry: Map<string, string>; // requested while the roles lookup failed transiently: id -> slug
   missedPongs: number;
   inboundStart: number;
   inboundCount: number;
@@ -144,11 +157,15 @@ export class EventsHub {
   private revalidating = false;
   private stopped = false;
   invalidDropped = 0;
+  private readonly log: WarnLog;
+  private warnedPayloadCap = false;
+  private lastInvalidWarn = 0;
 
   constructor(deps: HubDeps) {
     this.config = deps.config;
     this.auth = deps.auth;
     this.createSubscriber = deps.createSubscriber;
+    this.log = deps.log ?? logger;
     this.allowlist = buildAllowlist([...deps.config.allowedOrigins, deps.config.webUrl]);
   }
 
@@ -208,7 +225,10 @@ export class EventsHub {
       }
     };
     if (!this.config.enabled) return reject(CLOSE_DISABLED, "live events disabled");
-    limitPayload(ws, this.config.maxMessageBytes);
+    if (!limitPayload(ws, this.config.maxMessageBytes) && !this.warnedPayloadCap) {
+      this.warnedPayloadCap = true;
+      this.log.warn("LIVE_EVENTS: could not apply the ws payload cap, relying on the post-receive size check");
+    }
     if (this.stopped || !this.subscriber) return reject(CLOSE_UNAVAILABLE, "unavailable");
     const headers = req.headers;
     if (
@@ -230,6 +250,7 @@ export class EventsHub {
       authed: Promise.resolve(false),
       chain: Promise.resolve(),
       projects: new Map(),
+      retry: new Map(),
       missedPongs: 0,
       inboundStart: Date.now(),
       inboundCount: 0,
@@ -306,7 +327,10 @@ export class EventsHub {
       return;
     }
     if (message.type === "unsubscribe") {
-      for (const id of message.project_ids) this.removeProject(client, id);
+      for (const id of message.project_ids) {
+        this.removeProject(client, id);
+        client.retry.delete(id);
+      }
       this.send(client, { type: "unsubscribed", project_ids: message.project_ids });
       return;
     }
@@ -314,16 +338,26 @@ export class EventsHub {
       return this.close(client, CLOSE_BAD_MESSAGE, "invalid workspace");
     }
     const requested = [...new Set(message.project_ids)];
-    const total = new Set([...client.projects.keys(), ...requested]).size;
+    // a fresh subscribe re-evaluates anything that was waiting for a retry
+    for (const id of requested) client.retry.delete(id);
+    const total = new Set([...client.projects.keys(), ...client.retry.keys(), ...requested]).size;
     if (total > this.config.maxProjectsPerSocket) return this.close(client, CLOSE_LIMIT, "too many projects");
 
     let roles: Record<string, number>;
     try {
       roles = await this.auth.projectRoles(client.cookie, message.workspace_slug);
     } catch (error) {
-      if (isSessionGone(error)) return this.close(client, CLOSE_AUTH, "session ended");
-      // membership could not be established: grant nothing
-      this.send(client, { type: "subscribed", project_ids: [], denied: requested });
+      const failure = classifyRolesError(error);
+      if (failure === "session") return this.close(client, CLOSE_AUTH, "session ended");
+      if (failure === "denied") {
+        // no access to this workspace
+        this.send(client, { type: "subscribed", project_ids: [], denied: requested });
+        return;
+      }
+      // membership could not be established: grant nothing yet, keep the request pending and
+      // retry at the next revalidation tick or the next subscribe. Not reported as denied.
+      for (const id of requested) client.retry.set(id, message.workspace_slug);
+      this.send(client, { type: "subscribed", project_ids: [], denied: [] });
       return;
     }
     if (client.closed) return;
@@ -357,6 +391,7 @@ export class EventsHub {
     client.closed = true;
     if (client.deadline) clearTimeout(client.deadline);
     for (const id of client.projects.keys()) this.removeProject(client, id);
+    client.retry.clear();
     this.clients.delete(client);
   }
 
@@ -391,6 +426,8 @@ export class EventsHub {
   // -------------------------------------------------------------- heartbeat
 
   private heartbeat() {
+    const now = Date.now();
+    for (const [id, r] of this.rate) if (now - r.start >= 1000) this.rate.delete(id);
     for (const client of this.clients) {
       if (client.missedPongs >= this.config.maxMissedPongs) {
         this.release(client);
@@ -437,21 +474,33 @@ export class EventsHub {
       if (isSessionGone(error)) this.close(client, CLOSE_AUTH, "session ended");
       return;
     }
-    for (const slug of new Set(client.projects.values())) {
+    const slugs = new Set([...client.projects.values(), ...client.retry.values()]);
+    for (const slug of slugs) {
       if (client.closed) return;
       let roles: Record<string, number>;
       try {
         // oxlint-disable-next-line no-await-in-loop
         roles = await this.auth.projectRoles(client.cookie, slug);
       } catch (error) {
-        if (isSessionGone(error)) this.close(client, CLOSE_AUTH, "session ended");
-        continue;
+        const failure = classifyRolesError(error);
+        if (failure === "session") return this.close(client, CLOSE_AUTH, "session ended");
+        if (failure === "transient") continue;
+        roles = {}; // no access to this workspace
       }
+      if (client.closed) return;
       const mine = [...client.projects].filter(([, s]) => s === slug).map(([id]) => id);
       const { denied } = partitionProjects(mine, roles);
       if (denied.length > 0) {
         for (const id of denied) this.removeProject(client, id);
         this.send(client, { type: "revoked", project_ids: denied });
+      }
+      // retry grants that were pending after a transient failure
+      const waiting = [...client.retry].filter(([, s]) => s === slug).map(([id]) => id);
+      if (waiting.length > 0) {
+        for (const id of waiting) client.retry.delete(id);
+        const result = partitionProjects(waiting, roles);
+        for (const id of result.granted) this.addProject(client, id, slug);
+        this.send(client, { type: "subscribed", project_ids: result.granted, denied: result.denied });
       }
     }
   }
@@ -465,23 +514,35 @@ export class EventsHub {
         ? channel.slice(EVENTS_CHANNEL_PREFIX.length)
         : "";
       if (!parsed.success || parsed.data.project_id !== channelProject) {
-        this.invalidDropped++;
+        this.noteInvalid();
         return;
       }
       this.ingest(parsed.data, false);
     } catch {
-      this.invalidDropped++;
+      this.noteInvalid();
     }
+  }
+
+  private noteInvalid() {
+    this.invalidDropped++;
+    const now = Date.now();
+    if (now - this.lastInvalidWarn < INVALID_WARN_INTERVAL_MS) return;
+    this.lastInvalidWarn = now;
+    this.log.warn(`LIVE_EVENTS: dropped invalid Redis messages, running count ${this.invalidDropped}`);
   }
 
   private ingest(event: RedisEvent, fromSettle: boolean) {
     const projectId = event.project_id;
     if (!this.byProject.has(projectId)) return;
 
-    const now = Date.now();
-    let rate = this.rate.get(projectId);
-    if (!rate || now - rate.start >= 1000) this.rate.set(projectId, (rate = { start: now, count: 0 }));
-    const overflow = ++rate.count > this.config.projectRatePerSec;
+    // settle re-emits are internal: they neither consume nor trip the inbound limit
+    let overflow = false;
+    if (!fromSettle) {
+      const now = Date.now();
+      let rate = this.rate.get(projectId);
+      if (!rate || now - rate.start >= 1000) this.rate.set(projectId, (rate = { start: now, count: 0 }));
+      overflow = ++rate.count > this.config.projectRatePerSec;
+    }
 
     let pending = this.pending.get(projectId);
     if (!pending) this.pending.set(projectId, (pending = { items: new Map(), full: false, timer: null }));

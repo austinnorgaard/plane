@@ -368,8 +368,9 @@ export class LiveEventsClient {
         this.emitResync();
         return;
       case "subscribed":
-        // a transient roles failure on the hub also answers with denied: recovery is the next reconnect
-        // or the hub's periodic revalidation
+        // denied means no access: it stays denied until the next reconnect. A transient roles failure
+        // on the hub is not reported as denied; the hub keeps those projects pending and retries them
+        // at its next revalidation tick or the next subscribe
         frame.denied.forEach((projectId) => this.denied.add(projectId));
         return;
       case "revoked":
