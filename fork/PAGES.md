@@ -51,13 +51,13 @@ use different paths, add aliases here and in `api/urls/page.py`. This is confirm
 
 - `PAGES_API_ENABLED=1` is set on the api and live containers only.
 - `LIVE_BASE_URL` is set on the api container ONLY, never on the worker or beat-worker. Reason: `apps/api/plane/bgtasks/copy_s3_object.py` (around lines 73-78) returns early while `LIVE_BASE_URL` is unset; with it set, page duplicate would start calling the live service's convert-document path from the worker.
-- `LIVE_BASE_URL` must be a direct internal URL of the live container (for example `http://live:3000`), not the public proxy URL, because the live pages endpoints answer 403 to any request carrying `X-Forwarded-For` or `X-Forwarded-Host` (`apps/live/src/fork-pages/auth.ts`), which would make every PATCH return 409.
+- `LIVE_BASE_URL` must be a direct internal URL of the live container (for example `http://live:3000`), not the public proxy URL, because the live pages endpoints answer 403 to any request carrying `X-Forwarded-For` or `X-Forwarded-Host` (`apps/live/src/fork-pages/auth.ts`), which would make PATCH return 409 (no stored binary) or 503 (stored binary).
 - `LIVE_SERVER_SECRET_KEY` must be set (not the shipped placeholder) on api and live; the value is never logged.
 - Only one live replica is supported (presence is per process).
 
 ## Failure modes
 
-- **F1:** Live down, `LIVE_URL` unset, or presence unanswerable: every PATCH returns 409 `{"error": "page is open in an editor; retry later"}`; a rebase failure returns 503 `{"error": "live service unavailable, page not updated"}`; create, list, retrieve and archive still work.
+- **F1:** Live down, `LIVE_URL` unset, or presence unanswerable: For a page with NO stored binary, presence is checked first and returns 409 `{"error": "page is open in an editor; retry later"}`. For a page WITH a stored binary, the rebase runs first: live down, `LIVE_URL` unset or a rebase failure returns 503 `{"error": "live service unavailable, page not updated"}`; 409 only when the rebase succeeded but presence is loaded or unknown. Create, list, retrieve and archive still work.
 - **F2:** A page opened in a browser between the presence answer and the commit: the editor's next store may overwrite the API change (lost, not duplicated); the window is milliseconds because presence is checked after the rebase; a post-commit presence re-check logs a warning with the page id.
 - **F3:** Unload in progress (last tab closing, final store running): the document stays in the documents map until its final store resolves, so presence says loaded and PATCH returns 409; retry later.
 - **F4:** Empty stored binary while a browser still has a cached, unsaved document for the page (after a failed first-open write-back): a direct write followed by the next open can duplicate content in that browser; rare, same exposure as stock.
@@ -67,7 +67,7 @@ use different paths, add aliases here and in `api/urls/page.py`. This is confirm
 - **F8:** A page open in any tab, including a background tab with a connected socket, refuses API PATCH until closed.
 - **F9:** Block-level ids are regenerated for replaced content.
 
-## Live service calls (assumed contract)
+## Live service calls
 
 Both send the `live-server-secret-key` header taken from `LIVE_SERVER_SECRET_KEY`. Neither the key nor page content is logged.
 
