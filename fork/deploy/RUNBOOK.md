@@ -96,27 +96,55 @@ cp -p plane.env plane.env.pre-live-$FORK_N
 
 ## 3. Transfer the images
 
-On `$BUILD_HOST` (podman), after the images are built and pass `fork/test/live-smoke.sh`:
+Chosen path: the image archive built in the cloud is published as an asset of a release of this repository, and the deploy host downloads it and checks its sha256 before anything is loaded. A release asset is limited to 2 GiB; the archive is about 1.5 GB, so check its size (step a). If it ever approaches the limit, switch to a registry instead of splitting the file.
+
+The images are built from this public repository, and the build secrets (such as a proxy CA bundle) are mounted only during the build and are not stored in any layer, so a public asset exposes nothing that the source does not. Confirm that with `podman history --no-trunc` on the three images if the build setup changed. Downloading a public release asset needs no credential.
+
+Additional variables:
+
+| Variable            | Meaning                                                                                  |
+| ------------------- | ---------------------------------------------------------------------------------------- |
+| `FORK_REPO`         | `owner/name` of this fork on GitHub                                                      |
+| `RELEASE_TAG`       | tag of the image release, one per build, for example `images-live.$FORK_N`               |
+| `IMAGE_SHA256`      | sha256 of the archive, copied from the build output (the `Tar sha256` line)              |
+
+The expected hash must come from the build output, not from the release page: that is what makes the check independent of the download.
+
+a. Publish (an owner step, done once per build, never part of the deploy window). `build.sh` writes `plane-fork-live.$FORK_N.tar` and `.sha256`. After the images pass `fork/test/live-smoke.sh`:
 
 ```
-podman save -m --format docker-archive -o images.tar \
-  localhost/plane-fork-web:v1.4.2-live.$FORK_N \
-  localhost/plane-fork-live:v1.4.2-live.$FORK_N \
-  localhost/plane-fork-api:v1.4.2-live.$FORK_N
-sha256sum images.tar
-scp images.tar "$PVE_HOST:$PVE_STAGING_DIR/"
+ls -l plane-fork-live.$FORK_N.tar          # must be below 2 GiB (2147483648 bytes)
+cat plane-fork-live.$FORK_N.sha256         # note IMAGE_SHA256
+gh release create "$RELEASE_TAG" --repo "$FORK_REPO" --title "$RELEASE_TAG" \
+  --notes "Image archive for fork build $FORK_N. sha256 in the build record." \
+  plane-fork-live.$FORK_N.tar plane-fork-live.$FORK_N.sha256
 ```
 
-On the hypervisor, then in the container:
+The `.sha256` asset is a convenience copy. Never trust it alone: compare against `IMAGE_SHA256` from the build output.
+
+b. Fetch, verify and load on the deploy host (the container, which has docker). Copy `fetch-images.sh` and `fork/build/verify-load.sh` into `$CT_STAGING_DIR` first (`pct push`):
 
 ```
-ssh "$PVE_HOST" "sha256sum $PVE_STAGING_DIR/images.tar"
-ssh "$PVE_HOST" "pct push $PLANE_CTID $PVE_STAGING_DIR/images.tar $CT_STAGING_DIR/images.tar"
-ssh "$PVE_HOST" "pct exec $PLANE_CTID -- sha256sum $CT_STAGING_DIR/images.tar"
-ssh "$PVE_HOST" "pct exec $PLANE_CTID -- docker load -i $CT_STAGING_DIR/images.tar"
+ssh "$PVE_HOST" "pct exec $PLANE_CTID -- env CONTAINER_ENGINE=docker FORK_N=$FORK_N \
+  bash $CT_STAGING_DIR/fork/deploy/fetch-images.sh \
+  https://github.com/$FORK_REPO/releases/download/$RELEASE_TAG/plane-fork-live.$FORK_N.tar \
+  $IMAGE_SHA256 $CT_STAGING_DIR"
 ```
 
-The three checksums must be identical. `docker load` prints the three `localhost/plane-fork-*:v1.4.2-live.$FORK_N` names; confirm with `docker image ls 'localhost/plane-fork-*'`. Delete both archive copies afterwards.
+The script downloads to a temporary file, compares the sha256 with `IMAGE_SHA256`, and on a mismatch deletes the download, prints `sha256 mismatch` and exits 1: stop and do not retry with another hash; rebuild or republish instead. On a match it stores the archive and a `.sha256` file, then runs `verify-load.sh`, which checks the hash again, loads the archive and confirms the three `localhost/plane-fork-*:v1.4.2-live.$FORK_N` names. It prints `All checks passed` and exits 0 only if all of that succeeded.
+
+c. If the container cannot reach the internet, run step b on any machine that can, with `SKIP_LOAD=1` (it verifies and stores the archive and writes the `.sha256` file, and does not load). Copy both files into the container (`pct push`) and run `verify-load.sh` there:
+
+```
+ssh "$PVE_HOST" "pct exec $PLANE_CTID -- env CONTAINER_ENGINE=docker \
+  bash $CT_STAGING_DIR/verify-load.sh $CT_STAGING_DIR/plane-fork-live.$FORK_N.tar $CT_STAGING_DIR/plane-fork-live.$FORK_N.sha256"
+```
+
+Confirm with `docker image ls 'localhost/plane-fork-*'`. Delete the downloaded archive afterwards; keep the release for rollback.
+
+Rollback of the delivery itself: nothing changes on the host until step 6 starts the new tag, so a bad archive is simply discarded. To go back to an earlier build, repeat step b with that build's `RELEASE_TAG` and hash, or use rollback L1 and L2 below. Never delete an old release while a deployment may still need it.
+
+Manual alternative (no release, no internet on the build side): copy the archive with `scp`, run `sha256sum` on each hop and compare each result with `IMAGE_SHA256`, then run `fetch-images.sh` with the local path as SOURCE (it re-checks the hash and calls `verify-load.sh`).
 
 ## 4. Install the override
 
