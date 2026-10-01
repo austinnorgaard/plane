@@ -157,6 +157,14 @@ describe("hub stats counters", () => {
     expect(hub.stats().invalid.clientMessages).toBe(1);
   });
 
+  it("invalid messages: a binary client frame", async () => {
+    const { hub } = await started();
+    const ws = await connect(hub);
+    ws.emit("message", Buffer.from("{}"), true);
+    expect(ws.closeCode).toBe(4400);
+    expect(hub.stats().invalid.clientMessages).toBe(1);
+  });
+
   it("rate-limit overflows: inbound message rate (4429) and project event rate (full refresh)", async () => {
     const { hub, sub } = await started({ LIVE_EVENTS_PROJECT_RATE_PER_SEC: "2" });
     const ws = await connect(hub);
@@ -177,6 +185,36 @@ describe("hub stats counters", () => {
     const ws = await connect(hub);
     await subscribe(ws, "acme", [P1]);
     state.users[ALICE] = { status: 401 } as any;
+    for (let i = 0; i < 3; i++) {
+      // oxlint-disable-next-line no-await-in-loop
+      await vi.advanceTimersByTimeAsync(20_000);
+      ws.emit("pong");
+    }
+    expect(ws.closeCode).toBe(4401);
+    expect(hub.stats().revalidationCloses).toEqual({ auth4401: 1, unavailable1013: 0 });
+  });
+
+  it("revalidation closes: 4401 when the session now belongs to another user", async () => {
+    const state = defaultState();
+    const { hub } = await started({}, state);
+    const ws = await connect(hub);
+    await subscribe(ws, "acme", [P1]);
+    state.users[ALICE] = { id: "u-someone-else" };
+    for (let i = 0; i < 3; i++) {
+      // oxlint-disable-next-line no-await-in-loop
+      await vi.advanceTimersByTimeAsync(20_000);
+      ws.emit("pong");
+    }
+    expect(ws.closeCode).toBe(4401);
+    expect(hub.stats().revalidationCloses).toEqual({ auth4401: 1, unavailable1013: 0 });
+  });
+
+  it("revalidation closes: 4401 when the project roles call reports the session ended", async () => {
+    const state = defaultState();
+    const { hub } = await started({}, state);
+    const ws = await connect(hub);
+    await subscribe(ws, "acme", [P1]);
+    state.rolesError = { acme: 401 };
     for (let i = 0; i < 3; i++) {
       // oxlint-disable-next-line no-await-in-loop
       await vi.advanceTimersByTimeAsync(20_000);
@@ -233,6 +271,18 @@ describe("counters endpoint", () => {
     const res = await fetch(`${base}/health/stats`);
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({ error: "Unauthorized" });
+    await close();
+  });
+
+  it("right secret with a proxy header: 403 for each header", async () => {
+    const { base, close } = await serve();
+    for (const name of ["x-forwarded-for", "x-forwarded-host", "forwarded", "x-real-ip"]) {
+      // oxlint-disable-next-line no-await-in-loop
+      const res = await fetch(`${base}/health/stats`, { headers: { "live-server-secret-key": SECRET, [name]: "x" } });
+      expect(res.status).toBe(403);
+      // oxlint-disable-next-line no-await-in-loop
+      expect(await res.json()).toEqual({ error: "Forbidden" });
+    }
     await close();
   });
 

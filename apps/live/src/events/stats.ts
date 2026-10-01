@@ -34,15 +34,24 @@ export const collectStats = (now: number = Date.now()): LiveStats => {
 
 const sha256 = (value: string): Buffer => createHash("sha256").update(value).digest();
 
+// Proxy headers: a request carrying any of them did not come straight from the internal network.
+const PROXY_HEADERS = ["x-forwarded-for", "x-forwarded-host", "forwarded", "x-real-ip"];
+
 /**
- * Guard for the counters endpoint: the live shared secret header, compared on fixed-length digests
- * with timingSafeEqual. Unconfigured or placeholder secret -> 503, missing or wrong -> 401.
+ * Internal-only guard for the counters endpoint, same order and status codes as the pages routes:
+ * 1. secret unconfigured or placeholder -> 503
+ * 2. proxy headers present -> 403 (the shared secret must never travel through the public proxy)
+ * 3. live shared secret header missing or wrong -> 401, compared on fixed-length digests with timingSafeEqual.
  * Nothing about the request or the secret is logged.
  */
 export const requireStatsAccess = (req: Request, res: Response, next: NextFunction): void => {
   const configured = env.LIVE_SERVER_SECRET_KEY;
   if (!configured || configured === PLACEHOLDER_KEY) {
     res.status(503).json({ error: "Service unavailable" });
+    return;
+  }
+  if (PROXY_HEADERS.some((name) => req.headers[name] !== undefined)) {
+    res.status(403).json({ error: "Forbidden" });
     return;
   }
   const provided = req.headers["live-server-secret-key"];
