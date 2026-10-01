@@ -11,7 +11,7 @@
 #
 # Required environment (operator supplied, no defaults):
 #   PLANE_CTID      container id on the hypervisor
-#   PLANE_APP_DIR   directory holding the compose file and plane.env
+#   PLANE_APP_DIR   path to the plane-app directory holding docker-compose.yaml and plane.env
 #
 # Usage (from a workstation):
 #   ssh "$PVE_HOST" "PLANE_CTID=$PLANE_CTID PLANE_APP_DIR=$PLANE_APP_DIR bash -s" < inspect.sh
@@ -127,6 +127,15 @@ for p in "$1" /var/lib/docker; do
 done
 EOF
 
+read -r -d '' S_HINT <<'EOF'
+d=$1
+if [ -f "$d/plane-app/docker-compose.yaml" ] || [ -f "$d/plane-app/docker-compose.yml" ]; then
+  echo "hint=found-plane-app-subdir"
+else
+  echo "hint=no-subdir"
+fi
+EOF
+
 kv() { # kv <key> <text>: value of key=value line
   printf '%s\n' "$2" | sed -n "s/^$1=//p" | head -n1
 }
@@ -148,6 +157,10 @@ out=$(ct_sh "$S_COMPOSE" "$PLANE_APP_DIR")
 if [ "$DRY" = 0 ]; then
   if ! printf '%s\n' "$out" | grep -q '^compose_file='; then
     warn "no compose file found in PLANE_APP_DIR"
+    hint_out=$(ct_sh "$S_HINT" "$PLANE_APP_DIR")
+    if printf '%s\n' "$hint_out" | grep -q '^hint=found-plane-app-subdir$'; then
+      echo "HINT: PLANE_APP_DIR looks like the install root; set it to $PLANE_APP_DIR/plane-app"
+    fi
   fi
   mentions=$(printf '%s\n' "$out" | sed -n 's/^compose_mentions_LIVE_BASE_URL=//p' | awk '{n+=$1} END{print n+0}')
   if [ "$mentions" -gt 0 ]; then
