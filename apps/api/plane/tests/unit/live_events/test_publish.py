@@ -114,7 +114,7 @@ class TestPublishClient:
         settings.REDIS_SSL = False
         settings.REDIS_URL = "redis://localhost:6379/"
         with mock.patch.object(live_events.redis.Redis, "from_url") as from_url:
-            live_events._publish_client()
+            live_events._build_client()
         kwargs = from_url.call_args.kwargs
         assert kwargs["socket_connect_timeout"] == live_events.SOCKET_TIMEOUT_SECONDS
         assert kwargs["socket_timeout"] == live_events.SOCKET_TIMEOUT_SECONDS
@@ -123,20 +123,111 @@ class TestPublishClient:
         settings.REDIS_SSL = True
         settings.REDIS_URL = "rediss://:pw-marker@host-marker:6380/0"
         with mock.patch.object(live_events.redis, "Redis") as cls:
-            live_events._publish_client()
+            live_events._build_client()
         kwargs = cls.call_args.kwargs
         assert kwargs["ssl"] is True
         assert kwargs["socket_timeout"] == live_events.SOCKET_TIMEOUT_SECONDS
 
-    def test_client_is_closed_after_publish(self, enabled, redis_mock):
+    def test_publish_does_not_close_the_shared_client(self, enabled, redis_mock):
         publish_work_item_event(PROJECT, [str(uuid.uuid4())], "issue", "updated", ACTOR)
-        redis_mock.close.assert_called_once()
+        redis_mock.close.assert_not_called()
 
-    def test_client_is_closed_after_publish_failure(self, enabled, redis_mock):
+    def test_publish_failure_does_not_close_the_shared_client(self, enabled, redis_mock):
         redis_mock.publish.side_effect = ConnectionError("down")
-        publish_work_item_event(PROJECT, [str(uuid.uuid4())], "issue", "updated", ACTOR)
-        redis_mock.close.assert_called_once()
+        assert publish_work_item_event(PROJECT, [str(uuid.uuid4())], "issue", "updated", ACTOR) is False
+        redis_mock.close.assert_not_called()
 
-    def test_close_failure_is_swallowed(self, enabled, redis_mock):
-        redis_mock.close.side_effect = RuntimeError("x")
+
+@pytest.fixture
+def fresh_client(settings, monkeypatch):
+    """Reset the module-level client around a test and count constructions."""
+    settings.REDIS_SSL = False
+    settings.REDIS_URL = "redis://localhost:6379/"
+    monkeypatch.setattr(live_events, "_client", None)
+    monkeypatch.setattr(live_events, "_client_pid", None)
+    with mock.patch.object(live_events.redis.Redis, "from_url") as from_url:
+        yield from_url
+
+
+@pytest.mark.unit
+class TestSharedClient:
+    def test_n_publishes_reuse_one_client(self, enabled, fresh_client):
+        for _ in range(5):
+            assert publish_work_item_event(PROJECT, [str(uuid.uuid4())], "issue", "updated", ACTOR) is True
+        assert fresh_client.call_count == 1
+        assert fresh_client.return_value.publish.call_count == 5
+
+    def test_client_is_created_lazily(self, enabled, fresh_client):
+        assert fresh_client.call_count == 0
+        publish_work_item_event(PROJECT, [str(uuid.uuid4())], "issue", "updated", ACTOR)
+        assert fresh_client.call_count == 1
+
+    def test_flag_off_never_creates_a_client(self, monkeypatch, fresh_client):
+        monkeypatch.delenv("LIVE_EVENTS_ENABLED", raising=False)
+        publish_work_item_event(PROJECT, [str(uuid.uuid4())], "issue", "updated", ACTOR)
+        assert fresh_client.call_count == 0
+
+    def test_new_client_after_fork(self, enabled, fresh_client):
+        publish_work_item_event(PROJECT, [str(uuid.uuid4())], "issue", "updated", ACTOR)
+        with mock.patch.object(live_events.os, "getpid", return_value=live_events._client_pid + 1):
+            publish_work_item_event(PROJECT, [str(uuid.uuid4())], "issue", "updated", ACTOR)
+            publish_work_item_event(PROJECT, [str(uuid.uuid4())], "issue", "updated", ACTOR)
+        assert fresh_client.call_count == 2
+
+    def test_inherited_client_is_not_closed_after_fork(self, enabled, fresh_client):
+        publish_work_item_event(PROJECT, [str(uuid.uuid4())], "issue", "updated", ACTOR)
+        with mock.patch.object(live_events.os, "getpid", return_value=live_events._client_pid + 1):
+            publish_work_item_event(PROJECT, [str(uuid.uuid4())], "issue", "updated", ACTOR)
+        fresh_client.return_value.close.assert_not_called()
+
+    def test_concurrent_first_use_builds_one_client(self, enabled, fresh_client):
+        import threading
+
+        def slow_build(*args, **kwargs):
+            time.sleep(0.05)
+            return mock.MagicMock()
+
+        fresh_client.side_effect = slow_build
+        results = []
+        threads = [threading.Thread(target=lambda: results.append(live_events._publish_client())) for _ in range(8)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+        assert fresh_client.call_count == 1
+        assert len({id(r) for r in results}) == 1
+
+    def test_failure_does_not_break_later_publishes(self, enabled, fresh_client):
+        fresh_client.return_value.publish.side_effect = [ConnectionError("down"), 1]
+        assert publish_work_item_event(PROJECT, [str(uuid.uuid4())], "issue", "updated", ACTOR) is False
         assert publish_work_item_event(PROJECT, [str(uuid.uuid4())], "issue", "updated", ACTOR) is True
+        assert fresh_client.call_count == 1
+
+    def test_hung_cache_adds_at_most_the_timeout(self, enabled, settings, monkeypatch):
+        """A listener that accepts but never answers: publish returns False within the socket timeout."""
+        import socket
+        import threading
+
+        monkeypatch.setattr(live_events, "_client", None)
+        monkeypatch.setattr(live_events, "_client_pid", None)
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(5)
+        try:
+            settings.REDIS_SSL = False
+            settings.REDIS_URL = f"redis://127.0.0.1:{srv.getsockname()[1]}/"
+            result = []
+            worker = threading.Thread(
+                target=lambda: result.append(
+                    publish_work_item_event(PROJECT, [str(uuid.uuid4())], "issue", "updated", ACTOR)
+                ),
+                daemon=True,
+            )
+            started = time.monotonic()
+            worker.start()
+            worker.join(live_events.SOCKET_TIMEOUT_SECONDS + 5)
+            elapsed = time.monotonic() - started
+        finally:
+            srv.close()
+        assert result == [False], "publish did not return: no socket timeout"
+        assert elapsed < live_events.SOCKET_TIMEOUT_SECONDS + 0.75

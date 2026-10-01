@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 from urllib.parse import urlparse
@@ -53,7 +54,7 @@ ALL_IDS = "*"
 _UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
 
-def _publish_client():
+def _build_client():
     """A short-timeout Redis client, so a hung Redis cannot stall a request or task."""
     timeouts = {"socket_connect_timeout": SOCKET_TIMEOUT_SECONDS, "socket_timeout": SOCKET_TIMEOUT_SECONDS}
     if settings.REDIS_SSL:
@@ -64,13 +65,38 @@ def _publish_client():
     return redis.Redis.from_url(settings.REDIS_URL, db=0, **timeouts)
 
 
+_client = None
+_client_pid = None
+_client_lock = threading.Lock()
+
+
+def _publish_client():
+    """The shared publish client, created lazily on first use.
+
+    One client (and its connection pool, which is thread safe and replaces a
+    connection that broke, for example after a Redis restart) is kept per
+    process. It is keyed by pid so a forked gunicorn or celery worker never
+    reuses its parent's sockets and builds its own after the fork.
+    """
+    global _client, _client_pid
+    pid = os.getpid()
+    client = _client
+    if client is not None and _client_pid == pid:
+        return client
+    with _client_lock:
+        if _client is None or _client_pid != pid:
+            # Not closed when inherited: the parent still owns those sockets.
+            _client = _build_client()
+            _client_pid = pid
+        return _client
+
+
 def live_events_enabled():
     return os.environ.get("LIVE_EVENTS_ENABLED") == "1"
 
 
 def publish_work_item_event(project_id, issue_ids, kind, verb, actor_id, settle=False):
     """Publish an ids-only event for a project. Never raises."""
-    client = None
     try:
         if not live_events_enabled():
             return False
@@ -97,12 +123,6 @@ def publish_work_item_event(project_id, issue_ids, kind, verb, actor_id, settle=
         # Log the exception type only; connection errors can carry the Redis URL.
         logger.warning("live event publish failed: %s", type(e).__name__)
         return False
-    finally:
-        if client is not None:
-            try:
-                client.close()
-            except Exception:
-                pass
 
 
 def _load(value):
