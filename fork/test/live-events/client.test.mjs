@@ -636,26 +636,22 @@ test("client: open socket: visibility change flushes hidden buffer but does not 
   assert.equal(got[0].type, "events", "flushed correct event type");
 });
 
-test("client: when paused, visibility change does not attempt onActivity (no reconnect)", (t) => {
-  const { doc, win } = env(t);
+test("client: a tab becoming visible is activity: it lifts a 4401 pause and reconnects", (t) => {
+  const { doc } = env(t);
   const client = new C.LiveEventsClient();
   client.subscribe("w", "p", () => {});
   const ws1 = FakeWS.all[0];
   ws1.open();
-  // close with pause code
   ws1.fire("close", { code: 4401 });
-  const countAfterPause = FakeWS.all.length;
-  assert.equal(countAfterPause, 1, "no reconnect scheduled on pause");
-  // try visibility change while paused
+  assert.equal(FakeWS.all.length, 1, "no reconnect scheduled on pause");
   doc.visibilityState = "hidden";
   doc.m.get("visibilitychange")();
+  assert.equal(FakeWS.all.length, 1, "still paused while hidden");
   doc.visibilityState = "visible";
   doc.m.get("visibilitychange")();
-  // visibility change should not attempt to reconnect when paused
-  assert.equal(FakeWS.all.length, countAfterPause, "visibility does not reconnect when paused");
-  // verify focus can lift pause
-  win.m.get("focus")();
-  assert.ok(FakeWS.all.length > countAfterPause, "focus lifts pause and causes reconnect");
+  assert.equal(FakeWS.all.length, 2, "visibility lifted the pause and connected");
+  doc.m.get("visibilitychange")();
+  assert.equal(FakeWS.all.length, 2, "a second visible event with a socket does not connect again");
 });
 
 test("client: when stopped, visibility change does not attempt onActivity (no reconnect)", (t) => {
