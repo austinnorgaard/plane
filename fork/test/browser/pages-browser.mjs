@@ -212,6 +212,13 @@ async function main() {
       let text = "";
       try {
         await b.page.locator(".ProseMirror", { hasText: CHANGED }).first().waitFor({ timeout: 30000 });
+        // the editor shows a "Syncing" badge and a skeleton until the collaboration session has synced
+        const settled = await b.page
+          .getByText("Syncing", { exact: false })
+          .first()
+          .waitFor({ state: "hidden", timeout: 20000 })
+          .then(() => true, () => false);
+        check(`P3 reopen ${n}: the editor finished syncing`, settled, "still showing Syncing after 20 s");
         await sleep(4000); // late syncs would show up as a second copy
         text = await editorText(b.page);
       } catch {
