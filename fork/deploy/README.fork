@@ -73,7 +73,8 @@ Optional live events tuning (defaults shown; leave unset to use them)
                                                 socket is closed with code 1013
 
 Live events counters (numbers since process start; no ids, users or addresses)
-  GET /health/stats on the live service. It is internal only: read it from inside the
+  GET /live/health/stats on the live service (the router is mounted at LIVE_BASE_PATH,
+  default /live). It is internal only: read it from inside the
   deploy network (for example with curl from a shell in the live or api container),
   never through the public reverse proxy. A request that carries X-Forwarded-For,
   X-Forwarded-Host, Forwarded or X-Real-IP answers 403 even with the right secret, so
@@ -84,7 +85,7 @@ Live events counters (numbers since process start; no ids, users or addresses)
   /health stays minimal and shows no counters. Example, run inside the live container
   (LIVE_PORT is the port the live service listens on):
 
-    curl -s -H "live-server-secret-key: $LIVE_SERVER_SECRET_KEY" "http://localhost:$LIVE_PORT/health/stats"
+    curl -s -H "live-server-secret-key: $LIVE_SERVER_SECRET_KEY" "http://localhost:$LIVE_PORT/live/health/stats"
 
   Fields: startedAt, uptimeSeconds, eventsEnabled and, when the hub runs, events:
     sockets.open|authenticated|pending   current gauges

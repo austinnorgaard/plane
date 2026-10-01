@@ -670,14 +670,14 @@ export class EventsHub {
     try {
       const user = await this.auth.currentUser(client.cookie, client.abort.signal);
       if (user.id !== client.userId) {
-        this.counters.revalAuth++;
+        if (!client.closed) this.counters.revalAuth++;
         this.close(client, CLOSE_AUTH, "session changed");
         return "ok";
       }
     } catch (error) {
       // a transient failure is counted by the caller; the socket closes after repeated ones
       if (isSessionGone(error)) {
-        this.counters.revalAuth++;
+        if (!client.closed) this.counters.revalAuth++;
         this.close(client, CLOSE_AUTH, "session ended");
       }
       return isSessionGone(error) ? "ok" : "transient";
@@ -693,7 +693,7 @@ export class EventsHub {
       } catch (error) {
         const failure = classifyRolesError(error);
         if (failure === "session") {
-          this.counters.revalAuth++;
+          if (!client.closed) this.counters.revalAuth++;
           this.close(client, CLOSE_AUTH, "session ended");
           return "ok";
         }

@@ -224,6 +224,76 @@ describe("hub stats counters", () => {
     expect(hub.stats().revalidationCloses).toEqual({ auth4401: 1, unavailable1013: 0 });
   });
 
+  describe("revalidation races: the socket closes while the check is in flight", () => {
+    const race = async (arm: (auth: any, state: any) => () => void) => {
+      const state = defaultState();
+      const { hub, auth } = await started({}, state);
+      const ws = await connect(hub);
+      await subscribe(ws, "acme", [P1]);
+      const settle = arm(auth, state);
+      for (let i = 0; i < 3; i++) {
+        // oxlint-disable-next-line no-await-in-loop
+        await vi.advanceTimersByTimeAsync(20_000);
+        ws.emit("pong");
+      }
+      ws.close();
+      settle();
+      await flushPromises();
+      expect(hub.stats().revalidationCloses).toEqual({ auth4401: 0, unavailable1013: 0 });
+    };
+
+    it("roles call rejects 401 after the socket closed: no 4401 counted", async () => {
+      await race((auth) => {
+        const fns: (() => void)[] = [];
+        auth.projectRoles = () =>
+          new Promise((_, reject) => fns.push(() => reject(Object.assign(new Error("roles"), { statusCode: 401 }))));
+        return () => fns.forEach((f) => f());
+      });
+    });
+
+    it("session check rejects 401 after the socket closed: no 4401 counted", async () => {
+      await race((auth) => {
+        const fns: (() => void)[] = [];
+        auth.currentUser = () =>
+          new Promise((_, reject) => fns.push(() => reject(Object.assign(new Error("auth"), { statusCode: 401 }))));
+        return () => fns.forEach((f) => f());
+      });
+    });
+
+    it("session check answers another user after the socket closed: no 4401 counted", async () => {
+      await race((auth) => {
+        const fns: (() => void)[] = [];
+        auth.currentUser = () => new Promise((resolve) => fns.push(() => resolve({ id: "u-someone-else" })));
+        return () => fns.forEach((f) => f());
+      });
+    });
+  });
+
+  it("rejected other: per-user cap after authentication", async () => {
+    const { hub } = await started({ LIVE_EVENTS_MAX_SOCKETS_PER_USER: "1" });
+    await connect(hub, ALICE);
+    const second = await connect(hub, ALICE);
+    expect(second.closeCode).toBe(4429);
+    expect(hub.stats().rejected.other).toBe(1);
+    expect(hub.stats().sockets.open).toBe(1);
+  });
+
+  it("rejected other: global socket cap reached while authenticating", async () => {
+    const { hub, auth } = await started({ LIVE_EVENTS_MAX_SOCKETS: "1" });
+    const answers: Record<string, () => void> = {};
+    auth.currentUser = (cookie: string) =>
+      new Promise((resolve) => (answers[cookie] = () => resolve({ id: cookie === ALICE ? "u-alice" : "u-bob" })));
+    const first = await connect(hub, ALICE);
+    const second = await connect(hub, BOB);
+    answers[ALICE]();
+    await flushPromises();
+    answers[BOB]();
+    await flushPromises();
+    expect(first.closeCode).toBeNull();
+    expect(second.closeCode).toBe(4429);
+    expect(hub.stats().rejected.other).toBe(1);
+  });
+
   it("revalidation closes: 1013", async () => {
     const state = defaultState();
     const { hub } = await started({ LIVE_EVENTS_REVALIDATE_MAX_FAILURES: "1" }, state);
@@ -253,11 +323,11 @@ describe("hub stats counters", () => {
 describe("counters endpoint", () => {
   vi.useRealTimers();
 
-  const serve = async () => {
+  const serve = async (basePath = "") => {
     const app = express();
     const router = express.Router();
     registerController(router, HealthController, []);
-    app.use(router);
+    app.use(basePath, router);
     const server: Server = await new Promise((resolve) => {
       const s = app.listen(0, "localhost", () => resolve(s));
     });
@@ -316,6 +386,17 @@ describe("counters endpoint", () => {
     const body = (await res.json()) as any;
     expect(body.eventsEnabled).toBe(true);
     expect(body.events.sockets).toEqual({ open: 0, authenticated: 0, pending: 0 });
+    await close();
+  });
+
+  it("is reachable at the configured base path (as server.ts mounts it)", async () => {
+    const { env } = await import("@/env");
+    const { base, close } = await serve(env.LIVE_BASE_PATH);
+    const ok = await fetch(`${base}${env.LIVE_BASE_PATH}/health/stats`, {
+      headers: { "live-server-secret-key": SECRET },
+    });
+    expect(ok.status).toBe(200);
+    expect((await fetch(`${base}/health/stats`, { headers: { "live-server-secret-key": SECRET } })).status).toBe(404);
     await close();
   });
 
