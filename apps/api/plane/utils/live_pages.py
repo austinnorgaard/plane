@@ -26,7 +26,12 @@ REBASE_CONTENT_TYPE = "application/vnd.plane-fork.rebase+json"
 
 
 class LiveServiceError(Exception):
-    """The live service could not be reached or answered with something unusable."""
+    """The live service could not be reached or answered with something unusable.
+
+    too_large is True when live refused the content as too large (its own size cap): that is not
+    retryable, so the pages API answers 413 instead of 503."""
+
+    too_large = False
 
 
 def _base_url():
@@ -79,6 +84,10 @@ def rebase_page(page_id, base_binary_b64, description_html, name):
             headers={**_secret_header(), "Content-Type": REBASE_CONTENT_TYPE},
             timeout=REBASE_TIMEOUT_SECONDS,
         )
+        if response.status_code == 413:
+            error = LiveServiceError("rebase answered 413")
+            error.too_large = True
+            raise error
         if response.status_code != 200:
             raise LiveServiceError(f"rebase answered {response.status_code}")
         result = response.json()

@@ -309,6 +309,118 @@ class TestPatchGuards:
 
 
 @pytest.mark.contract
+class TestHtmlSizeCap:
+    """PAGES_API_MAX_HTML_BYTES bounds description_html (decoded bytes) on create and update."""
+
+    @pytest.fixture(autouse=True)
+    def live(self, mocker):
+        live = mocker.patch(LIVE)
+        live.is_page_loaded.return_value = False
+        return live
+
+    @staticmethod
+    def html_of(size):
+        return "<p>" + "a" * (size - 7) + "</p>"
+
+    def test_patch_over_limit_is_413(self, session_client, project, create_user, monkeypatch, live):
+        monkeypatch.setenv("PAGES_API_MAX_HTML_BYTES", "1000")
+        page = make_page(project, create_user)
+        response = session_client.patch(detail(project, page), {"description_html": self.html_of(1001)}, format="json")
+        assert response.status_code == 413
+        assert response.json() == {"error": "description_html too large", "max_bytes": 1000}
+        live.is_page_loaded.assert_not_called()
+        live.rebase_page.assert_not_called()
+
+    def test_patch_at_limit_passes(self, session_client, project, create_user, monkeypatch):
+        monkeypatch.setenv("PAGES_API_MAX_HTML_BYTES", "1000")
+        page = make_page(project, create_user)
+        response = session_client.patch(detail(project, page), {"description_html": self.html_of(1000)}, format="json")
+        assert response.status_code == 200
+
+    def test_limit_counts_bytes_not_characters(self, session_client, project, create_user, monkeypatch):
+        monkeypatch.setenv("PAGES_API_MAX_HTML_BYTES", "1000")
+        page = make_page(project, create_user)
+        html = "<p>" + "\u00e9" * 500 + "</p>"  # 507 characters, 1007 bytes
+        assert len(html) < 1000 < len(html.encode())
+        assert session_client.patch(detail(project, page), {"description_html": html}, format="json").status_code == 413
+
+    def test_name_only_patch_is_not_affected(self, session_client, project, create_user, monkeypatch):
+        monkeypatch.setenv("PAGES_API_MAX_HTML_BYTES", "10")
+        page = make_page(project, create_user)
+        assert session_client.patch(detail(project, page), {"name": "renamed"}, format="json").status_code == 200
+
+    def test_create_over_limit_is_413(self, session_client, project, monkeypatch):
+        monkeypatch.setenv("PAGES_API_MAX_HTML_BYTES", "1000")
+        response = session_client.post(
+            base(project), {"name": "n", "description_html": self.html_of(1001)}, format="json"
+        )
+        assert response.status_code == 413
+        assert response.json()["max_bytes"] == 1000
+        assert not Page.objects.filter(name="n").exists()
+
+    def test_create_at_limit_passes(self, session_client, project, monkeypatch):
+        monkeypatch.setenv("PAGES_API_MAX_HTML_BYTES", "1000")
+        response = session_client.post(
+            base(project), {"name": "n", "description_html": self.html_of(1000)}, format="json"
+        )
+        assert response.status_code == 201
+
+    def test_default_limit_is_256_kib(self, session_client, project, create_user, monkeypatch):
+        monkeypatch.delenv("PAGES_API_MAX_HTML_BYTES", raising=False)
+        page = make_page(project, create_user)
+        assert (
+            session_client.patch(
+                detail(project, page), {"description_html": self.html_of(262144)}, format="json"
+            ).status_code
+            == 200
+        )
+        assert (
+            session_client.patch(
+                detail(project, page), {"description_html": self.html_of(262145)}, format="json"
+            ).status_code
+            == 413
+        )
+
+    @pytest.mark.parametrize("value", ["abc", "0", "-5", ""])
+    def test_invalid_setting_falls_back_to_default(self, session_client, project, create_user, monkeypatch, value):
+        monkeypatch.setenv("PAGES_API_MAX_HTML_BYTES", value)
+        page = make_page(project, create_user)
+        assert (
+            session_client.patch(
+                detail(project, page), {"description_html": self.html_of(262145)}, format="json"
+            ).status_code
+            == 413
+        )
+
+
+@pytest.mark.contract
+class TestLiveRefusesSize:
+    """A live 413 reaches the caller as 413 with a generic body; any other live failure stays 503."""
+
+    def test_live_413_is_caller_413_without_detail(self, session_client, project, create_user, settings, mocker):
+        settings.LIVE_URL = "http://localhost:3100/live/"
+        post = mocker.patch("plane.utils.live_pages.requests.post")
+        post.return_value.status_code = 413
+        post.return_value.json.return_value = {"error": "description_html too large", "max_bytes": 524288}
+        mocker.patch("plane.utils.live_pages.is_page_loaded", return_value=False)
+        page = binary_page(project, create_user)
+        response = session_client.patch(detail(project, page), {"description_html": "<p>x</p>"}, format="json")
+        assert response.status_code == 413
+        assert response.json() == {"error": "description_html too large"}
+        page.refresh_from_db()
+        assert page.description_html == "<p>hello</p>"
+
+    def test_live_500_stays_503(self, session_client, project, create_user, settings, mocker):
+        settings.LIVE_URL = "http://localhost:3100/live/"
+        post = mocker.patch("plane.utils.live_pages.requests.post")
+        post.return_value.status_code = 500
+        page = binary_page(project, create_user)
+        response = session_client.patch(detail(project, page), {"description_html": "<p>x</p>"}, format="json")
+        assert response.status_code == 503
+        assert response.json() == LIVE_DOWN_MSG
+
+
+@pytest.mark.contract
 class TestPatchNoBinary:
     def test_writes_directly_when_not_loaded(
         self, session_client, project, create_user, mocker, celery_mocks, django_capture_on_commit_callbacks
@@ -666,6 +778,18 @@ class TestLiveClient:
         settings.LIVE_URL = None
         with pytest.raises(live_pages.LiveServiceError):
             live_pages.rebase_page(uuid4(), "AQ==", "<p>x</p>", None)
+
+    def test_rebase_413_is_marked_too_large(self, mocker, settings):
+        settings.LIVE_URL = "http://localhost:3100/live/"
+        post = mocker.patch("plane.utils.live_pages.requests.post")
+        post.return_value.status_code = 413
+        with pytest.raises(live_pages.LiveServiceError) as raised:
+            live_pages.rebase_page(uuid4(), "AQ==", "<p>x</p>", None)
+        assert raised.value.too_large is True
+        post.return_value.status_code = 500
+        with pytest.raises(live_pages.LiveServiceError) as raised:
+            live_pages.rebase_page(uuid4(), "AQ==", "<p>x</p>", None)
+        assert raised.value.too_large is False
 
 
 @pytest.mark.unit
