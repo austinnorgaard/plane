@@ -538,6 +538,58 @@ test("client: a hub resync frame right after the reopen resync is not a second r
   assert.deepEqual(got, ["resync", "resync"], "a later hub resync still refetches");
 });
 
+test("client: visible, close with rate-limited: visibility reconnects immediately before timer fires (proves feature works)", (t) => {
+  const { doc } = env(t);
+  t.mock.method(Math, "random", () => 1); // max backoff
+  const client = new C.LiveEventsClient();
+  const got = [];
+  client.subscribe("w", "p", (e) => got.push(e.type));
+  const ws1 = FakeWS.all[0];
+  ws1.open();
+  got.length = 0;
+  // close with rate-limited (4429) to get 30 second backoff: this proves the immediate reconnect actually skips waiting
+  ws1.fire("close", { code: 4429 });
+  assert.equal(FakeWS.all.length, 1, "no reconnect yet, max backoff timer scheduled");
+  // hide then become visible: visibility change reconnects immediately, NOT after 30 second backoff
+  doc.visibilityState = "hidden";
+  doc.m.get("visibilitychange")();
+  doc.visibilityState = "visible";
+  doc.m.get("visibilitychange")();
+  assert.equal(FakeWS.all.length, 2, "visible triggered immediate reconnect without waiting 30 s");
+  // tick time to prove the OLD timer never fires (it was cancelled)
+  t.mock.timers.tick(30_000);
+  assert.equal(FakeWS.all.length, 2, "old backoff timer was cancelled and did not fire");
+  // open the new socket and verify resync (gap > 5s)
+  t.mock.timers.tick(6000); // gap now > 5s
+  FakeWS.all[1].open();
+  assert.deepEqual(got, ["resync"], "exactly one resync after gap");
+});
+
+test("client: cancel prevents old timer from firing; without it would duplicate reconnect", (t) => {
+  const { doc } = env(t);
+  t.mock.method(Math, "random", () => 1); // max backoff
+  const client = new C.LiveEventsClient();
+  client.subscribe("w", "p", () => {});
+  const ws1 = FakeWS.all[0];
+  ws1.open();
+  // close with 4429: 30s timer
+  ws1.fire("close", { code: 4429 });
+  const initialCount = FakeWS.all.length;
+  // visibility: create new socket immediately
+  doc.visibilityState = "hidden";
+  doc.m.get("visibilitychange")();
+  doc.visibilityState = "visible";
+  doc.m.get("visibilitychange")();
+  assert.equal(FakeWS.all.length, initialCount + 1, "new socket created by visibility");
+  // tick to 30s: if timer wasn't cancelled, would create duplicate socket here
+  // with max backoff, new socket's retry would be at 30s or later
+  // but original timer is at 30s, and it was cancelled
+  t.mock.timers.tick(30_000);
+  // the crucial proof: if clearTimeout wasn't in the code, the original timer would fire now
+  // and we'd see a 4th socket. Instead, no extra socket appears.
+  assert.equal(FakeWS.all.length, initialCount + 1, "original timer was cancelled and did not fire at 30s");
+});
+
 test("client: hidden tab becomes visible after socket closed: reconnect immediately", (t) => {
   const { doc } = env(t);
   t.mock.method(Math, "random", () => 0);
