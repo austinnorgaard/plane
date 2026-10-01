@@ -109,3 +109,38 @@ class PageUpdateAPISerializer(serializers.Serializer):
 
     def validate_description_html(self, value):
         return clean_description_html(value)
+
+
+class PageErrorAPISerializer(serializers.Serializer):
+    """Documentation shape of an error body (400, 403, 413 without a limit, 503)."""
+
+    error = serializers.CharField()
+
+
+class PageValidationErrorAPISerializer(serializers.Serializer):
+    """Documentation shape of a 400 body: either an error message or field errors keyed by field name."""
+
+    error = serializers.CharField(required=False)
+    name = serializers.ListField(child=serializers.CharField(), required=False)
+    description_html = serializers.ListField(child=serializers.CharField(), required=False)
+    non_field_errors = serializers.ListField(child=serializers.CharField(), required=False)
+
+
+class PageConflictAPISerializer(serializers.Serializer):
+    """Documentation shape of a 409 body; id is present only for a duplicate external id."""
+
+    error = serializers.CharField()
+    id = serializers.UUIDField(required=False)
+
+
+class PageTooLargeAPISerializer(serializers.Serializer):
+    """Documentation shape of a 413 body; max_bytes is present when the description_html cap was exceeded."""
+
+    error = serializers.CharField()
+    max_bytes = serializers.IntegerField(required=False)
+
+
+class PageArchiveResultAPISerializer(serializers.Serializer):
+    """Documentation shape of the archive response."""
+
+    archived_at = serializers.DateField()

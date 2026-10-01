@@ -143,6 +143,19 @@ SPECTACULAR_SETTINGS = {
         },
         # Core Project Management
         {
+            "name": "Pages",
+            "description": (
+                "**Project Pages**\n\n"
+                "List, create, retrieve, update, archive and unarchive the pages of a project. "
+                "The endpoints are available only when the deployment enables the pages API.\n\n"
+                "*Key Features:*\n"
+                "- Create pages with HTML content, nesting and external identifiers\n"
+                "- Update the name and HTML content of a page that is not open in an editor\n"
+                "- Archive and unarchive pages together with their descendants\n\n"
+                "*Use Cases:* Syncing documentation from other systems, automated page updates."
+            ),
+        },
+        {
             "name": "Projects",
             "description": (
                 "**Project Management**\n\n"
