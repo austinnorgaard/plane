@@ -230,14 +230,14 @@ class SubIssuesEndpoint(BaseAPIView):
                 type="issue.activity.updated",
                 requested_data=json.dumps({"parent": str(issue_id)}),
                 actor_id=str(request.user.id),
-                issue_id=str(sub_issue_id),
+                issue_id=str(sub_issue.id),
                 project_id=str(project_id),
-                current_instance=json.dumps({"parent": old_parent_ids.get(str(sub_issue_id))}),
+                current_instance=json.dumps({"parent": old_parent_ids.get(str(sub_issue.id))}),
                 epoch=int(timezone.now().timestamp()),
                 notification=True,
                 origin=base_host(request=request, is_app=True),
             )
-            for sub_issue_id in sub_issue_ids
+            for sub_issue in sub_issues
         ]
 
         # create's a dict with state group name with their respective issue id's

@@ -216,12 +216,19 @@ class TestSubIssueRelationAndModuleShapes:
         sub, parent = u(), u()
         created = call_type("issue.activity.created", issue_id=sub, requested_data={"name": "x", "parent": parent})
         assert created == [sub, parent]
-        # Real destroy shape (app/views/issue/base.py): requested_data {"issue_id": pk}, current_instance {}.
-        # The parent is not published on delete (known limit, see CALLSITES.md "Accepted limits").
+        # Real destroy shape (app/views/issue/base.py): requested_data {"issue_id": pk}; current_instance
+        # {"parent": <parent id>} for a sub-issue, {} for a top-level issue.
         deleted = call_type(
+            "issue.activity.deleted",
+            issue_id=sub,
+            requested_data={"issue_id": sub},
+            current_instance={"parent": parent},
+        )
+        assert deleted == [sub, parent]
+        top_level = call_type(
             "issue.activity.deleted", issue_id=sub, requested_data={"issue_id": sub}, current_instance={}
         )
-        assert deleted == [sub]
+        assert top_level == [sub]
 
     def test_parent_key_ignored_for_non_issue_prefix(self):
         a, parent = u(), u()
