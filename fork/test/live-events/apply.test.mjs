@@ -244,6 +244,15 @@ test("bulk '*' events: three in one window cause exactly one refetch and no per-
   await tick(t, 1000);
   assert.equal(calls.filter((c) => c[0] === "coarse").length, 2);
 });
+test("bulk '*' events on a filtered list: three in one window still refetch once", async (t) => {
+  const { applier, calls } = setup(t, { filtered: true });
+  for (let i = 0; i < 3; i++) {
+    applier.handle(bulk());
+    await tick(t, 300); // oxlint-disable-line no-await-in-loop
+  }
+  await tick(t, 1000);
+  assert.equal(calls.filter((c) => c[0] === "coarse").length, 1);
+});
 test("bulk '*' events of different projects each refetch their own project once", async (t) => {
   const a = setup(t, { projectId: "p" });
   const b = setup(t, { projectId: "q", timers: false });
