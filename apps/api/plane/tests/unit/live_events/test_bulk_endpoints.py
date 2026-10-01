@@ -153,3 +153,47 @@ class TestApiKeyCallSiteShape:
             response = api_client.post(url, {"issues": [str(uuid.uuid4())]}, format="json")
         assert response.status_code in (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN)
         activity.delay.assert_not_called()
+
+
+@pytest.mark.contract
+class TestSubIssueReparentPublishes:
+    def _post(self, session_client, workspace, project, new_parent, sub_ids):
+        url = f"/api/workspaces/{workspace.slug}/projects/{project.id}/issues/{new_parent.id}/sub-issues/"
+        with mock.patch("plane.app.views.issue.sub_issue.issue_activity") as activity:
+            response = session_client.post(url, {"sub_issue_ids": sub_ids}, format="json")
+        assert response.status_code == status.HTTP_200_OK
+        return activity
+
+    def test_reparent_publishes_sub_issue_old_and_new_parent(self, session_client, workspace, project, make_issues):
+        old, new, sub = make_issues(3)
+        Issue.objects.filter(pk=sub.pk).update(parent=old)
+        activity = self._post(session_client, workspace, project, new, [str(sub.id)])
+        kwargs = activity.delay.call_args.kwargs
+        assert json.loads(kwargs["current_instance"]) == {"parent": str(old.id)}
+        ids = extract_issue_ids(
+            kwargs["type"], kwargs["issue_id"], kwargs["requested_data"], kwargs["current_instance"], []
+        )
+        assert sorted(ids) == sorted([str(sub.id), str(old.id), str(new.id)])
+        sub.refresh_from_db()
+        assert sub.parent_id == new.id
+
+    def test_first_assign_has_no_old_parent(self, session_client, workspace, project, make_issues):
+        new, sub = make_issues(2)
+        activity = self._post(session_client, workspace, project, new, [str(sub.id)])
+        kwargs = activity.delay.call_args.kwargs
+        assert json.loads(kwargs["current_instance"]) == {"parent": None}
+        ids = extract_issue_ids(
+            kwargs["type"], kwargs["issue_id"], kwargs["requested_data"], kwargs["current_instance"], []
+        )
+        assert sorted(ids) == sorted([str(sub.id), str(new.id)])
+
+    def test_each_sub_issue_keeps_its_own_old_parent(self, session_client, workspace, project, make_issues):
+        old_a, old_b, new, sub_a, sub_b = make_issues(5)
+        Issue.objects.filter(pk=sub_a.pk).update(parent=old_a)
+        Issue.objects.filter(pk=sub_b.pk).update(parent=old_b)
+        activity = self._post(session_client, workspace, project, new, [str(sub_a.id), str(sub_b.id)])
+        seen = {
+            c.kwargs["issue_id"]: json.loads(c.kwargs["current_instance"])["parent"]
+            for c in activity.delay.call_args_list
+        }
+        assert seen == {str(sub_a.id): str(old_a.id), str(sub_b.id): str(old_b.id)}

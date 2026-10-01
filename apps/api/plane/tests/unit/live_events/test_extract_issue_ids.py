@@ -181,7 +181,7 @@ def call_type(type, issue_id=None, requested_data=None, current_instance=None, a
 class TestSubIssueRelationAndModuleShapes:
     def test_sub_issue_assign_publishes_sub_issue_and_parent(self):
         sub, parent = u(), u()
-        # app/views/issue/sub_issue.py: current_instance parent is not the old parent upstream
+        # app/views/issue/sub_issue.py as upstream sent it (current_instance parent is the sub-issue id); the fork now sends the old parent
         result = call_type(
             "issue.activity.updated",
             issue_id=sub,
