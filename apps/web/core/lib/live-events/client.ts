@@ -60,20 +60,32 @@ export const LIVE_CLOSE_FORBIDDEN = 4403;
 export const LIVE_CLOSE_NOT_FOUND = 4404;
 export const LIVE_CLOSE_TOO_LARGE = 4413;
 export const LIVE_CLOSE_RATE_LIMITED = 4429;
+export const LIVE_CLOSE_UNAVAILABLE = 1013;
 
 export const BACKOFF_MIN_MS = 1000;
 export const BACKOFF_MAX_MS = 30_000;
+/** Lower bound of a delay: half of BACKOFF_MIN_MS, so the first retry is jittered as well. */
+export const BACKOFF_FLOOR_MS = BACKOFF_MIN_MS / 2;
+/**
+ * A disconnect that is over within this window is treated as a blip and does not refetch. The hub has no
+ * replay, so events published during a blip are NOT recovered and a card can stay stale until its next
+ * change; the window trades that against a refetch on every flaky-network hiccup. A longer gap triggers
+ * exactly one resync. The same window decides when a connection has proved stable (see markStable) and
+ * how long a hub `resync` frame right after the reopen resync is considered a duplicate.
+ */
+export const SETTLE_WINDOW_MS = 5000;
 export const WATCHDOG_MS = 60_000;
 export const HIDDEN_CLOSE_MS = 5 * 60_000;
 export const HIDDEN_BUFFER_CAP = 200;
 
 /**
- * Exponential backoff between BACKOFF_MIN_MS and BACKOFF_MAX_MS with jitter (50%-100% of the step).
+ * Exponential backoff with jitter (50%-100% of the step), from BACKOFF_FLOOR_MS up to BACKOFF_MAX_MS.
+ * The step doubles from BACKOFF_MIN_MS per attempt and is capped at BACKOFF_MAX_MS.
  * `random` is injectable so the function stays pure.
  */
 export const getBackoffDelay = (attempt: number, random: number = Math.random()): number => {
   const step = Math.min(BACKOFF_MAX_MS, BACKOFF_MIN_MS * 2 ** Math.max(0, attempt));
-  return Math.max(BACKOFF_MIN_MS, Math.round(step * (0.5 + 0.5 * random)));
+  return Math.max(BACKOFF_FLOOR_MS, Math.round(step * (0.5 + 0.5 * random)));
 };
 
 /** Reconnect policy for a close code. */
@@ -90,6 +102,8 @@ export const decideOnClose = (code: number): TCloseDecision => {
     case LIVE_CLOSE_TOO_LARGE:
       return "stop";
     case LIVE_CLOSE_RATE_LIMITED:
+    // 1013: the hub accepted the upgrade and then closed because it is not ready (Redis down or restarting)
+    case LIVE_CLOSE_UNAVAILABLE:
       return "retry-max";
     default:
       return "retry";
@@ -171,11 +185,17 @@ export class LiveEventsClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private watchdogTimer: ReturnType<typeof setTimeout> | undefined;
   private hiddenTimer: ReturnType<typeof setTimeout> | undefined;
+  private stableTimer: ReturnType<typeof setTimeout> | undefined;
+  /** when the last reopen resync was emitted; a hub resync frame right after it is a duplicate */
+  private lastReopenResyncAt: number | undefined;
   private forceMaxBackoff = false;
   private pausedUntilActivity = false;
   private stopped = false;
   private closedWhileHidden = false;
-  private needsResync = false;
+  /** when the connection was lost; kept across failed reconnect attempts so the gap spans all of them */
+  private disconnectedAt: number | undefined;
+  /** set when events may have been lost regardless of the gap length (silent death, hidden close, offline) */
+  private forceResync = false;
   private hiddenBuffer: TLiveEvent[] = [];
   private hiddenBufferWeight = 0;
   private hiddenOverflow = false;
@@ -248,15 +268,16 @@ export class LiveEventsClient {
     socket.addEventListener(
       "open",
       () => {
-        this.attempt = 0;
-        this.forceMaxBackoff = false;
+        // the backoff is NOT reset here: a hub that accepts the upgrade and then closes would turn every
+        // retry into a first retry. It resets once the connection proves stable.
+        this.stableTimer = setTimeout(this.markStable, SETTLE_WINDOW_MS);
         this.resetWatchdog();
         // roles may have changed while the socket was down: ask again
         this.denied.clear();
         this.sendSubscribe([...this.listeners.keys()]);
-        // anything may have been missed while the socket was down
-        if (this.needsResync) {
-          this.needsResync = false;
+        // anything may have been missed while the socket was down: one resync, but not for a short blip
+        if (this.consumeResyncNeed()) {
+          this.lastReopenResyncAt = Date.now();
           this.emitResync();
         }
       },
@@ -267,7 +288,11 @@ export class LiveEventsClient {
       (message) => {
         this.resetWatchdog();
         const frame = parseFrame(message.data);
-        if (frame) this.handleFrame(frame);
+        if (frame) {
+          // the first valid server frame proves the hub is serving this connection
+          this.markStable();
+          this.handleFrame(frame);
+        }
       },
       { signal }
     );
@@ -278,11 +303,39 @@ export class LiveEventsClient {
         this.socket = undefined;
         this.socketAbort = undefined;
         this.clearWatchdog();
-        this.needsResync = true;
+        this.clearStableTimer();
+        this.markDisconnected();
         this.handleClose(closeEvent.code);
       },
       { signal }
     );
+  }
+
+  /** the connection proved stable: the next failure starts the backoff from the beginning again */
+  private markStable = () => {
+    this.clearStableTimer();
+    this.attempt = 0;
+    this.forceMaxBackoff = false;
+  };
+
+  private clearStableTimer() {
+    if (this.stableTimer) clearTimeout(this.stableTimer);
+    this.stableTimer = undefined;
+  }
+
+  private markDisconnected(force = false) {
+    this.disconnectedAt ??= Date.now();
+    if (force) this.forceResync = true;
+  }
+
+  /** True when the gap since the connection was lost needs a resync. Always resets the tracking. */
+  private consumeResyncNeed(): boolean {
+    const since = this.disconnectedAt;
+    const force = this.forceResync;
+    this.disconnectedAt = undefined;
+    this.forceResync = false;
+    if (force) return true;
+    return since !== undefined && Date.now() - since > SETTLE_WINDOW_MS;
   }
 
   private handleClose(code: number) {
@@ -319,6 +372,7 @@ export class LiveEventsClient {
     const socket = this.socket;
     this.socket = undefined;
     this.clearWatchdog();
+    this.clearStableTimer();
     if (!socket) return;
     this.socketAbort?.abort();
     this.socketAbort = undefined;
@@ -337,7 +391,9 @@ export class LiveEventsClient {
     this.detachGlobalListeners();
     this.attempt = 0;
     this.forceMaxBackoff = false;
-    this.needsResync = false;
+    this.disconnectedAt = undefined;
+    this.forceResync = false;
+    this.lastReopenResyncAt = undefined;
     this.denied.clear();
     this.hiddenBuffer = [];
     this.hiddenBufferWeight = 0;
@@ -364,7 +420,9 @@ export class LiveEventsClient {
         this.dispatch(frame);
         return;
       case "resync":
-        // sent by the hub without a project: every project resyncs
+        // sent by the hub without a project: every project resyncs. Skipped when the reopen resync just
+        // ran: the board has been refetched after the hub's subscription came back, so one refetch is enough
+        if (this.lastReopenResyncAt !== undefined && Date.now() - this.lastReopenResyncAt <= SETTLE_WINDOW_MS) return;
         this.emitResync();
         return;
       case "subscribed":
@@ -405,7 +463,8 @@ export class LiveEventsClient {
     this.watchdogTimer = setTimeout(() => {
       // no frame (not even a ping) for WATCHDOG_MS: the connection is dead, force a reconnect
       this.closeSocket(4000);
-      this.needsResync = true;
+      // the connection was dead for an unknown time before this was noticed
+      this.markDisconnected(true);
       this.scheduleReconnect();
     }, WATCHDOG_MS);
   }
@@ -476,7 +535,8 @@ export class LiveEventsClient {
         // hidden for too long: give the server its socket back and resync when the tab returns
         this.hiddenTimer = undefined;
         this.closedWhileHidden = true;
-        this.needsResync = true;
+        // frames dropped from the hidden buffer cannot be told apart from missed ones
+        this.markDisconnected(true);
         this.hiddenBuffer = [];
         this.hiddenBufferWeight = 0;
         this.hiddenOverflow = false;
@@ -499,7 +559,8 @@ export class LiveEventsClient {
 
   private onOnline = () => {
     this.attempt = 0;
-    this.needsResync = true;
+    // a spurious online event with a healthy socket must not leave a stale resync request behind
+    if (!this.socket) this.markDisconnected(true);
     this.ensureConnected();
   };
 
@@ -507,7 +568,7 @@ export class LiveEventsClient {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
     this.closeSocket();
-    this.needsResync = true;
+    this.markDisconnected(true);
   };
 
   private attachGlobalListeners() {
