@@ -63,6 +63,7 @@ usage() {
 is_loopback_proxy() {
   local url="$1"
   local host
+  local lower_host
   # Remove scheme
   url="${url#*://}"
   # Remove optional userinfo (everything before @)
@@ -74,12 +75,27 @@ is_loopback_proxy() {
   else
     host="${url%%:*}"
   fi
+
   # Check if host is a loopback address
-  case "$host" in
-    localhost|127.0.0.1|\[::1\]|::1) return 0 ;;
-    127.*) return 0 ;;  # 127.0.0.0/8 range
-    *) return 1 ;;
-  esac
+  # IPv6 loopback: ::1
+  if [[ "$host" == "::1" ]]; then
+    return 0
+  fi
+
+  # Hostname loopback (case-insensitive): localhost
+  lower_host="${host,,}"  # bash 4+: convert to lowercase
+  if [[ "$lower_host" == "localhost" ]]; then
+    return 0
+  fi
+
+  # IPv4 loopback: strict match for 127.x.y.z where x,y,z are 0-255
+  if [[ "$host" =~ ^127\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
+    # Validate each octet is 0-255
+    local o2=${BASH_REMATCH[1]} o3=${BASH_REMATCH[2]} o4=${BASH_REMATCH[3]}
+    (( o2 <= 255 && o3 <= 255 && o4 <= 255 )) && return 0
+  fi
+
+  return 1
 }
 
 sha=""

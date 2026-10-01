@@ -370,6 +370,36 @@ HTTPS_PROXY=http://127.0.0.1:8080 run_build --sha $SHA --n 1 --out-dir "$work/ou
 https_proxy=http://localhost:3128 HTTPS_PROXY= run_build --sha $SHA --n 1 --out-dir "$work/out8j" --engine docker
 [ $rc -eq 0 ] && echo "$out" | grep -q "Auto-enabling build proxy"; check "auto-proxy: lowercase https_proxy auto-enables" $?
 
+# 8k. case-insensitive localhost (LOCALHOST, Localhost, etc.)
+HTTPS_PROXY=http://LOCALHOST:8080 run_build --sha $SHA --n 1 --out-dir "$work/out8k" --engine docker
+[ $rc -eq 0 ] && echo "$out" | grep -q "Auto-enabling build proxy"; check "auto-proxy: LOCALHOST (uppercase) auto-enables" $?
+[ "$(grep '^docker build ' "$CALLS" | grep -c -- '--network host --build-arg HTTPS_PROXY')" -eq 2 ]; check "auto-proxy: LOCALHOST has proxy args" $?
+
+HTTPS_PROXY=http://Localhost:8080 run_build --sha $SHA --n 1 --out-dir "$work/out8l" --engine docker
+[ $rc -eq 0 ] && echo "$out" | grep -q "Auto-enabling build proxy"; check "auto-proxy: Localhost (mixed case) auto-enables" $?
+
+# 8m. invalid hostnames that look like loopback but are not
+# 127.example.com should NOT auto-enable
+HTTPS_PROXY=http://127.example.com:8080 run_build --sha $SHA --n 1 --out-dir "$work/out8m" --engine docker
+[ $rc -eq 0 ] && ! echo "$out" | grep -q "Auto-enabling build proxy"; check "auto-proxy: 127.example.com does not auto-enable" $?
+[ "$(grep '^docker build ' "$CALLS" | grep -c -- '--network host')" -eq 0 ]; check "auto-proxy: 127.example.com has no proxy args" $?
+
+# 127.0.0.1.evil.example should NOT auto-enable
+HTTPS_PROXY=http://127.0.0.1.evil.example:8080 run_build --sha $SHA --n 1 --out-dir "$work/out8n" --engine docker
+[ $rc -eq 0 ] && ! echo "$out" | grep -q "Auto-enabling build proxy"; check "auto-proxy: 127.0.0.1.evil.example does not auto-enable" $?
+
+# 1270.0.0.1 should NOT auto-enable (first octet > 255)
+HTTPS_PROXY=http://1270.0.0.1:8080 run_build --sha $SHA --n 1 --out-dir "$work/out8o" --engine docker
+[ $rc -eq 0 ] && ! echo "$out" | grep -q "Auto-enabling build proxy"; check "auto-proxy: 1270.0.0.1 does not auto-enable" $?
+
+# 127.256.0.1 should NOT auto-enable (second octet > 255)
+HTTPS_PROXY=http://127.256.0.1:8080 run_build --sha $SHA --n 1 --out-dir "$work/out8p" --engine docker
+[ $rc -eq 0 ] && ! echo "$out" | grep -q "Auto-enabling build proxy"; check "auto-proxy: 127.256.0.1 (octet > 255) does not auto-enable" $?
+
+# 127.0.0.256 should NOT auto-enable (fourth octet > 255)
+HTTPS_PROXY=http://127.0.0.256:8080 run_build --sha $SHA --n 1 --out-dir "$work/out8q" --engine docker
+[ $rc -eq 0 ] && ! echo "$out" | grep -q "Auto-enabling build proxy"; check "auto-proxy: 127.0.0.256 (octet > 255) does not auto-enable" $?
+
 echo
 echo "Passed: $pass  Failed: $fail"
 [ "$fail" -eq 0 ]
