@@ -49,7 +49,7 @@ Variables (supplied by the operator; nothing host-specific is stored in the repo
   LIVE_EVENTS_ALLOWED_ORIGINS  comma-separated origins users open Plane from
                                (scheme://host[:port], for example the values of
                                PUBLIC_URL and LAN_URL)
-  PLANE_APP_DIR                directory containing docker-compose.yaml and plane.env
+  PLANE_APP_DIR                the plane-app directory that holds docker-compose.yaml and plane.env
 
 Optional live events limits (set in the live service environment; defaults shown)
   LIVE_EVENTS_MAX_PENDING_SOCKETS       100    sockets that have not authenticated yet

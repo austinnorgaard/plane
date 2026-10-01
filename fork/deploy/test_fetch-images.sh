@@ -27,6 +27,17 @@ exit "${STUB_RC:-0}"
 STUB
 export STUB_LOG="$T/log" VERIFY_LOAD="$T/verify-load.sh"
 
+# Stub curl on PATH: records its arguments, then runs the real curl.
+REAL_CURL=$(command -v curl)
+mkdir -p "$T/bin"
+cat >"$T/bin/curl" <<STUB
+#!/bin/sh
+echo "\$*" >>"\$CURL_LOG"
+exec "$REAL_CURL" "\$@"
+STUB
+chmod +x "$T/bin/curl"
+export CURL_LOG="$T/curl.log" PATH="$T/bin:$PATH"
+
 run() { : >"$STUB_LOG"; OUT=$("$HERE/fetch-images.sh" "$@" 2>&1); RC=$?; }
 nothing_stored() { [ -z "$(ls -A "$1" 2>/dev/null)" ]; }
 
@@ -99,6 +110,16 @@ run "http://127.0.0.1:9/plane-fork-live.7.tar" "$GOOD" "$T/d14"
 [ "$RC" != 0 ] && echo "$OUT" | grep -q 'plain http is refused' && ok "plain http refused by default" || bad "http default rc=$RC"
 run "ftp://example.invalid/plane-fork-live.7.tar" "$GOOD" "$T/d14"
 [ "$RC" != 0 ] && ok "other schemes refused" || bad "ftp rc=$RC"
+
+# https branch: the real download cannot run offline, so point it at a closed
+# loopback port. It must fail, leave nothing, and call curl with the safety flags.
+: >"$CURL_LOG"
+run "https://127.0.0.1:9/plane-fork-live.7.tar" "$GOOD" "$T/d19"
+[ "$RC" != 0 ] && nothing_stored "$T/d19" && ok "https to a closed port refused" || bad "https closed port rc=$RC"
+for want in '-fsSL' '--proto =https' '--proto-redir =https' '--retry 3' '--connect-timeout 30' '--speed-limit 1000' '--speed-time 60'; do
+  grep -qF -- "$want" "$CURL_LOG" && ok "https curl call has $want" || bad "https curl call lacks $want"
+done
+grep -q -- '--max-time' "$CURL_LOG" && bad "https curl call has a total --max-time" || ok "no total --max-time"
 
 # HTTP on loopback
 if command -v python3 >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then

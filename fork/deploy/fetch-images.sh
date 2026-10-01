@@ -24,7 +24,9 @@
 #                      another machine, with both files copied over.
 #   FETCH_ALLOW_HTTP=1 also accept plain http:// (for local tests only).
 #   VERIFY_LOAD        path of verify-load.sh (default: ../build/verify-load.sh
-#                      relative to this script).
+#                      relative to this script). This script RUNS whatever
+#                      VERIFY_LOAD names, so it is an operator-chosen script:
+#                      only set it to a file you trust.
 #   CONTAINER_ENGINE   passed through to verify-load.sh (podman or docker).
 #
 # Nothing in this script needs a credential: the fork is public, so release
@@ -61,16 +63,17 @@ name="${name##*/}"
 
 mkdir -p "$dest_dir" || die "cannot create $dest_dir"
 final="$dest_dir/$name"
-part="$dest_dir/.$name.part.$$"
+part="$(mktemp "$dest_dir/.$name.part.XXXXXX")" || die "cannot create a temporary file in $dest_dir"
 trap 'rm -f "$part"' EXIT
 
 case "$source_ref" in
   https://*) echo "Downloading $name..."
-    curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 -o "$part" "$source_ref" \
+    curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 \
+      --connect-timeout 30 --speed-limit 1000 --speed-time 60 -o "$part" "$source_ref" \
       || die "download failed" ;;
   http://*)
     [ "${FETCH_ALLOW_HTTP:-}" = 1 ] || die "plain http is refused (set FETCH_ALLOW_HTTP=1 for local tests)"
-    curl -fsSL --proto '=http' -o "$part" "$source_ref" || die "download failed" ;;
+    curl -fsSL --proto '=http' --connect-timeout 30 -o "$part" "$source_ref" || die "download failed" ;;
   file://*)
     curl -fsS --proto '=file' -o "$part" "$source_ref" || die "cannot read $source_ref" ;;
   *://*) die "unsupported URL scheme" ;;

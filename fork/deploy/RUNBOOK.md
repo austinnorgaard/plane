@@ -96,9 +96,9 @@ cp -p plane.env plane.env.pre-live-$FORK_N
 
 ## 3. Transfer the images
 
-Chosen path: the image archive built in the cloud is published as an asset of a release of this repository, and the deploy host downloads it and checks its sha256 before anything is loaded. A release asset is limited to 2 GiB; the archive is about 1.5 GB, so check its size (step a). If it ever approaches the limit, switch to a registry instead of splitting the file.
+Chosen path: the image archive built in the cloud is published as an asset of a release of this repository, and the deploy host downloads it and checks its sha256 before anything is loaded. The archive is about 0.5 GB today; check it against the 2 GiB per-asset limit of a release (step a). If it ever approaches the limit, switch to a registry instead of splitting the file.
 
-The images are built from this public repository, and the build secrets (such as a proxy CA bundle) are mounted only during the build and are not stored in any layer, so a public asset exposes nothing that the source does not. Confirm that with `podman history --no-trunc` on the three images if the build setup changed. Downloading a public release asset needs no credential.
+The images are built from this public repository, and the build secrets (such as a CA bundle) are mounted only during the build and are not stored in any layer, so a public asset exposes nothing that the source does not. Confirm that with `podman history --no-trunc` on the three images if the build setup changed. Downloading a public release asset needs no credential.
 
 Additional variables:
 
@@ -122,18 +122,26 @@ gh release create "$RELEASE_TAG" --repo "$FORK_REPO" --title "$RELEASE_TAG" \
 
 The `.sha256` asset is a convenience copy. Never trust it alone: compare against `IMAGE_SHA256` from the build output.
 
-b. Fetch, verify and load on the deploy host (the container, which has docker). Copy `fetch-images.sh` and `fork/build/verify-load.sh` into `$CT_STAGING_DIR` first (`pct push`):
+b. Fetch, verify and load on the deploy host (the container, which has docker and must also have `curl`; if it has no `curl` or no internet access, use step c). `pct push` copies single files and creates no directories, so push both scripts flat into `$CT_STAGING_DIR`:
+
+```
+ssh "$PVE_HOST" "pct push $PLANE_CTID <path-to-repo>/fork/deploy/fetch-images.sh $CT_STAGING_DIR/fetch-images.sh"
+ssh "$PVE_HOST" "pct push $PLANE_CTID <path-to-repo>/fork/build/verify-load.sh $CT_STAGING_DIR/verify-load.sh"
+```
+
+(copy the two files to the hypervisor first if the repository is not checked out there). Then run the flat path with `VERIFY_LOAD` set:
 
 ```
 ssh "$PVE_HOST" "pct exec $PLANE_CTID -- env CONTAINER_ENGINE=docker FORK_N=$FORK_N \
-  bash $CT_STAGING_DIR/fork/deploy/fetch-images.sh \
+  VERIFY_LOAD=$CT_STAGING_DIR/verify-load.sh \
+  bash $CT_STAGING_DIR/fetch-images.sh \
   https://github.com/$FORK_REPO/releases/download/$RELEASE_TAG/plane-fork-live.$FORK_N.tar \
   $IMAGE_SHA256 $CT_STAGING_DIR"
 ```
 
 The script downloads to a temporary file, compares the sha256 with `IMAGE_SHA256`, and on a mismatch deletes the download, prints `sha256 mismatch` and exits 1: stop and do not retry with another hash; rebuild or republish instead. On a match it stores the archive and a `.sha256` file, then runs `verify-load.sh`, which checks the hash again, loads the archive and confirms the three `localhost/plane-fork-*:v1.4.2-live.$FORK_N` names. It prints `All checks passed` and exits 0 only if all of that succeeded.
 
-c. If the container cannot reach the internet, run step b on any machine that can, with `SKIP_LOAD=1` (it verifies and stores the archive and writes the `.sha256` file, and does not load). Copy both files into the container (`pct push`) and run `verify-load.sh` there:
+c. If the container cannot reach the internet, run step b on any machine that can, with `SKIP_LOAD=1` (it verifies and stores the archive and writes the `.sha256` file, and does not load). Copy both files into the container (`pct push`) and run the flat `verify-load.sh` there (push it as in step b):
 
 ```
 ssh "$PVE_HOST" "pct exec $PLANE_CTID -- env CONTAINER_ENGINE=docker \
