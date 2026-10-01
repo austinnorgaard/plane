@@ -558,6 +558,35 @@ class TestRetryAfterHeader:
         assert response.status_code == 200
         assert response.get("Retry-After") is None
 
+    def test_503_has_no_retry_after(self, session_client, project, create_user, mocker):
+        live = mocker.patch(LIVE)
+        live.LiveServiceError = live_pages.LiveServiceError
+        live.rebase_page.side_effect = live_pages.LiveServiceError("down")
+        page = binary_page(project, create_user)
+        response = session_client.patch(detail(project, page), {"description_html": "<p>n</p>"}, format="json")
+        assert response.status_code == 503
+        assert response.get("Retry-After") is None
+
+    def test_413_html_cap_has_no_retry_after(self, session_client, project, create_user, monkeypatch):
+        monkeypatch.setenv("PAGES_API_MAX_HTML_BYTES", "1000")
+        page = make_page(project, create_user)
+        response = session_client.patch(
+            detail(project, page), {"description_html": "<p>" + "a" * 1001 + "</p>"}, format="json"
+        )
+        assert response.status_code == 413
+        assert response.get("Retry-After") is None
+
+    def test_413_from_live_has_no_retry_after(self, session_client, project, create_user, mocker):
+        live = mocker.patch(LIVE)
+        live.LiveServiceError = live_pages.LiveServiceError
+        error = live_pages.LiveServiceError("too large")
+        error.too_large = True
+        live.rebase_page.side_effect = error
+        page = binary_page(project, create_user)
+        response = session_client.patch(detail(project, page), {"description_html": "<p>n</p>"}, format="json")
+        assert response.status_code == 413
+        assert response.get("Retry-After") is None
+
     def test_409_retry_after_clamped_to_max_3600(
         self, session_client, project, create_user, mocker, monkeypatch
     ):
