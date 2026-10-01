@@ -549,8 +549,9 @@ export class LiveEventsClient {
     this.clearHiddenTimer();
     // When the tab becomes visible after the socket closed, cancel the pending backoff
     // timer and reconnect immediately. The existing gap-resync logic will handle the refetch.
-    // Do not reconnect when paused or permanently stopped: those states take precedence.
-    if (!this.socket && this.reconnectTimer && !this.pausedUntilActivity && !this.stopped) {
+    // Paused and stopped states prevent the visibility change from attempting a reconnect,
+    // enforced by ensureConnected() guards.
+    if (!this.socket && this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = undefined;
       this.connect();

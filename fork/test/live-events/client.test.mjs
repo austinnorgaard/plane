@@ -562,47 +562,52 @@ test("client: hidden tab becomes visible after socket closed: reconnect immediat
   assert.deepEqual(got, ["resync"], "exactly one resync after the gap");
 });
 
-test("client: hidden tab becomes visible with open socket: no extra reconnect or refetch", (t) => {
+test("client: open socket: visibility change flushes hidden buffer but does not create new socket", (t) => {
   const { doc } = env(t);
   const client = new C.LiveEventsClient();
   const got = [];
-  client.subscribe("w", "p", (e) => got.push(e.type));
+  client.subscribe("w", "p", (e) => got.push(e));
   const ws1 = FakeWS.all[0];
   ws1.open();
-  got.length = 0;
   // hide the tab
   doc.visibilityState = "hidden";
   doc.m.get("visibilitychange")();
+  // send event while hidden (should be buffered)
+  ws1.msg(EV);
+  assert.equal(got.length, 0, "event buffered while hidden");
   // become visible
   doc.visibilityState = "visible";
   doc.m.get("visibilitychange")();
-  // socket is still open, so no reconnect, no extra resync
-  assert.equal(FakeWS.all.length, 1, "no new socket created");
-  assert.deepEqual(got, [], "no resync when socket is open");
+  // buffer should be flushed but no new socket created
+  assert.equal(FakeWS.all.length, 1, "no new socket when visible with open socket");
+  assert.equal(got.length, 1, "buffered event flushed");
+  assert.equal(got[0].type, "events", "flushed correct event type");
 });
 
-test("client: visibility change does not reconnect when paused (4401)", (t) => {
-  const { doc } = env(t);
-  t.mock.method(Math, "random", () => 0);
+test("client: when paused, visibility change does not attempt onActivity (no reconnect)", (t) => {
+  const { doc, win } = env(t);
   const client = new C.LiveEventsClient();
   client.subscribe("w", "p", () => {});
   const ws1 = FakeWS.all[0];
   ws1.open();
-  // close with 4401 (pause)
+  // close with pause code
   ws1.fire("close", { code: 4401 });
-  assert.equal(FakeWS.all.length, 1, "no reconnect on pause");
-  // hide and become visible
+  const countAfterPause = FakeWS.all.length;
+  assert.equal(countAfterPause, 1, "no reconnect scheduled on pause");
+  // try visibility change while paused
   doc.visibilityState = "hidden";
   doc.m.get("visibilitychange")();
   doc.visibilityState = "visible";
   doc.m.get("visibilitychange")();
-  // should not reconnect while paused
-  assert.equal(FakeWS.all.length, 1, "no reconnect on visibility while paused");
+  // visibility change should not attempt to reconnect when paused
+  assert.equal(FakeWS.all.length, countAfterPause, "visibility does not reconnect when paused");
+  // verify focus can lift pause
+  win.m.get("focus")();
+  assert.ok(FakeWS.all.length > countAfterPause, "focus lifts pause and causes reconnect");
 });
 
-test("client: visibility change does not reconnect when stopped", (t) => {
-  const { doc } = env(t);
-  t.mock.method(Math, "random", () => 0);
+test("client: when stopped, visibility change does not attempt onActivity (no reconnect)", (t) => {
+  const { doc, win } = env(t);
   for (const code of [4400, 4403, 4404, 4413]) {
     FakeWS.all = [];
     const client = new C.LiveEventsClient();
@@ -611,16 +616,20 @@ test("client: visibility change does not reconnect when stopped", (t) => {
     client.subscribe("w", "p", () => {});
     const ws1 = FakeWS.all[0];
     ws1.open();
-    // close with a stop code
+    // close with stop code
     ws1.fire("close", { code });
-    assert.equal(FakeWS.all.length, 1, `no reconnect on stop code ${code}`);
-    // hide and become visible
+    const countAfterStop = FakeWS.all.length;
+    assert.equal(countAfterStop, 1, `no reconnect scheduled on stop code ${code}`);
+    // try visibility change while stopped
     doc.visibilityState = "hidden";
     doc.m.get("visibilitychange")();
     doc.visibilityState = "visible";
     doc.m.get("visibilitychange")();
-    // should not reconnect when stopped
-    assert.equal(FakeWS.all.length, 1, `no reconnect on visibility when stopped (${code})`);
+    // visibility change should not attempt to reconnect when stopped
+    assert.equal(FakeWS.all.length, countAfterStop, `visibility does not reconnect when stopped (${code})`);
+    // verify focus also cannot lift the stop state
+    win.m.get("focus")();
+    assert.equal(FakeWS.all.length, countAfterStop, `focus cannot lift stopped state (${code})`);
     console.error = original;
   }
 });
