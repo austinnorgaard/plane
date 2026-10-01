@@ -6,6 +6,7 @@ from rest_framework import serializers
 # Module imports
 from plane.db.models import Page, ProjectPage
 from plane.utils.content_validator import validate_html_content
+from plane.utils.openapi.pages import PAGE_ACCESS_CHOICES
 
 EMPTY_HTML = "<p></p>"
 PATCHABLE_FIELDS = ("name", "description_html")
@@ -59,7 +60,7 @@ class PageListAPISerializer(PageAPISerializer):
 class PageCreateAPISerializer(serializers.Serializer):
     name = serializers.CharField(required=False, allow_blank=True, default="")
     description_html = serializers.CharField(required=False, allow_blank=True, allow_null=True, default=EMPTY_HTML)
-    access = serializers.ChoiceField(choices=[0, 1], required=False, default=0)
+    access = serializers.ChoiceField(choices=PAGE_ACCESS_CHOICES, required=False, default=0)
     color = serializers.CharField(required=False, allow_blank=True, max_length=255, default="")
     parent = serializers.UUIDField(required=False, allow_null=True, default=None)
     external_id = serializers.CharField(required=False, allow_null=True, allow_blank=True, max_length=255, default=None)
@@ -109,3 +110,44 @@ class PageUpdateAPISerializer(serializers.Serializer):
 
     def validate_description_html(self, value):
         return clean_description_html(value)
+
+
+class PageErrorAPISerializer(serializers.Serializer):
+    """Documentation shape of an error body (400, 403, 413 without a limit, 503)."""
+
+    error = serializers.CharField()
+
+
+class PageValidationErrorAPISerializer(serializers.Serializer):
+    """Documentation shape of a 400 body: either an error message or field errors keyed by field name."""
+
+    error = serializers.CharField(required=False)
+    name = serializers.ListField(child=serializers.CharField(), required=False)
+    description_html = serializers.ListField(child=serializers.CharField(), required=False)
+    non_field_errors = serializers.ListField(child=serializers.CharField(), required=False)
+
+
+class PageListErrorAPISerializer(serializers.Serializer):
+    """Documentation shape of a 400 body from the list endpoint (invalid pagination parameter)."""
+
+    detail = serializers.CharField()
+
+
+class PageConflictAPISerializer(serializers.Serializer):
+    """Documentation shape of a 409 body; id is present only for a duplicate external id."""
+
+    error = serializers.CharField()
+    id = serializers.UUIDField(required=False)
+
+
+class PageTooLargeAPISerializer(serializers.Serializer):
+    """Documentation shape of a 413 body; max_bytes is present when the description_html cap was exceeded."""
+
+    error = serializers.CharField()
+    max_bytes = serializers.IntegerField(required=False)
+
+
+class PageArchiveResultAPISerializer(serializers.Serializer):
+    """Documentation shape of the archive response."""
+
+    archived_at = serializers.DateField()

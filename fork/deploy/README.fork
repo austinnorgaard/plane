@@ -102,6 +102,8 @@ Optional pages API size and time limits (defaults shown; leave unset to use them
   api service:
   PAGES_API_MAX_HTML_BYTES              262144  largest description_html (decoded bytes) accepted by the
                                                 pages API on create and update; larger answers 413
+  PAGES_API_RETRY_AFTER_SECONDS         60      Retry-After value, in seconds, on the pages API 409 when a
+                                                page is open in an editor (minimum 1, maximum 3600)
   live service:
   PAGES_REBASE_MAX_HTML_BYTES           524288  largest description_html the rebase route converts;
                                                 larger answers 413, which the api passes on
