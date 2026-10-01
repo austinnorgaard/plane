@@ -3,14 +3,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import * as C from "../../../apps/web/core/lib/live-events/client.ts";
 test("backoff and close codes", () => {
-  assert.equal(C.getBackoffDelay(0, 0), 1000);
+  assert.equal(C.getBackoffDelay(0, 0), 500);
   assert.equal(C.getBackoffDelay(0, 1), 1000);
   assert.equal(C.getBackoffDelay(3, 1), 8000);
   assert.equal(C.getBackoffDelay(50, 1), 30000);
   assert.equal(C.getBackoffDelay(Infinity, 0), 15000);
   for (let a = 0; a < 12; a++) {
     const d = C.getBackoffDelay(a);
-    assert.ok(d >= 1000 && d <= 30000);
+    assert.ok(d >= 500 && d <= 30000);
   }
   assert.equal(C.decideOnClose(4401), "pause");
   assert.equal(C.decideOnClose(4403), "stop");
@@ -96,7 +96,7 @@ function env(t) {
   globalThis.document = doc;
   globalThis.window = win;
   Object.defineProperty(globalThis, "navigator", { value: { onLine: true }, configurable: true });
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 });
   return { doc, win };
 }
 test("client: url, ref count, resync on reconnect, close codes", (t) => {
@@ -275,4 +275,159 @@ test("client: 4400 stops for good", (t) => {
   win.m.get("focus")();
   console.error = original;
   assert.equal(FakeWS.all.length, 1);
+});
+
+test("backoff: bounds, growth, cap and jitter range", () => {
+  // min: the lowest possible delay is the floor, also for the first retry
+  assert.equal(C.BACKOFF_FLOOR_MS, 500);
+  for (let a = 0; a < 40; a++) assert.ok(C.getBackoffDelay(a, 0) >= C.BACKOFF_FLOOR_MS);
+  // growth: the upper end of the jitter range doubles per attempt
+  assert.deepEqual(
+    [0, 1, 2, 3, 4].map((a) => C.getBackoffDelay(a, 1)),
+    [1000, 2000, 4000, 8000, 16000]
+  );
+  // jitter range: 50%-100% of the step, monotonic in the random input, never outside the range
+  for (const a of [0, 1, 2, 3, 4]) {
+    const step = 1000 * 2 ** a;
+    assert.equal(C.getBackoffDelay(a, 0), Math.max(500, step / 2));
+    assert.equal(C.getBackoffDelay(a, 1), step);
+    assert.ok(C.getBackoffDelay(a, 0.5) > C.getBackoffDelay(a, 0));
+    assert.ok(C.getBackoffDelay(a, 0.5) < C.getBackoffDelay(a, 1));
+    for (const r of [0, 0.1, 0.25, 0.5, 0.75, 0.99, 1]) {
+      const d = C.getBackoffDelay(a, r);
+      assert.ok(d >= Math.max(500, step / 2) && d <= step, `attempt ${a} random ${r}: ${d}`);
+    }
+  }
+  // cap: never above 30 s, however many attempts, and the cap is reached
+  assert.equal(C.getBackoffDelay(5, 1), 30000);
+  for (const a of [5, 6, 10, 50, 1000, Infinity]) {
+    assert.equal(C.getBackoffDelay(a, 1), 30000);
+    assert.equal(C.getBackoffDelay(a, 0), 15000);
+    assert.ok(C.getBackoffDelay(a) <= 30000);
+  }
+  assert.equal(C.getBackoffDelay(-3, 1), 1000);
+});
+
+test("client: reconnect delays follow the backoff and are capped, reset after a successful open", (t) => {
+  env(t);
+  t.mock.method(Math, "random", () => 1); // top of the jitter range
+  const client = new C.LiveEventsClient();
+  client.subscribe("w", "p", () => {});
+  const expected = [1000, 2000, 4000, 8000, 16000, 30000, 30000];
+  for (const [i, delay] of expected.entries()) {
+    FakeWS.all.at(-1).fire("close", { code: 1006 });
+    const before = FakeWS.all.length;
+    t.mock.timers.tick(delay - 1);
+    assert.equal(FakeWS.all.length, before, `attempt ${i}: not before ${delay} ms`);
+    t.mock.timers.tick(1);
+    assert.equal(FakeWS.all.length, before + 1, `attempt ${i}: reconnects at ${delay} ms`);
+  }
+  FakeWS.all.at(-1).open();
+  FakeWS.all.at(-1).fire("close", { code: 1006 });
+  const before = FakeWS.all.length;
+  t.mock.timers.tick(1000);
+  assert.equal(FakeWS.all.length, before + 1, "backoff restarts from the minimum after an open");
+});
+
+test("client: no refetch for a short blip, exactly one for a long gap", (t) => {
+  env(t);
+  t.mock.method(Math, "random", () => 0); // shortest delays
+  const client = new C.LiveEventsClient();
+  const got = [];
+  client.subscribe("w", "p", (e) => got.push(e.type));
+  FakeWS.all[0].open();
+  assert.deepEqual(got, []);
+
+  // short blip: back within the settle window
+  FakeWS.all[0].fire("close", { code: 1006 });
+  t.mock.timers.tick(500);
+  assert.equal(FakeWS.all.length, 2);
+  FakeWS.all[1].open();
+  assert.deepEqual(got, [], "no resync for a blip");
+
+  // exactly at the window: still a blip
+  FakeWS.all[1].fire("close", { code: 1006 });
+  t.mock.timers.tick(C.SETTLE_WINDOW_MS);
+  FakeWS.all[2].open();
+  assert.deepEqual(got, [], "a gap of exactly the settle window is a blip");
+
+  // long gap spanning several failed attempts: one resync when it finally opens
+  FakeWS.all[2].fire("close", { code: 1006 });
+  for (let i = 0; i < 4; i++) {
+    t.mock.timers.tick(30000);
+    FakeWS.all.at(-1).fire("close", { code: 1006 }); // the attempt fails
+  }
+  t.mock.timers.tick(30000);
+  FakeWS.all.at(-1).open();
+  assert.deepEqual(got, ["resync"], "exactly one resync after a long gap");
+
+  // and it is consumed: a second short blip right after does not refetch again
+  FakeWS.all.at(-1).fire("close", { code: 1006 });
+  t.mock.timers.tick(500);
+  FakeWS.all.at(-1).open();
+  assert.deepEqual(got, ["resync"]);
+});
+
+test("client: one resync per project after a long gap, not one per reconnect attempt", (t) => {
+  env(t);
+  t.mock.method(Math, "random", () => 0);
+  const client = new C.LiveEventsClient();
+  const got = [];
+  client.subscribe("w", "p", (e) => got.push(e.project_id));
+  client.subscribe("w", "q", (e) => got.push(e.project_id));
+  FakeWS.all[0].open();
+  FakeWS.all[0].fire("close", { code: 1013 });
+  t.mock.timers.tick(10_000);
+  FakeWS.all[1].open();
+  assert.deepEqual(got.toSorted(), ["p", "q"]);
+});
+
+test("client: silent death (watchdog) and an offline period always resync, whatever the clock says", (t) => {
+  const { win } = env(t);
+  t.mock.method(Math, "random", () => 0);
+  const client = new C.LiveEventsClient();
+  const got = [];
+  client.subscribe("w", "p", (e) => got.push(e.type));
+  FakeWS.all[0].open();
+  t.mock.timers.tick(C.WATCHDOG_MS); // watchdog closes the socket
+  t.mock.timers.tick(1000);
+  assert.equal(FakeWS.all.length, 2);
+  FakeWS.all[1].open();
+  assert.deepEqual(got, ["resync"]);
+  got.length = 0;
+  navigator.onLine = false;
+  win.m.get("offline")();
+  navigator.onLine = true;
+  win.m.get("online")(); // back within one second
+  FakeWS.all.at(-1).open();
+  assert.deepEqual(got, ["resync"]);
+});
+
+for (const code of [4403, 4404, 4400, 4413]) {
+  test(`client: close code ${code} does not reconnect, however long the wait`, (t) => {
+    env(t);
+    const client = new C.LiveEventsClient();
+    const original = console.error;
+    console.error = () => {};
+    client.subscribe("w", "p", () => {});
+    FakeWS.all[0].open();
+    FakeWS.all[0].fire("close", { code });
+    t.mock.timers.tick(10 * 60000);
+    console.error = original;
+    assert.equal(FakeWS.all.length, 1);
+  });
+}
+
+test("client: an online event with a healthy socket leaves no stale resync behind", (t) => {
+  const { win } = env(t);
+  t.mock.method(Math, "random", () => 0);
+  const client = new C.LiveEventsClient();
+  const got = [];
+  client.subscribe("w", "p", (e) => got.push(e.type));
+  FakeWS.all[0].open();
+  win.m.get("online")();
+  FakeWS.all[0].fire("close", { code: 1006 });
+  t.mock.timers.tick(500);
+  FakeWS.all[1].open();
+  assert.deepEqual(got, [], "a short blip after a spurious online event does not refetch");
 });

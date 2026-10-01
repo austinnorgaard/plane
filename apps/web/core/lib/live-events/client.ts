@@ -63,17 +63,25 @@ export const LIVE_CLOSE_RATE_LIMITED = 4429;
 
 export const BACKOFF_MIN_MS = 1000;
 export const BACKOFF_MAX_MS = 30_000;
+/** Lower bound of a delay: half of BACKOFF_MIN_MS, so the first retry is jittered as well. */
+export const BACKOFF_FLOOR_MS = BACKOFF_MIN_MS / 2;
+/**
+ * A disconnect that is over within this window is a blip: the hub resumed delivery before anything
+ * relevant could have been missed, so no refetch. A longer gap triggers exactly one resync.
+ */
+export const SETTLE_WINDOW_MS = 5000;
 export const WATCHDOG_MS = 60_000;
 export const HIDDEN_CLOSE_MS = 5 * 60_000;
 export const HIDDEN_BUFFER_CAP = 200;
 
 /**
- * Exponential backoff between BACKOFF_MIN_MS and BACKOFF_MAX_MS with jitter (50%-100% of the step).
+ * Exponential backoff with jitter (50%-100% of the step), from BACKOFF_FLOOR_MS up to BACKOFF_MAX_MS.
+ * The step doubles from BACKOFF_MIN_MS per attempt and is capped at BACKOFF_MAX_MS.
  * `random` is injectable so the function stays pure.
  */
 export const getBackoffDelay = (attempt: number, random: number = Math.random()): number => {
   const step = Math.min(BACKOFF_MAX_MS, BACKOFF_MIN_MS * 2 ** Math.max(0, attempt));
-  return Math.max(BACKOFF_MIN_MS, Math.round(step * (0.5 + 0.5 * random)));
+  return Math.max(BACKOFF_FLOOR_MS, Math.round(step * (0.5 + 0.5 * random)));
 };
 
 /** Reconnect policy for a close code. */
@@ -175,7 +183,10 @@ export class LiveEventsClient {
   private pausedUntilActivity = false;
   private stopped = false;
   private closedWhileHidden = false;
-  private needsResync = false;
+  /** when the connection was lost; kept across failed reconnect attempts so the gap spans all of them */
+  private disconnectedAt: number | undefined;
+  /** set when events may have been lost regardless of the gap length (silent death, hidden close, offline) */
+  private forceResync = false;
   private hiddenBuffer: TLiveEvent[] = [];
   private hiddenBufferWeight = 0;
   private hiddenOverflow = false;
@@ -254,11 +265,8 @@ export class LiveEventsClient {
         // roles may have changed while the socket was down: ask again
         this.denied.clear();
         this.sendSubscribe([...this.listeners.keys()]);
-        // anything may have been missed while the socket was down
-        if (this.needsResync) {
-          this.needsResync = false;
-          this.emitResync();
-        }
+        // anything may have been missed while the socket was down: one resync, but not for a short blip
+        if (this.consumeResyncNeed()) this.emitResync();
       },
       { signal }
     );
@@ -278,11 +286,26 @@ export class LiveEventsClient {
         this.socket = undefined;
         this.socketAbort = undefined;
         this.clearWatchdog();
-        this.needsResync = true;
+        this.markDisconnected();
         this.handleClose(closeEvent.code);
       },
       { signal }
     );
+  }
+
+  private markDisconnected(force = false) {
+    this.disconnectedAt ??= Date.now();
+    if (force) this.forceResync = true;
+  }
+
+  /** True when the gap since the connection was lost needs a resync. Always resets the tracking. */
+  private consumeResyncNeed(): boolean {
+    const since = this.disconnectedAt;
+    const force = this.forceResync;
+    this.disconnectedAt = undefined;
+    this.forceResync = false;
+    if (force) return true;
+    return since !== undefined && Date.now() - since > SETTLE_WINDOW_MS;
   }
 
   private handleClose(code: number) {
@@ -337,7 +360,8 @@ export class LiveEventsClient {
     this.detachGlobalListeners();
     this.attempt = 0;
     this.forceMaxBackoff = false;
-    this.needsResync = false;
+    this.disconnectedAt = undefined;
+    this.forceResync = false;
     this.denied.clear();
     this.hiddenBuffer = [];
     this.hiddenBufferWeight = 0;
@@ -405,7 +429,8 @@ export class LiveEventsClient {
     this.watchdogTimer = setTimeout(() => {
       // no frame (not even a ping) for WATCHDOG_MS: the connection is dead, force a reconnect
       this.closeSocket(4000);
-      this.needsResync = true;
+      // the connection was dead for an unknown time before this was noticed
+      this.markDisconnected(true);
       this.scheduleReconnect();
     }, WATCHDOG_MS);
   }
@@ -476,7 +501,8 @@ export class LiveEventsClient {
         // hidden for too long: give the server its socket back and resync when the tab returns
         this.hiddenTimer = undefined;
         this.closedWhileHidden = true;
-        this.needsResync = true;
+        // frames dropped from the hidden buffer cannot be told apart from missed ones
+        this.markDisconnected(true);
         this.hiddenBuffer = [];
         this.hiddenBufferWeight = 0;
         this.hiddenOverflow = false;
@@ -499,7 +525,8 @@ export class LiveEventsClient {
 
   private onOnline = () => {
     this.attempt = 0;
-    this.needsResync = true;
+    // a spurious online event with a healthy socket must not leave a stale resync request behind
+    if (!this.socket) this.markDisconnected(true);
     this.ensureConnected();
   };
 
@@ -507,7 +534,7 @@ export class LiveEventsClient {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
     this.closeSocket();
-    this.needsResync = true;
+    this.markDisconnected(true);
   };
 
   private attachGlobalListeners() {
