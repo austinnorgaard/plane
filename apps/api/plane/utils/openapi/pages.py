@@ -5,6 +5,9 @@
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiExample, OpenApiParameter, OpenApiResponse
 
+# The two page access values (public, private); used to give the `access` enum one stable name.
+PAGE_ACCESS_CHOICES = ((0, "Public"), (1, "Private"))
+
 PAGE_ID_PARAMETER = OpenApiParameter(
     name="page_id",
     description="Page ID",
@@ -72,9 +75,18 @@ PAGE_CONFLICT_CREATE_RESPONSE = OpenApiResponse(
     ],
 )
 
+PAGE_LIST_BAD_REQUEST_RESPONSE_DESCRIPTION = "Invalid pagination parameter (cursor or per_page)."
+
+PAGE_LIST_VALIDATION_EXAMPLES = [
+    _example("Invalid cursor", {"detail": "Invalid cursor parameter."}),
+    _example("Invalid per_page", {"detail": "Invalid per_page parameter."}),
+]
+
 PAGE_CONFLICT_UPDATE_RESPONSE = OpenApiResponse(
     description=(
-        "The page is open in an editor, so it cannot be updated now. Retry later; "
+        "The page cannot be updated now because it is open in an editor, or because whether it is open "
+        "could not be determined and the page has no stored document (a page with a stored document "
+        "returns 503 instead when the live service fails). Retry later; "
         "if the response carries a Retry-After header, wait at least that long."
     ),
     examples=[_example("Open in editor", {"error": "page is open in an editor; retry later"})],
@@ -92,6 +104,9 @@ PAGE_TOO_LARGE_RESPONSE = OpenApiResponse(
 )
 
 PAGE_LIVE_UNAVAILABLE_RESPONSE = OpenApiResponse(
-    description="The live collaboration service is unavailable; the page was not updated. Retry later.",
+    description=(
+        "The page has a stored document and the live collaboration service failed or gave an unusable "
+        "answer, so the page was not updated. Retry later."
+    ),
     examples=[_example("Live unavailable", {"error": "live service unavailable, page not updated"})],
 )

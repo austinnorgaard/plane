@@ -126,6 +126,12 @@ class PageValidationErrorAPISerializer(serializers.Serializer):
     non_field_errors = serializers.ListField(child=serializers.CharField(), required=False)
 
 
+class PageListErrorAPISerializer(serializers.Serializer):
+    """Documentation shape of a 400 body from the list endpoint (invalid pagination parameter)."""
+
+    detail = serializers.CharField()
+
+
 class PageConflictAPISerializer(serializers.Serializer):
     """Documentation shape of a 409 body; id is present only for a duplicate external id."""
 

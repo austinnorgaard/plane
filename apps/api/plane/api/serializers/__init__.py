@@ -75,6 +75,7 @@ from .page import (
     PageCreateAPISerializer,
     PageErrorAPISerializer,
     PageListAPISerializer,
+    PageListErrorAPISerializer,
     PageTooLargeAPISerializer,
     PageUpdateAPISerializer,
     PageValidationErrorAPISerializer,

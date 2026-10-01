@@ -28,6 +28,7 @@ from plane.api.serializers.page import (
     PageCreateAPISerializer,
     PageErrorAPISerializer,
     PageListAPISerializer,
+    PageListErrorAPISerializer,
     PageTooLargeAPISerializer,
     PageUpdateAPISerializer,
     PageValidationErrorAPISerializer,
@@ -53,6 +54,8 @@ from plane.utils.openapi.pages import (
     PAGE_CONFLICT_CREATE_RESPONSE,
     PAGE_CONFLICT_UPDATE_RESPONSE,
     PAGE_ID_PARAMETER,
+    PAGE_LIST_BAD_REQUEST_RESPONSE_DESCRIPTION,
+    PAGE_LIST_VALIDATION_EXAMPLES,
     PAGE_LIVE_UNAVAILABLE_RESPONSE,
     PAGE_ORDER_BY_PARAMETER,
     PAGE_PARENT_ID_PARAMETER,
@@ -194,9 +197,9 @@ class PageListCreateAPIEndpoint(PageBaseAPIEndpoint):
         responses={
             200: create_paginated_response(PageListAPISerializer, "Page", "List of pages", "List of pages"),
             400: OpenApiResponse(
-                response=PageValidationErrorAPISerializer,
-                description=PAGE_BAD_REQUEST_RESPONSE_DESCRIPTION,
-                examples=PAGE_VALIDATION_EXAMPLES,
+                response=PageListErrorAPISerializer,
+                description=PAGE_LIST_BAD_REQUEST_RESPONSE_DESCRIPTION,
+                examples=PAGE_LIST_VALIDATION_EXAMPLES,
             ),
         },
     )
@@ -338,8 +341,8 @@ class PageDetailAPIEndpoint(PageBaseAPIEndpoint):
         description=(
             "Update the name and/or description_html of a page. Any other field is rejected. "
             "A page that is open in an editor cannot be updated (409); an oversized body or html is "
-            "rejected (413); and when the live collaboration service is needed but unavailable the "
-            "page is left unchanged (503)."
+            "rejected (413); and when the page has a stored document and the live collaboration service "
+            "fails the page is left unchanged (503)."
         ),
         parameters=[PAGE_ID_PARAMETER],
         request=PageUpdateAPISerializer,
