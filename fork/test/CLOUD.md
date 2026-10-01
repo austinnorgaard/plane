@@ -32,7 +32,9 @@ no install). Every step prints `CLOUDNODE step=<name> rc=<code> wall_s=<n> <resu
 repeated as a summary at the end. `all` runs every step even after a failure (except after a failed
 install) and the exit code is the first non-zero step code. An unknown step exits 2.
 
-`build-libs` must run before `live-test` and `web-types` (see section 8 of `fork/SPIKE.md`).
+`build-libs` must run before `live-test` and `web-types` (see section 8 of `fork/SPIKE.md`). `live-test`, `live-types` and `web-types` check that the built outputs of the workspace packages their app
+depends on exist; if not they do not run, print `workspace libraries are not built; run: cloud-node-tests.sh install build-libs`
+and exit 2 (so a setup problem is not mistaken for a test failure, which exits with the test's own code).
 
 ## API
 
@@ -60,9 +62,10 @@ fork/test/cloud-api-tests.sh --services apt -- -m unit         # "--" ends the s
   unless `--keep`; existing containers are reused or restarted.
 - `external`: nothing is started; the script fails if a service does not answer.
 
-`apt` and `docker` modes accept loopback hosts only (`127.*`, `localhost`, `::1`) and refuse any other
-`DB_HOST`, `REDIS_HOST` or `MQ_HOST`; `apt` also rejects credential values other than letters, digits
-and `_ . @ -`. Use `--services external` for a service on another address.
+`apt` and `docker` modes accept loopback hosts only (`127.N.N.N` with numeric octets, `localhost`, `::1`) and
+refuse any other `DB_HOST`, `REDIS_HOST` or `MQ_HOST` (e.g., `127.evil.example.com` is rejected);
+`apt` also rejects values of `DB_USER`, `DB_PASS`, `MQ_USER`, `MQ_PASS` and `MQ_VHOST` other than letters, digits and `_ . -` (no `@`) and requires `DB_NAME`
+to contain only letters, digits and `_`. Use `--services external` for a service on another address.
 
 In every mode a service that already answers on its port is reused, so re-running is safe.
 Ports, hosts and the throwaway credentials are overridable (`DB_PORT`, `REDIS_PORT`, `MQ_PORT`,
@@ -107,4 +110,4 @@ Ubuntu 24.04, node 22, pnpm 11.3.0, python 3.12, on `live-updates/v1.4.2`.
 the `PLANE_TEST_SKIP_SETUP=1` seam) with stubs (no node, database or network needed).
 
 The callsites tests are not part of either script: run `python3 -m pytest fork/tools/test_callsites.py`
-separately (no Django needed).
+with the venv python that the API script creates (no Django needed, but the test module must be importable).
