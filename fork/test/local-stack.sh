@@ -576,7 +576,9 @@ cmd_smoke() {
     req PATCH "$api/issues/$iid/" "$mk" '{"name":"lu smoke issue l2"}'
     expect_code "L2 issue PATCH still works" '^200$'
     out=$(WS_COOKIE="session-id=$(stateval MEMBER_SESSION)" probe --mode connect --url "$ws" --origin "$origin" --slug "$WORKSPACE_SLUG" --project "$pid" --timeout 3)
-    if [ "$(pj "$out" subscribed)" = "[]" ]; then ok "L2 events socket not available"; else bad "L2 events socket not available" "subscribed=$(pj "$out" subscribed) http=$(pj "$out" http_status) close=$(pj "$out" close)"; fi
+    # stock images accept the upgrade (101) and never answer a subscribe; a refused connection or a
+    # non-101 answer (for example a 502 with the stack down) must not count as that
+    if [ "$(pj "$out" http_status)" = "101" ] && [ "$(pj "$out" subscribed)" = "[]" ]; then ok "L2 events socket not available"; else bad "L2 events socket not available" "subscribed=$(pj "$out" subscribed) http=$(pj "$out" http_status) close=$(pj "$out" close)"; fi
   else
     bad "L2 apply" "compose up failed"
   fi

@@ -141,7 +141,8 @@ elif "foreign" in opt("--origin"):
 elif phase == "l1":
     out["close"] = 4404
 elif phase == "stock":
-    # Stock image: accepts upgrade (101) but may or may not send subscribed frame
+    # Stock image: accepts the upgrade (101) and normally never answers the subscribe
+    out["http_status"] = int(os.environ.get("STUB_STOCK_HTTP", "101"))
     if os.environ.get("STUB_STOCK_SUBSCRIBED") == "1":
         out["subscribed"] = [project]
     else:
@@ -264,23 +265,27 @@ new_dir
 rc=$?
 check "smoke without a state file exits non-zero" "$([ "$rc" -ne 0 ] && echo 0 || echo 1)"
 
-# ------------------------------------------------------------------ L2 stock image silent-accept and subscribed frame cases
-new_dir
-"$SCRIPT" up >/dev/null 2>&1
-: >"$T/podman.log"
-pid=$(grep '^PROJECT_ID=' "$T/d/local-stack.state" | cut -d= -f2)
-mk=$(grep '^MEMBER_KEY=' "$T/d/local-stack.state" | cut -d= -f2)
-sess=$(grep '^MEMBER_SESSION=' "$T/d/local-stack.state" | cut -d= -f2)
-ws_url="ws://localhost:$(grep '^LISTEN_HTTP_PORT=' "$T/d/local-stack.env" | cut -d= -f2)/live/events"
-origin=$(grep '^WEB_URL=' "$T/d/local-stack.env" | cut -d= -f2)
-# Switch to stock and test silent-accept (no subscribed frame)
-STUB_DIR=$T podman compose -p $(grep '^PROJECT=' "$T/d/local-stack.state" 2>/dev/null || echo plane-lu-local) --env-file "$T/d/local-stack.env" -f /dev/null up -d >/dev/null 2>&1 || true
-: >"$T/phase" && echo stock >"$T/phase"
-out=$(WS_COOKIE="session-id=$sess" STUB_STOCK_SUBSCRIBED=0 "$T/probe.py" --mode connect --url "$ws_url" --origin "$origin" --slug lu-local --project "$pid" --timeout 3 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps(d.get('subscribed',[])))")
-check "L2 stock silent-accept: no subscribed frame (http 101)" "$([ "$out" = '[]' ] && echo 0 || echo 1)"
-# Test subscribed frame case (fork still running)
-out=$(WS_COOKIE="session-id=$sess" STUB_STOCK_SUBSCRIBED=1 "$T/probe.py" --mode connect --url "$ws_url" --origin "$origin" --slug lu-local --project "$pid" --timeout 3 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print('yes' if d.get('subscribed') else 'no')")
-check "L2 stock with subscribed frame: recognizes frame (should fail check)" "$([ "$out" = yes ] && echo 0 || echo 1)"
+# ------------------------------------------------------------------ L2 events socket check, through smoke
+l2_smoke() { # l2_smoke OUTFILE [ENV=VALUE...]; runs the real smoke with the stubbed probe
+  local o=$1
+  shift
+  new_dir
+  "$SCRIPT" up >/dev/null 2>&1
+  env "$@" "$SCRIPT" smoke >"$o" 2>&1
+}
+l2_smoke "$T/l2-silent.out"
+rc=$?
+check "L2 silent accept (101, no frame): smoke exits 0" "$rc"
+check "L2 silent accept: PASS L2 events socket not available" "$(has "$T/l2-silent.out" '^PASS L2 events socket not available' && echo 0 || echo 1)"
+l2_smoke "$T/l2-sub.out" STUB_STOCK_SUBSCRIBED=1
+rc=$?
+check "L2 subscribed frame: smoke exits non-zero" "$([ "$rc" -ne 0 ] && echo 0 || echo 1)"
+check "L2 subscribed frame: FAIL L2 events socket not available" "$(has "$T/l2-sub.out" '^FAIL L2 events socket not available' && echo 0 || echo 1)"
+check "L2 subscribed frame: it is the only FAIL line" "$([ "$(grep -c '^FAIL ' "$T/l2-sub.out")" = 1 ] && echo 0 || echo 1)"
+l2_smoke "$T/l2-502.out" STUB_STOCK_HTTP=502
+rc=$?
+check "L2 non-101 answer: smoke exits non-zero" "$([ "$rc" -ne 0 ] && echo 0 || echo 1)"
+check "L2 non-101 answer: FAIL L2 events socket not available, with http=502" "$(has "$T/l2-502.out" '^FAIL L2 events socket not available.*http=502' && echo 0 || echo 1)"
 
 # ------------------------------------------------------------------ ws_probe against a fake server
 python3 - "$HERE/ws_probe.py" <<'PY'

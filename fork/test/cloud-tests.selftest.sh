@@ -58,6 +58,39 @@ check "node sh usage message" 1 "$(grep -c '^usage: cloud-node-tests.sh sh' "$T/
 check "node sh with a command runs it" 0 "$(STUB_FAIL='' run_node sh 'true')"
 check "node two steps" 0 "$(STUB_FAIL='' run_node live-test live-types)"
 
+# workspace libraries: live-test, live-types and web-types refuse to run (exit 2) until the built outputs exist.
+# Stub tree: apps live and web depending on three packages; the editor also exports ./lib.
+mkdir -p "$T/libsrc/fork/test/live-events" "$T/libsrc/apps/live" "$T/libsrc/apps/web" "$T/libsrc/packages/logger" "$T/libsrc/packages/editor" "$T/libsrc/packages/ui"
+cp "$T/src/package.json" "$T/libsrc/package.json"
+cp "$T/src/fork/test/live-events/run.sh" "$T/libsrc/fork/test/live-events/run.sh"
+printf '{\n  "dependencies": {\n    "@plane/logger": "workspace:*",\n    "@plane/editor": "workspace:*"\n  },\n  "devDependencies": {\n    "@plane/typescript-config": "workspace:*"\n  }\n}\n' >"$T/libsrc/apps/live/package.json"
+printf '{\n  "dependencies": {\n    "@plane/ui": "workspace:*"\n  }\n}\n' >"$T/libsrc/apps/web/package.json"
+printf '{"name": "@plane/logger", "main": "./dist/index.mjs"}\n' >"$T/libsrc/packages/logger/package.json"
+printf '{\n  "name": "@plane/editor",\n  "main": "./dist/index.js",\n  "exports": {\n    ".": "./dist/index.js",\n    "./lib": "./dist/lib.js"\n  }\n}\n' >"$T/libsrc/packages/editor/package.json"
+printf '{"name": "@plane/ui", "exports": {".": "./dist/index.js"}}\n' >"$T/libsrc/packages/ui/package.json"
+run_libs() { PATH="$T/bin:$PATH" PLANE_SRC="$T/libsrc" OUT_DIR="$T/out" STUB_CALLS="$T/calls" STUB_FAIL='' "$DIR/cloud-node-tests.sh" "$@" >"$T/log" 2>&1; echo $?; }
+MSG='workspace libraries are not built; run: cloud-node-tests.sh install build-libs'
+: >"$T/calls"
+check "node live-test with unbuilt libraries exits 2" 2 "$(run_libs live-test)"
+check "node unbuilt libraries: message printed" 1 "$(grep -c -x "$MSG" "$T/log")"
+check "node unbuilt libraries: missing outputs named" 2 "$(grep -c -E '^  packages/(logger: \./dist/index\.mjs|editor: \./dist/index\.js)$' "$T/log")"
+check "node unbuilt libraries: the editor ./lib output is checked too" 1 "$(grep -c '^  packages/editor: ./dist/lib.js$' "$T/log")"
+check "node unbuilt libraries: pnpm was not run" 0 "$(grep -c '^pnpm' "$T/calls")"
+check "node unbuilt libraries: summary line has rc=2" 1 "$(summary | grep -c 'step=live-test rc=2')"
+check "node live-types with unbuilt libraries exits 2" 2 "$(run_libs live-types)"
+check "node web-types with unbuilt libraries exits 2" 2 "$(run_libs web-types)"
+check "node web-types message printed" 1 "$(grep -c -x "$MSG" "$T/log")"
+mkdir -p "$T/libsrc/packages/logger/dist" "$T/libsrc/packages/editor/dist"
+touch "$T/libsrc/packages/logger/dist/index.mjs" "$T/libsrc/packages/editor/dist/index.js"
+check "node only the editor ./lib missing: still exits 2" 2 "$(run_libs live-test)"
+check "node only the editor ./lib missing: names it" 1 "$(grep -c '^  packages/editor: ./dist/lib.js$' "$T/log")"
+touch "$T/libsrc/packages/editor/dist/lib.js"
+check "node live-test with built libraries runs" 0 "$(run_libs live-test)"
+check "node built libraries: pnpm ran" 1 "$(grep -c '^pnpm --filter live test' "$T/calls")"
+check "node web-types still refused while the ui output is missing" 2 "$(run_libs web-types)"
+check "node a library step does not stop other steps (unbuilt, then live-events)" 2 "$(rm -f "$T/libsrc/packages/logger/dist/index.mjs"; run_libs live-test live-events)"
+check "node ...and live-events still ran" 1 "$(summary | grep -c 'step=live-events rc=0')"
+
 # api argument parsing (sourcing defines parse_args only)
 # shellcheck disable=SC1091
 . "$DIR/cloud-api-tests.sh"
@@ -87,6 +120,7 @@ run_api() { PLANE_TEST_SKIP_SETUP=1 PLANE_SRC="$T/apisrc" PLANE_VENV="$T/venv" O
 check "api pytest rc 1 is the script exit code" 1 "$(run_api plane/tests/unit)"
 check "api reports pytest_rc=1" 1 "$(grep -c 'pytest_rc=1' "$T/apilog")"
 check "api lists the failing test id (output and summary)" 2 "$(grep -c '^FAILED plane/tests/unit/test_stub.py' "$T/apilog")"
+check "api PLANE_TEST_SKIP_SETUP=1 is logged" 1 "$(run_api >/dev/null; grep -c 'PLANE_TEST_SKIP_SETUP=1: skipping service start and venv setup' "$T/apilog")"
 check "api pytest rc 4 is passed through" 4 "$(STUB_PYTEST_RC=4 run_api)"
 check "api pytest rc 0 exits 0" 0 "$(STUB_PYTEST_RC=0 run_api)"
 check "api apt refuses a non-loopback DB_HOST" 2 "$(DB_HOST=db.example.invalid run_api --services apt)"
@@ -97,6 +131,12 @@ check "api apt refuses 127.evil.example.com (glob injection)" 2 "$(DB_HOST=127.e
 check "api apt accepts 127.0.0.1" 1 "$(DB_HOST=127.0.0.1 run_api --services apt)"
 check "api apt refuses @ in DB_PASS" 2 "$(DB_PASS="x@y" run_api --services apt)"
 check "api apt refuses @ in MQ_PASS" 2 "$(MQ_PASS="x@y" run_api --services apt)"
+check "api apt refuses @ in DB_USER" 2 "$(DB_USER="x@y" run_api --services apt)"
+check "api apt refuses @ in MQ_USER" 2 "$(MQ_USER="x@y" run_api --services apt)"
+check "api apt refuses @ in MQ_VHOST" 2 "$(MQ_VHOST="x@y" run_api --services apt)"
+check "api apt @ refusal message names the variable" 1 "$(grep -c 'MQ_VHOST' "$T/apilog")"
+check "api apt accepts localhost" 1 "$(DB_HOST=localhost REDIS_HOST=localhost MQ_HOST=localhost run_api --services apt)"
+check "api apt accepts ::1" 1 "$(DB_HOST=::1 REDIS_HOST=::1 MQ_HOST=::1 run_api --services apt)"
 check "api apt refuses - in DB_NAME" 2 "$(DB_NAME="plane-test" run_api --services apt)"
 check "api external allows other hosts" 1 "$(DB_HOST=db.example.invalid run_api --services external)"
 

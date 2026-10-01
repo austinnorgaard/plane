@@ -127,13 +127,10 @@ guard_config() {
   if [ "$SERVICES" = apt ]; then
     for v in DB_USER DB_PASS DB_NAME MQ_USER MQ_PASS MQ_VHOST; do
       case "${!v}" in
-        ''|*[!A-Za-z0-9_.@-]*) die "$v must be non-empty and use only letters, digits and _ . @ - in apt mode" ;;
+        ''|*[!A-Za-z0-9_.-]*) die "$v must be non-empty and use only letters, digits and _ . - in apt mode (no @)" ;;
       esac
     done
-    # Credentials must not contain @, and DB_NAME must be letters, digits and _ only
-    for v in DB_PASS MQ_PASS; do
-      [[ "${!v}" == *@* ]] && die "$v contains @; throwaway credentials may not contain @"
-    done
+    # DB_NAME must be letters, digits and _ only
     [[ "$DB_NAME" =~ [^A-Za-z0-9_] ]] && die "DB_NAME contains characters other than letters, digits and _"
   fi
 }
