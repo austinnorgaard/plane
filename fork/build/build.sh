@@ -6,7 +6,7 @@
 #
 # Usage:
 #   build.sh --sha <40-hex> --n <int> [--out-dir DIR] [--engine docker|podman]
-#                [--ca-bundle FILE] [--build-proxy] [--dry-run]
+#                [--ca-bundle FILE] [--build-proxy|--no-build-proxy] [--dry-run]
 #
 #   --sha      full commit sha to build; must be contained in
 #              origin/live-updates/v1.4.2 (checked after a fetch). Required.
@@ -33,6 +33,10 @@
 #              --network host and pass HTTPS_PROXY/NO_PROXY (and lowercase
 #              variants from this shell's environment) as build args. Those are
 #              predefined proxy args, so they are not stored in the image config.
+#              Auto-enabled when HTTPS_PROXY or https_proxy points to a loopback
+#              address (127.0.0.1, localhost, [::1], or 127.0.0.0/8).
+#   --no-build-proxy
+#              explicitly disable build proxy, overriding auto-detection.
 #   --dry-run  print the commands instead of running them (nothing is executed,
 #              no fetch, no README change).
 #
@@ -51,7 +55,49 @@ die() {
 }
 
 usage() {
-  sed -n '4,40p' "$0" | sed 's/^# \{0,1\}//' >&2
+  sed -n '4,44p' "$0" | sed 's/^# \{0,1\}//' >&2
+}
+
+# Check if a proxy URL (scheme://[userinfo@]host[:port][/path?query#fragment]) has a loopback host.
+# Returns 0 if it's a loopback (127.0.0.0/8, localhost, ::1), 1 otherwise.
+is_loopback_proxy() {
+  local url="$1"
+  local host
+  local lower_host
+  # Remove scheme
+  url="${url#*://}"
+  # Remove path, query, fragment (/, ?, #) BEFORE stripping userinfo
+  url="${url%%[/?#]*}"
+  # Remove optional userinfo (everything before @)
+  url="${url##*@}"
+  # Remove optional port (everything after : or [)
+  if [[ "$url" =~ ^\[.*\] ]]; then
+    host="${url%%\]*}"
+    host="${host#\[}"
+  else
+    host="${url%%:*}"
+  fi
+
+  # Check if host is a loopback address
+  # IPv6 loopback: ::1
+  if [[ "$host" == "::1" ]]; then
+    return 0
+  fi
+
+  # Hostname loopback (case-insensitive): localhost
+  lower_host="${host,,}"  # bash 4+: convert to lowercase
+  if [[ "$lower_host" == "localhost" ]]; then
+    return 0
+  fi
+
+  # IPv4 loopback: strict match for 127.x.y.z where x,y,z are 0-255 (base-10)
+  if [[ "$host" =~ ^127\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
+    # Validate each octet is 0-255 using base-10 comparison
+    local o2=$((10#${BASH_REMATCH[1]})) o3=$((10#${BASH_REMATCH[2]})) o4=$((10#${BASH_REMATCH[3]}))
+    (( o2 <= 255 && o3 <= 255 && o4 <= 255 )) && return 0
+  fi
+
+  return 1
 }
 
 sha=""
@@ -60,7 +106,8 @@ out_dir="/root/out"
 engine=""
 dry_run=0
 ca_bundle="${BUILD_CA_BUNDLE:-}"
-build_proxy=0
+build_proxy=""  # "" = auto, "1" = enabled, "0" = disabled
+build_proxy_explicit=""  # Track which flag was given to detect conflicts
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -76,7 +123,18 @@ while [ $# -gt 0 ]; do
       shift 2
       ;;
     --dry-run) dry_run=1; shift ;;
-    --build-proxy) build_proxy=1; shift ;;
+    --build-proxy)
+      [ -z "$build_proxy_explicit" ] || die "cannot use both --build-proxy and --no-build-proxy"
+      build_proxy=1
+      build_proxy_explicit=--build-proxy
+      shift
+      ;;
+    --no-build-proxy)
+      [ -z "$build_proxy_explicit" ] || die "cannot use both --build-proxy and --no-build-proxy"
+      build_proxy=0
+      build_proxy_explicit=--no-build-proxy
+      shift
+      ;;
     -h|--help) usage; exit 0 ;;
     *) usage; die "unknown argument: $1" ;;
   esac
@@ -89,6 +147,17 @@ done
 n=$((10#$n)) # 007 and 7 are the same build; also avoids octal parsing
 out_dir="${out_dir%/}"
 [[ "$out_dir" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "Invalid --out-dir: must be an absolute path, got '$out_dir'"
+
+# Auto-detect build proxy if not explicitly set.
+if [ -z "$build_proxy" ]; then
+  proxy_url="${HTTPS_PROXY:-${https_proxy:-}}"
+  if [ -n "$proxy_url" ] && is_loopback_proxy "$proxy_url"; then
+    build_proxy=1
+    [ "$dry_run" -eq 0 ] && echo "Auto-enabling build proxy for loopback HTTPS_PROXY"
+  else
+    build_proxy=0
+  fi
+fi
 
 if [ -n "$ca_bundle" ]; then
   [[ "$ca_bundle" =~ ^[A-Za-z0-9._/@+-]+$ ]] || die "Invalid --ca-bundle path '$ca_bundle'"
