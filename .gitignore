@@ -124,4 +124,6 @@ fork/test/local-stack.state
 fork/test/local-stack.report
 fork/test/local-stack.l1.yaml
 fork/test/local-stack.extra.yaml
+fork/test/upgrade-fp/
+fork/test/upgrade-rollback.report
 fork/test/artifacts/

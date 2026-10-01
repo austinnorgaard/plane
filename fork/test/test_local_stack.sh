@@ -276,6 +276,18 @@ rc=$?
 check "up stops when a fork image is missing" "$([ "$rc" -ne 0 ] && has "$T/up-missing.out" 'missing image localhost/plane-fork-web:v1.4.2-live.1' && echo 0 || echo 1)"
 check "up did not start the stack when an image is missing" "$(grep -q ' up -d' "$T/podman.log" && echo 1 || echo 0)"
 
+# ------------------------------------------------------------------ up --stock (start of upgrade-rollback.sh)
+new_dir
+STUB_MISSING_IMAGE=1 "$SCRIPT" up --stock >"$T/up-stock.out" 2>&1
+rc=$?
+check "up --stock needs no fork image" "$([ "$rc" -eq 0 ] && echo 0 || echo 1)"
+check "up --stock starts the stack with the base compose file only" "$(grep ' up -d' "$T/podman.log" | grep -v 'docker-compose.override.yaml' | grep -q . && ! grep ' up -d' "$T/podman.log" | grep -q 'docker-compose.override.yaml' && echo 0 || echo 1)"
+check "up --stock reports its mode" "$(has "$T/up-stock.out" 'mode stock' && echo 0 || echo 1)"
+new_dir
+"$SCRIPT" up --bogus >"$T/up-bogus.out" 2>&1
+rc=$?
+check "up with an unknown option exits 2 and starts nothing" "$([ "$rc" -eq 2 ] && has "$T/up-bogus.out" 'unknown option --bogus' && ! grep -q ' up -d' "$T/podman.log" && echo 0 || echo 1)"
+
 # ------------------------------------------------------------------ down
 new_dir
 "$SCRIPT" up >/dev/null 2>&1
