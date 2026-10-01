@@ -5,7 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { buildTrustedProxies, resolveClientAddress } from "@/events/address";
+import { buildTrustedProxies, isPrivateAddress, resolveClientAddress } from "@/events/address";
 import type { EventsAuthApi } from "@/events/auth";
 import { parseEventsConfig } from "@/events/config";
 import { EventsHub } from "@/events/hub";
@@ -224,7 +224,116 @@ describe("per-address cap", () => {
   });
 });
 
+describe("private peer without trusted proxies", () => {
+  const manyUsers = (n: number) => {
+    const state = defaultState();
+    for (let i = 0; i < n; i++) state.users[`session-id=u${i}`] = { id: `user-${i}` };
+    return fakeAuth(state);
+  };
+
+  it("stock config, private peer: more than 25 sockets from different users are all accepted", async () => {
+    const warn = vi.fn();
+    const hub = await hubWith({}, manyUsers(40), { warn });
+    const sockets: FakeSocket[] = [];
+    for (let i = 0; i < 40; i++) {
+      // oxlint-disable-next-line no-await-in-loop
+      sockets.push(await open(hub, `session-id=u${i}`, "10.1.2.3", { "x-forwarded-for": `198.51.100.${i + 1}` }));
+    }
+    expect(sockets.every((s) => s.closeCode === null)).toBe(true);
+    expect(hub.socketCount).toBe(40);
+    const notices = warn.mock.calls.filter((c) => String(c[0]).includes("LIVE_EVENTS_TRUSTED_PROXIES"));
+    expect(notices).toHaveLength(1);
+  });
+
+  it("is still bound by the other caps", async () => {
+    const hub = await hubWith({ LIVE_EVENTS_MAX_SOCKETS: "30" }, manyUsers(40));
+    const sockets: FakeSocket[] = [];
+    for (let i = 0; i < 32; i++) {
+      // oxlint-disable-next-line no-await-in-loop
+      sockets.push(await open(hub, `session-id=u${i}`, "127.0.0.1"));
+    }
+    expect(sockets.filter((s) => s.closeCode === 4429)).toHaveLength(2);
+  });
+
+  it("a public peer keeps the per-address cap with the stock config", async () => {
+    const hub = await hubWith({}, manyUsers(40));
+    const sockets: FakeSocket[] = [];
+    for (let i = 0; i < 27; i++) {
+      // oxlint-disable-next-line no-await-in-loop
+      sockets.push(await open(hub, `session-id=u${i}`, "203.0.113.5"));
+    }
+    expect(sockets.filter((s) => s.closeCode === 4429)).toHaveLength(2);
+  });
+
+  it("other private families are covered", () => {
+    for (const a of [
+      "127.0.0.1",
+      "10.9.9.9",
+      "172.31.0.1",
+      "192.168.1.1",
+      "169.254.1.1",
+      "::1",
+      "fe80::1",
+      "fd00::1",
+      "::ffff:10.0.0.1",
+    ]) {
+      expect(isPrivateAddress(a)).toBe(true);
+    }
+    for (const a of ["203.0.113.5", "172.32.0.1", "2001:db8::1", "bogus"]) expect(isPrivateAddress(a)).toBe(false);
+  });
+});
+
+describe("trusted proxy entries", () => {
+  it("rejects an empty or non-numeric prefix", () => {
+    const { list, invalid, valid } = buildTrustedProxies([
+      "10.0.0.1/",
+      "10.0.0.1/ 8",
+      "10.0.0.1/-1",
+      "10.0.0.1/8x",
+      "10.0.0.1/33",
+      "10.0.0.2",
+    ]);
+    expect(invalid).toBe(5);
+    expect(valid).toBe(1);
+    expect(list.check("203.0.113.9", "ipv4")).toBe(false);
+  });
+});
+
+describe("upstream lookup abort", () => {
+  it("is aborted when the hub auth timeout fires and when the socket goes away", async () => {
+    const signals: AbortSignal[] = [];
+    const auth: EventsAuthApi = {
+      projectRoles: fakeAuth(defaultState()).projectRoles,
+      currentUser: (_c, signal) => (signals.push(signal as AbortSignal), new Promise(() => undefined)),
+    };
+    const hub = await hubWith({ LIVE_EVENTS_AUTH_TIMEOUT_MS: "3000" }, auth);
+    const a = await open(hub, "session-id=a", "203.0.113.1");
+    const b = await open(hub, "session-id=b", "203.0.113.2");
+    b.close();
+    expect(signals[1].aborted).toBe(true);
+    expect(signals[0].aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(3_001);
+    expect(a.closeCode).toBe(4408);
+    expect(signals[0].aborted).toBe(true);
+  });
+});
+
 describe("failed cookie cache", () => {
+  it("caches 401 only, not 403", async () => {
+    const state = defaultState();
+    state.users["session-id=gate"] = { status: 403 };
+    const calls: string[] = [];
+    const base = fakeAuth(state);
+    const auth: EventsAuthApi = {
+      projectRoles: base.projectRoles,
+      currentUser: (c) => (calls.push(c), base.currentUser(c)),
+    };
+    const hub = await hubWith({}, auth);
+    await open(hub, "session-id=gate", "203.0.113.3");
+    await open(hub, "session-id=gate", "203.0.113.3");
+    expect(calls).toHaveLength(2);
+  });
+
   it("refuses a repeat without an upstream call, then expires", async () => {
     const { auth, calls } = gatedAuth(() => false);
     const hub = await hubWith({ LIVE_EVENTS_AUTH_FAIL_CACHE_MS: "5000" }, auth);

@@ -55,7 +55,13 @@ Optional live events limits (set in the live service environment; defaults shown
   LIVE_EVENTS_AUTH_FAIL_CACHE_MS        30000  how long a rejected session cookie is refused without a
                                                lookup (0 disables)
   LIVE_EVENTS_TRUSTED_PROXIES           empty  comma-separated IPs or CIDR ranges of reverse proxies whose
-                                               X-Forwarded-For is trusted for the per-address limit
+                                               X-Forwarded-For is trusted for the per-address limit.
+                                               The per-address limit depends on this setting: while it
+                                               is empty, sockets from a loopback, private, link-local or
+                                               unique-local peer (normally the proxy itself) are not
+                                               limited per address and a warning is logged once. Include
+                                               CDN edge ranges as well, otherwise the address seen is a
+                                               shared edge address.
 
 Commands (run in $PLANE_APP_DIR; FORK_N must be exported or in plane.env)
 

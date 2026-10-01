@@ -34,7 +34,7 @@ const rolesSchema = z.record(z.string(), z.number());
 
 export interface EventsAuthApi {
   /** Resolve the user id for a session cookie; rejects when the session is invalid. */
-  currentUser(cookie: string): Promise<{ id: string }>;
+  currentUser(cookie: string, signal?: AbortSignal): Promise<{ id: string }>;
   /** Active project memberships for the workspace: project id -> role. */
   projectRoles(cookie: string, slug: string): Promise<Record<string, number>>;
 }
@@ -55,9 +55,9 @@ class ProjectRolesService extends APIService {
 // Session lookup without per-failure logging: failures are counted and logged at a limited
 // rate by the hub, so unauthenticated callers cannot drive the log volume.
 class CurrentUserService extends APIService {
-  async getUser(cookie: string): Promise<{ id?: unknown } | undefined> {
+  async getUser(cookie: string, signal?: AbortSignal): Promise<{ id?: unknown } | undefined> {
     try {
-      const response = await this.get("/api/users/me/", { headers: { Cookie: cookie } });
+      const response = await this.get("/api/users/me/", { headers: { Cookie: cookie } }, { signal });
       return response?.data;
     } catch (error) {
       throw new AppError(error, { context: { operation: "currentUser" } });
@@ -69,8 +69,8 @@ export class DefaultEventsAuth implements EventsAuthApi {
   private users = new CurrentUserService();
   private roles = new ProjectRolesService();
 
-  async currentUser(cookie: string) {
-    const user = await this.users.getUser(cookie);
+  async currentUser(cookie: string, signal?: AbortSignal) {
+    const user = await this.users.getUser(cookie, signal);
     if (!user?.id) throw new AppError("no user in session");
     return { id: String(user.id) };
   }

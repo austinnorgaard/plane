@@ -9,7 +9,7 @@ import type { IncomingHttpHeaders } from "http";
 import type { BlockList } from "net";
 import { z } from "zod";
 import { logger } from "@plane/logger";
-import { buildTrustedProxies, resolveClientAddress } from "./address";
+import { buildTrustedProxies, isPrivateAddress, resolveClientAddress } from "./address";
 import type { EventsAuthApi } from "./auth";
 import {
   CLOSE_AUTH,
@@ -125,6 +125,7 @@ type Client = {
   pending: boolean; // authentication not finished yet
   gotMessage: boolean;
   authTimer: ReturnType<typeof setTimeout> | null;
+  abort: AbortController;
   chain: Promise<void>;
   projects: Map<string, string>; // project id -> workspace slug
   retry: Map<string, string>; // requested while the roles lookup failed transiently: id -> slug
@@ -163,6 +164,8 @@ export class EventsHub {
   private readonly cacheKey = randomBytes(32);
   private readonly failedCookies = new Map<string, number>(); // keyed digest -> expiry (ms)
   private readonly perAddress = new Map<string, number>();
+  private readonly proxiesConfigured: boolean;
+  private warnedCapInactive = false;
   private pendingCount = 0;
   private authFailures = 0;
   private lastAuthFailWarn = 0;
@@ -185,6 +188,7 @@ export class EventsHub {
     this.allowlist = buildAllowlist([...deps.config.allowedOrigins, deps.config.webUrl]);
     const trusted = buildTrustedProxies(deps.config.trustedProxies);
     this.trusted = trusted.list;
+    this.proxiesConfigured = trusted.valid > 0;
     if (trusted.invalid > 0) {
       this.log.warn(`LIVE_EVENTS: ignored ${trusted.invalid} unusable trusted proxy entries`);
     }
@@ -268,7 +272,10 @@ export class EventsHub {
     // a cookie that was just refused is refused again without any upstream work
     if (this.isCookieFailed(cookie)) return reject(CLOSE_AUTH, "unauthenticated");
     const address = resolveClientAddress(req.socket?.remoteAddress, headers["x-forwarded-for"], this.trusted);
-    if (address && (this.perAddress.get(address) ?? 0) >= this.config.maxSocketsPerAddress) {
+    // Without a trusted proxy list a private direct peer is most likely the reverse proxy itself, so
+    // every user would share one address: the per-address cap is skipped for it (with a warning).
+    const capApplies = address !== null && !this.sharedProxyPeer(address);
+    if (address && capApplies && (this.perAddress.get(address) ?? 0) >= this.config.maxSocketsPerAddress) {
       return reject(CLOSE_LIMIT, "too many connections");
     }
     if (this.pendingCount >= this.config.maxPendingSockets) return reject(CLOSE_LIMIT, "too many connections");
@@ -286,6 +293,7 @@ export class EventsHub {
       pending: true,
       gotMessage: false,
       authTimer: null,
+      abort: new AbortController(),
       chain: Promise.resolve(),
       projects: new Map(),
       retry: new Map(),
@@ -297,9 +305,11 @@ export class EventsHub {
     };
     this.clients.add(client);
     this.pendingCount++;
-    if (address) this.perAddress.set(address, (this.perAddress.get(address) ?? 0) + 1);
+    if (address && capApplies) this.perAddress.set(address, (this.perAddress.get(address) ?? 0) + 1);
+    else client.address = null;
     client.authTimer = setTimeout(() => {
       client.authTimer = null;
+      client.abort.abort();
       this.noteAuthFailure();
       this.close(client, CLOSE_DEADLINE, "authentication timed out");
     }, this.config.authTimeoutMs);
@@ -309,7 +319,7 @@ export class EventsHub {
     );
 
     client.authed = this.auth
-      .currentUser(cookie)
+      .currentUser(cookie, client.abort.signal)
       .then((user) => {
         if (client.closed) return false;
         client.userId = user.id;
@@ -328,7 +338,7 @@ export class EventsHub {
       .catch((error) => {
         if (client.closed) return false;
         // only a definitive answer is remembered; a timeout or upstream error is not
-        if (isSessionGone(error)) this.rememberFailedCookie(cookie);
+        if ((error as { statusCode?: number } | null)?.statusCode === 401) this.rememberFailedCookie(cookie);
         this.noteAuthFailure();
         this.close(client, CLOSE_AUTH, "unauthenticated");
         return false;
@@ -439,6 +449,17 @@ export class EventsHub {
     }
   }
 
+  private sharedProxyPeer(address: string): boolean {
+    if (this.proxiesConfigured || !isPrivateAddress(address)) return false;
+    if (!this.warnedCapInactive) {
+      this.warnedCapInactive = true;
+      this.log.warn(
+        "LIVE_EVENTS: the per-address socket cap is inactive for private peer addresses until LIVE_EVENTS_TRUSTED_PROXIES is set"
+      );
+    }
+    return true;
+  }
+
   private clearDeadline(client: Client) {
     if (client.deadline) clearTimeout(client.deadline);
     client.deadline = null;
@@ -458,7 +479,10 @@ export class EventsHub {
     client.closed = true;
     if (client.deadline) clearTimeout(client.deadline);
     if (client.authTimer) clearTimeout(client.authTimer);
-    if (client.pending) this.pendingCount--;
+    if (client.pending) {
+      this.pendingCount--;
+      client.abort.abort(); // stop an unfinished session lookup
+    }
     client.pending = false;
     if (client.address) {
       const left = (this.perAddress.get(client.address) ?? 1) - 1;

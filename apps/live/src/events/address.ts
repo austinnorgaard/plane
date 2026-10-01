@@ -16,22 +16,45 @@ const normalize = (value: string | undefined): string | null => {
 const familyOf = (ip: string) => (isIP(ip) === 6 ? "ipv6" : "ipv4");
 
 /** Entries are single addresses or CIDR ranges. Returns the list and how many entries were unusable. */
-export const buildTrustedProxies = (entries: string[]): { list: BlockList; invalid: number } => {
+export const buildTrustedProxies = (entries: string[]): { list: BlockList; invalid: number; valid: number } => {
   const list = new BlockList();
   let invalid = 0;
+  let valid = 0;
   for (const entry of entries) {
     const [addr, prefix, ...rest] = entry.split("/");
     const ip = normalize(addr);
-    const bits = prefix === undefined ? null : Number(prefix);
+    // the prefix must be plain digits: "10.0.0.1/" would otherwise read as /0 and trust everything
+    const prefixOk = prefix === undefined || /^\d{1,3}$/.test(prefix);
+    const bits = prefix === undefined || !prefixOk ? null : Number(prefix);
     const max = ip && isIP(ip) === 6 ? 128 : 32;
-    if (!ip || rest.length > 0 || (bits !== null && (!Number.isInteger(bits) || bits < 0 || bits > max))) {
+    if (!ip || rest.length > 0 || !prefixOk || (bits !== null && bits > max)) {
       invalid++;
       continue;
     }
     if (bits === null) list.addAddress(ip, familyOf(ip));
     else list.addSubnet(ip, bits, familyOf(ip));
+    valid++;
   }
-  return { list, invalid };
+  return { list, invalid, valid };
+};
+
+const PRIVATE_RANGES: Array<[string, number, "ipv4" | "ipv6"]> = [
+  ["127.0.0.0", 8, "ipv4"],
+  ["10.0.0.0", 8, "ipv4"],
+  ["172.16.0.0", 12, "ipv4"],
+  ["192.168.0.0", 16, "ipv4"],
+  ["169.254.0.0", 16, "ipv4"],
+  ["::1", 128, "ipv6"],
+  ["fe80::", 10, "ipv6"],
+  ["fc00::", 7, "ipv6"],
+];
+const privateList = new BlockList();
+for (const [net, bits, family] of PRIVATE_RANGES) privateList.addSubnet(net, bits, family);
+
+/** Loopback, private, link-local or unique-local address. */
+export const isPrivateAddress = (address: string): boolean => {
+  const ip = normalize(address);
+  return ip !== null && privateList.check(ip, familyOf(ip));
 };
 
 /**
