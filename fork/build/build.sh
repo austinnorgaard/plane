@@ -58,7 +58,7 @@ usage() {
   sed -n '4,44p' "$0" | sed 's/^# \{0,1\}//' >&2
 }
 
-# Check if a proxy URL (scheme://[userinfo@]host[:port]) has a loopback host.
+# Check if a proxy URL (scheme://[userinfo@]host[:port][/path?query#fragment]) has a loopback host.
 # Returns 0 if it's a loopback (127.0.0.0/8, localhost, ::1), 1 otherwise.
 is_loopback_proxy() {
   local url="$1"
@@ -66,6 +66,8 @@ is_loopback_proxy() {
   local lower_host
   # Remove scheme
   url="${url#*://}"
+  # Remove path, query, fragment (/, ?, #) BEFORE stripping userinfo
+  url="${url%%[/?#]*}"
   # Remove optional userinfo (everything before @)
   url="${url##*@}"
   # Remove optional port (everything after : or [)
@@ -88,10 +90,10 @@ is_loopback_proxy() {
     return 0
   fi
 
-  # IPv4 loopback: strict match for 127.x.y.z where x,y,z are 0-255
+  # IPv4 loopback: strict match for 127.x.y.z where x,y,z are 0-255 (base-10)
   if [[ "$host" =~ ^127\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
-    # Validate each octet is 0-255
-    local o2=${BASH_REMATCH[1]} o3=${BASH_REMATCH[2]} o4=${BASH_REMATCH[3]}
+    # Validate each octet is 0-255 using base-10 comparison
+    local o2=$((10#${BASH_REMATCH[1]})) o3=$((10#${BASH_REMATCH[2]})) o4=$((10#${BASH_REMATCH[3]}))
     (( o2 <= 255 && o3 <= 255 && o4 <= 255 )) && return 0
   fi
 
@@ -105,6 +107,7 @@ engine=""
 dry_run=0
 ca_bundle="${BUILD_CA_BUNDLE:-}"
 build_proxy=""  # "" = auto, "1" = enabled, "0" = disabled
+build_proxy_explicit=""  # Track which flag was given to detect conflicts
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -120,8 +123,18 @@ while [ $# -gt 0 ]; do
       shift 2
       ;;
     --dry-run) dry_run=1; shift ;;
-    --build-proxy) build_proxy=1; shift ;;
-    --no-build-proxy) build_proxy=0; shift ;;
+    --build-proxy)
+      [ -z "$build_proxy_explicit" ] || die "cannot use both --build-proxy and --no-build-proxy"
+      build_proxy=1
+      build_proxy_explicit=--build-proxy
+      shift
+      ;;
+    --no-build-proxy)
+      [ -z "$build_proxy_explicit" ] || die "cannot use both --build-proxy and --no-build-proxy"
+      build_proxy=0
+      build_proxy_explicit=--no-build-proxy
+      shift
+      ;;
     -h|--help) usage; exit 0 ;;
     *) usage; die "unknown argument: $1" ;;
   esac
