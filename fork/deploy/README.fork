@@ -5,6 +5,9 @@ Files in this directory
   docker-compose.override.yaml  fork images and feature flags, layered over the
                                 upstream community compose file
   inspect.sh                    read-only pre-deploy inspection (run on the hypervisor)
+  fetch-images.sh               downloads the image archive, verifies its sha256, then
+                                runs fork/build/verify-load.sh
+  test_fetch-images.sh          tests fetch-images.sh (stub verify-load, loopback HTTP)
   test_override.sh              validates the override against the upstream compose file
   test_inspect.sh               tests inspect.sh against stub commands
   RUNBOOK.md                    the deploy procedure, smoke tests and rollback
@@ -46,7 +49,7 @@ Variables (supplied by the operator; nothing host-specific is stored in the repo
   LIVE_EVENTS_ALLOWED_ORIGINS  comma-separated origins users open Plane from
                                (scheme://host[:port], for example the values of
                                PUBLIC_URL and LAN_URL)
-  PLANE_APP_DIR                directory containing docker-compose.yaml and plane.env
+  PLANE_APP_DIR                the plane-app directory that holds docker-compose.yaml and plane.env
 
 Optional live events limits (set in the live service environment; defaults shown)
   LIVE_EVENTS_MAX_PENDING_SOCKETS       100    sockets that have not authenticated yet
