@@ -3,8 +3,9 @@
 #
 # test_local_stack.sh - offline tests for fork/test/local-stack.sh and ws_probe.py.
 #
-# podman, curl and sleep are replaced by stubs on PATH, so no container engine and no
-# network are needed. Covers:
+# podman, docker, docker-compose, podman-compose, curl and sleep are replaced by stubs that come
+# first on PATH, and the host environment is scrubbed, so the result does not depend on a
+# container engine, a running stack or exported variables on the machine. Covers:
 #   - the env file is generated with a random secret and is not overwritten silently
 #   - `up` seeds the state file through the stubbed api container
 #   - `down` passes the volume-removal flag and deletes the state file
@@ -20,6 +21,15 @@ T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 FAILS=0
 PASSES=0
+
+# ---- hermetic environment: nothing from the host may steer local-stack.sh or the stubs
+unset CONTAINER_ENGINE COMPOSE_CMD COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES \
+  DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG CONTAINER_HOST WS_COOKIE
+for v in $(compgen -v | grep -E '^(STUB_|LOCAL_STACK_)'); do unset "$v"; done
+export FORK_N=1
+# a project name no real stack uses: engine queries by compose project label can never match
+# containers of a stack running on this machine
+export LOCAL_STACK_PROJECT="plane-lu-test-$$"
 
 check() { # check NAME CONDITION_EXIT_CODE
   if [ "$2" -eq 0 ]; then
@@ -123,6 +133,16 @@ STUB
 
 printf '#!/bin/sh\nexit 0\n' >"$T/bin/sleep"
 
+# ---- stubs for every other engine and compose front end the script may probe, so a real one
+# on the host is never reached. They log the call and fail like an engine that is not running.
+for name in docker docker-compose podman-compose; do
+  cat >"$T/bin/$name" <<'STUB'
+#!/usr/bin/env bash
+echo "$(basename "$0") $*" >>"$STUB_DIR/other-engines.log"
+exit 1
+STUB
+done
+
 # ---- stub: ws_probe.py
 cat >"$T/probe.py" <<'STUB'
 #!/usr/bin/env python3
@@ -158,6 +178,11 @@ chmod +x "$T"/bin/* "$T/probe.py"
 
 export STUB_DIR=$T
 export PATH="$T/bin:$PATH"
+hash -r
+: >"$T/other-engines.log"
+for name in podman docker docker-compose podman-compose curl sleep; do
+  check "stub $name wins over any host binary on PATH" "$([ "$(command -v "$name")" = "$T/bin/$name" ] && echo 0 || echo 1)"
+done
 export LOCAL_STACK_WS_PROBE=$T/probe.py
 
 new_dir() { rm -rf "$T/d"; mkdir -p "$T/d"; export LOCAL_STACK_DIR=$T/d; : >"$T/podman.log"; rm -f "$T/phase"; }
@@ -242,6 +267,7 @@ check "L2 switch names all five overridden services" "$(grep ' up -d ' "$T/podma
 STUB_NO_IMAGES=1 "$SCRIPT" smoke >"$T/smoke-noimg.out" 2>&1
 rc=$?
 check "no image list makes the image checks FAIL, not pass" "$([ "$rc" -ne 0 ] && grep -c 'image list unavailable' "$T/smoke-noimg.out" | grep -q '^3$' && echo 0 || echo 1)"
+check "the no-image case consulted the stubbed docker, not a host engine" "$(grep -q '^docker ps ' "$T/other-engines.log" && echo 0 || echo 1)"
 
 # ------------------------------------------------------------------ precheck of the fork images
 new_dir
