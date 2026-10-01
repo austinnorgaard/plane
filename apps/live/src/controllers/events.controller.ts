@@ -14,6 +14,7 @@ import { DefaultEventsAuth } from "@/events/auth";
 import { parseEventsConfig } from "@/events/config";
 import type { SocketLike } from "@/events/hub";
 import { EventsHub } from "@/events/hub";
+import { registerStatsSource } from "@/events/stats";
 // redis
 import { redisManager } from "@/redis";
 
@@ -34,6 +35,7 @@ export class EventsController {
       });
       hub.start().catch((error) => logger.error("EVENTS_CONTROLLER: hub failed to start", error?.message));
       this.hub = hub;
+      registerStatsSource(() => hub.stats());
     } catch (error) {
       logger.error("EVENTS_CONTROLLER: hub setup failed", error instanceof Error ? error.message : "unknown");
     }

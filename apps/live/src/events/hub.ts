@@ -62,6 +62,18 @@ export type HubDeps = {
   random?: () => number;
 };
 
+/** Counters since process start. Plain integers only: no ids, users or addresses. */
+export type HubStats = {
+  sockets: { open: number; authenticated: number; pending: number };
+  accepted: number;
+  authenticated: number;
+  rejected: { pendingCap: number; addressCap: number; authFail: number; authTimeout: number; other: number };
+  framesSent: number;
+  invalid: { redisDropped: number; clientMessages: number };
+  rateLimitOverflows: { inboundMessages: number; projectEvents: number };
+  revalidationCloses: { auth4401: number; unavailable1013: number };
+};
+
 export type WarnLog = { warn: (message: string) => unknown };
 
 const INVALID_WARN_INTERVAL_MS = 60_000;
@@ -116,6 +128,13 @@ const clientMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("unsubscribe"), project_ids: z.array(z.string().uuid()).max(1000) }),
   z.object({ type: z.literal("pong") }),
 ]);
+
+type RejectCounter =
+  | "rejectedPendingCap"
+  | "rejectedAddressCap"
+  | "rejectedAuthFail"
+  | "rejectedAuthTimeout"
+  | "rejectedOther";
 
 type Item = { issue_id: string; kinds: Set<string>; verbs: Set<string>; actor_ids: Set<string> };
 type Pending = { items: Map<string, Item>; full: boolean; timer: ReturnType<typeof setTimeout> | null };
@@ -181,6 +200,22 @@ export class EventsHub {
   private readonly random: () => number;
   private stopped = false;
   invalidDropped = 0;
+  // cheap monotonic counters for the stats snapshot; they never influence hub behaviour
+  private readonly counters = {
+    accepted: 0,
+    authenticated: 0,
+    rejectedPendingCap: 0,
+    rejectedAddressCap: 0,
+    rejectedAuthFail: 0,
+    rejectedAuthTimeout: 0,
+    rejectedOther: 0,
+    framesSent: 0,
+    invalidClientMessages: 0,
+    overflowInbound: 0,
+    overflowProject: 0,
+    revalAuth: 0,
+    revalUnavailable: 0,
+  };
   private readonly log: WarnLog;
   private warnedPayloadCap = false;
   private lastInvalidWarn = 0;
@@ -202,6 +237,31 @@ export class EventsHub {
 
   get socketCount() {
     return this.clients.size;
+  }
+
+  /** Snapshot of the counters since start. Numbers only. */
+  stats(): HubStats {
+    const c = this.counters;
+    return {
+      sockets: {
+        open: this.clients.size,
+        authenticated: this.clients.size - this.pendingCount,
+        pending: this.pendingCount,
+      },
+      accepted: c.accepted,
+      authenticated: c.authenticated,
+      rejected: {
+        pendingCap: c.rejectedPendingCap,
+        addressCap: c.rejectedAddressCap,
+        authFail: c.rejectedAuthFail,
+        authTimeout: c.rejectedAuthTimeout,
+        other: c.rejectedOther,
+      },
+      framesSent: c.framesSent,
+      invalid: { redisDropped: this.invalidDropped, clientMessages: c.invalidClientMessages },
+      rateLimitOverflows: { inboundMessages: c.overflowInbound, projectEvents: c.overflowProject },
+      revalidationCloses: { auth4401: c.revalAuth, unavailable1013: c.revalUnavailable },
+    };
   }
 
   /** Start the Redis subscriber and timers. A no-op when the flag is off. */
@@ -248,7 +308,8 @@ export class EventsHub {
     ws: SocketLike,
     req: { headers: IncomingHttpHeaders; socket?: { remoteAddress?: string } | null }
   ): void {
-    const reject = (code: number, reason: string) => {
+    const reject = (code: number, reason: string, counter: RejectCounter = "rejectedOther") => {
+      this.counters[counter]++;
       try {
         ws.close(code, reason);
       } catch {
@@ -271,17 +332,19 @@ export class EventsHub {
       return reject(CLOSE_ORIGIN, "origin not allowed");
     }
     const cookie = extractSessionCookie(headers.cookie);
-    if (!cookie) return reject(CLOSE_AUTH, "unauthenticated");
+    if (!cookie) return reject(CLOSE_AUTH, "unauthenticated", "rejectedAuthFail");
     // a cookie that was just refused is refused again without any upstream work
-    if (this.isCookieFailed(cookie)) return reject(CLOSE_AUTH, "unauthenticated");
+    if (this.isCookieFailed(cookie)) return reject(CLOSE_AUTH, "unauthenticated", "rejectedAuthFail");
     const address = resolveClientAddress(req.socket?.remoteAddress, headers["x-forwarded-for"], this.trusted);
     // Without a trusted proxy list a private direct peer is most likely the reverse proxy itself, so
     // every user would share one address: the per-address cap is skipped for it (with a warning).
     const capApplies = address !== null && !this.sharedProxyPeer(address);
     if (address && capApplies && (this.perAddress.get(address) ?? 0) >= this.config.maxSocketsPerAddress) {
-      return reject(CLOSE_LIMIT, "too many connections");
+      return reject(CLOSE_LIMIT, "too many connections", "rejectedAddressCap");
     }
-    if (this.pendingCount >= this.config.maxPendingSockets) return reject(CLOSE_LIMIT, "too many connections");
+    if (this.pendingCount >= this.config.maxPendingSockets) {
+      return reject(CLOSE_LIMIT, "too many connections", "rejectedPendingCap");
+    }
     // sockets that have not authenticated yet do not use up the budget of authenticated users
     if (this.clients.size - this.pendingCount >= this.config.maxSockets) {
       return reject(CLOSE_LIMIT, "too many connections");
@@ -309,12 +372,14 @@ export class EventsHub {
       closed: false,
     };
     this.clients.add(client);
+    this.counters.accepted++;
     this.pendingCount++;
     if (address && capApplies) this.perAddress.set(address, (this.perAddress.get(address) ?? 0) + 1);
     else client.address = null;
     client.authTimer = setTimeout(() => {
       client.authTimer = null;
       client.abort.abort();
+      this.counters.rejectedAuthTimeout++;
       this.noteAuthFailure();
       this.close(client, CLOSE_DEADLINE, "authentication timed out");
     }, this.config.authTimeoutMs);
@@ -330,13 +395,16 @@ export class EventsHub {
         client.userId = user.id;
         const sameUser = [...this.clients].filter((c) => c !== client && c.userId === user.id).length;
         if (sameUser >= this.config.maxSocketsPerUser) {
+          this.counters.rejectedOther++;
           this.close(client, CLOSE_LIMIT, "too many connections for user");
           return false;
         }
         if (this.clients.size - this.pendingCount >= this.config.maxSockets) {
+          this.counters.rejectedOther++;
           this.close(client, CLOSE_LIMIT, "too many connections");
           return false;
         }
+        this.counters.authenticated++;
         this.markAuthenticated(client);
         this.scheduleRevalidation(client);
         return true;
@@ -345,6 +413,7 @@ export class EventsHub {
         if (client.closed) return false;
         // only a definitive answer is remembered; a timeout or upstream error is not
         if ((error as { statusCode?: number } | null)?.statusCode === 401) this.rememberFailedCookie(cookie);
+        this.counters.rejectedAuthFail++;
         this.noteAuthFailure();
         this.close(client, CLOSE_AUTH, "unauthenticated");
         return false;
@@ -369,19 +438,24 @@ export class EventsHub {
       client.inboundCount = 0;
     }
     if (++client.inboundCount > this.config.maxInboundPerSec) {
+      this.counters.overflowInbound++;
       return this.close(client, CLOSE_LIMIT, "message rate exceeded");
     }
     const size = Array.isArray(data)
       ? data.reduce((n: number, b: Buffer) => n + b.length, 0)
       : ((data as { byteLength?: number })?.byteLength ?? String(data).length);
     if (size > this.config.maxMessageBytes) return this.close(client, CLOSE_TOO_LARGE, "message too large");
-    if (isBinary) return this.close(client, CLOSE_BAD_MESSAGE, "text frames only");
+    if (isBinary) {
+      this.counters.invalidClientMessages++;
+      return this.close(client, CLOSE_BAD_MESSAGE, "text frames only");
+    }
 
     const text = Array.isArray(data) ? Buffer.concat(data as Buffer[]).toString("utf8") : String(data);
     let message: z.infer<typeof clientMessageSchema>;
     try {
       message = clientMessageSchema.parse(JSON.parse(text));
     } catch {
+      this.counters.invalidClientMessages++;
       return this.close(client, CLOSE_BAD_MESSAGE, "invalid message");
     }
     client.chain = client.chain
@@ -518,6 +592,7 @@ export class EventsHub {
     }
     try {
       client.ws.send(JSON.stringify(frame));
+      this.counters.framesSent++;
       return true;
     } catch {
       this.close(client, 1011, "send failed");
@@ -583,6 +658,7 @@ export class EventsHub {
     if (outcome === "ok") {
       client.revalFailures = 0;
     } else if (++client.revalFailures >= this.config.revalidateMaxFailures) {
+      this.counters.revalUnavailable++;
       this.close(client, CLOSE_REVALIDATION, "revalidation unavailable");
       return;
     }
@@ -594,12 +670,16 @@ export class EventsHub {
     try {
       const user = await this.auth.currentUser(client.cookie, client.abort.signal);
       if (user.id !== client.userId) {
+        if (!client.closed) this.counters.revalAuth++;
         this.close(client, CLOSE_AUTH, "session changed");
         return "ok";
       }
     } catch (error) {
       // a transient failure is counted by the caller; the socket closes after repeated ones
-      if (isSessionGone(error)) this.close(client, CLOSE_AUTH, "session ended");
+      if (isSessionGone(error)) {
+        if (!client.closed) this.counters.revalAuth++;
+        this.close(client, CLOSE_AUTH, "session ended");
+      }
       return isSessionGone(error) ? "ok" : "transient";
     }
     let outcome: "ok" | "transient" = "ok";
@@ -613,6 +693,7 @@ export class EventsHub {
       } catch (error) {
         const failure = classifyRolesError(error);
         if (failure === "session") {
+          if (!client.closed) this.counters.revalAuth++;
           this.close(client, CLOSE_AUTH, "session ended");
           return "ok";
         }
@@ -717,6 +798,7 @@ export class EventsHub {
       let rate = this.rate.get(projectId);
       if (!rate || now - rate.start >= 1000) this.rate.set(projectId, (rate = { start: now, count: 0 }));
       overflow = ++rate.count > this.config.projectRatePerSec;
+      if (overflow) this.counters.overflowProject++;
     }
 
     let pending = this.pending.get(projectId);

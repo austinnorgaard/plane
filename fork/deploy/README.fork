@@ -72,6 +72,32 @@ Optional live events tuning (defaults shown; leave unset to use them)
   LIVE_EVENTS_REVALIDATE_MAX_FAILURES   3       consecutive transient recheck failures before the
                                                 socket is closed with code 1013
 
+Live events counters (numbers since process start; no ids, users or addresses)
+  GET /live/health/stats on the live service (the router is mounted at LIVE_BASE_PATH,
+  default /live). It is internal only: read it from inside the
+  deploy network (for example with curl from a shell in the live or api container),
+  never through the public reverse proxy. A request that carries X-Forwarded-For,
+  X-Forwarded-Host, Forwarded or X-Real-IP answers 403 even with the right secret, so
+  the shared secret is never sent through the public proxy. The header
+  live-server-secret-key must hold the value of LIVE_SERVER_SECRET_KEY (take it from
+  the container environment, do not paste it into shell history or tickets). No header
+  or a wrong value answers 401; an unset or placeholder secret answers 503. The public
+  /health stays minimal and shows no counters. Example, run inside the live container
+  (LIVE_PORT is the port the live service listens on):
+
+    curl -s -H "live-server-secret-key: $LIVE_SERVER_SECRET_KEY" "http://localhost:$LIVE_PORT/live/health/stats"
+
+  Fields: startedAt, uptimeSeconds, eventsEnabled and, when the hub runs, events:
+    sockets.open|authenticated|pending   current gauges
+    accepted                             sockets that passed the pre-auth checks
+    authenticated                        sockets that finished authentication
+    rejected.pendingCap|addressCap|authFail|authTimeout|other
+    framesSent                           frames written to sockets
+    invalid.redisDropped|clientMessages  malformed Redis messages dropped, bad client frames closed
+    rateLimitOverflows.inboundMessages   4429 closes for message rate
+    rateLimitOverflows.projectEvents     per-project overflows answered with a full refresh
+    revalidationCloses.auth4401|unavailable1013
+
 Optional pages API size and time limits (defaults shown; leave unset to use them)
   api service:
   PAGES_API_MAX_HTML_BYTES              262144  largest description_html (decoded bytes) accepted by the
