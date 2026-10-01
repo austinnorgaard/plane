@@ -159,7 +159,7 @@ if [ "$DRY" = 0 ]; then
     warn "no compose file found in PLANE_APP_DIR"
     hint_out=$(ct_sh "$S_HINT" "$PLANE_APP_DIR")
     if printf '%s\n' "$hint_out" | grep -q '^hint=found-plane-app-subdir$'; then
-      echo "HINT: PLANE_APP_DIR looks like the install root; set it to $PLANE_APP_DIR/plane-app"
+      echo "HINT: PLANE_APP_DIR looks like the install root; set it to \"$PLANE_APP_DIR/plane-app\""
     fi
   fi
   mentions=$(printf '%s\n' "$out" | sed -n 's/^compose_mentions_LIVE_BASE_URL=//p' | awk '{n+=$1} END{print n+0}')
