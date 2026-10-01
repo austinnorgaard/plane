@@ -15,7 +15,8 @@ One line per touched upstream file: ticket id and the reason.
 - `apps/api/plane/bgtasks/issue_activities_task.py`: PLN-3, publish an ids-only live event from a finally block after each activity.
 - `apps/api/plane/app/views/issue/base.py`: PLN-3, publish after bulk delete (ids captured first) and after bulk date update.
 - `apps/api/plane/app/views/issue/archive.py`: PLN-3, publish after bulk archive.
-- `apps/api/plane/app/views/issue/sub_issue.py`: PLN-28, capture each sub-issue's old parent before the assign update and pass it as `current_instance.parent` (upstream passed the sub-issue id), so the live event covers the old parent.
+- `apps/api/plane/app/views/issue/sub_issue.py`: PLN-28, capture each sub-issue's old parent before the assign update and pass it as `current_instance.parent` (upstream passed the sub-issue id), so the live event covers the old parent; also iterate the found sub-issues instead of the raw request ids.
+- `apps/api/plane/app/views/issue/base.py` (destroy): PLN-29, capture the issue's `parent_id` before the delete and pass it as `current_instance.parent` (`{}` when there is no parent), so the live event covers the parent's sub-issue count.
 
 New files (not upstream): `apps/live/src/controllers/events.controller.ts`, `apps/live/src/events/{config,origin,auth,hub}.ts`, `apps/live/tests/events/*`; `apps/api/plane/api/{urls,views,serializers}/page.py`, `apps/api/plane/utils/live_pages.py`, `apps/api/plane/utils/live_events.py`, `apps/api/plane/tests/unit/live_events/*`, `apps/api/plane/tests/contract/api/test_pages.py`, `fork/PAGES.md`, `apps/live/src/fork-pages/*`, `apps/live/tests/fork-pages/*`, `fork/tools/*`.
 

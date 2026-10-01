@@ -717,6 +717,8 @@ class IssueViewSet(BaseViewSet):
     @allow_permission([ROLE.ADMIN], creator=True, model=Issue)
     def destroy(self, request, slug, project_id, pk=None):
         issue = Issue.objects.get(workspace__slug=slug, project_id=project_id, pk=pk)
+        # Capture the parent before the delete so the live event can refresh its sub-issue count
+        parent_id = issue.parent_id
 
         issue.delete()
         # delete the issue from recent visits
@@ -732,7 +734,7 @@ class IssueViewSet(BaseViewSet):
             actor_id=str(request.user.id),
             issue_id=str(pk),
             project_id=str(project_id),
-            current_instance={},
+            current_instance={"parent": str(parent_id)} if parent_id else {},
             epoch=int(timezone.now().timestamp()),
             notification=True,
             origin=base_host(request=request, is_app=True),
