@@ -35,7 +35,8 @@ use different paths, add aliases here and in `api/urls/page.py`. This is confirm
 - Update accepts only `name` and `description_html` and **replaces the whole body**; any other key, or an empty body, is 400.
   Locked or archived pages are 400. `description_html` is sanitized; an empty value is stored as `<p></p>`.
 - Update never merges into an open document. If the page is loaded in the live service, or its state cannot be determined
-  (no live URL, timeout, bad answer), the answer is 409 `{"error": "page is open in an editor; retry later"}` and nothing is written.
+  (no live URL, timeout, bad answer), the answer is 409 `{"error": "page is open in an editor; retry later"}` with a `Retry-After: <seconds>` header and nothing is written.
+  The header value is set by `PAGES_API_RETRY_AFTER_SECONDS` (default 60 seconds, min 1, max 3600); agents should wait at least that long before retrying.
   - Page without a stored binary: presence is checked, then html/name are written directly and the binary stays NULL.
   - Page with a stored binary: the change is always rebased onto the binary through the live service (a name-only change too,
     because the title lives in the binary), the result is validated, and presence is checked **after** the rebase; the binary,
