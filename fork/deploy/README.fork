@@ -63,6 +63,12 @@ Optional live events limits (set in the live service environment; defaults shown
                                                CDN edge ranges as well, otherwise the address seen is a
                                                shared edge address.
 
+Optional live events tuning (defaults shown; leave unset to use them)
+  LIVE_EVENTS_REVALIDATE_MS             60000   how often each socket's session and project
+                                                grants are rechecked (+/-20% jitter per socket)
+  LIVE_EVENTS_REVALIDATE_MAX_FAILURES   3       consecutive transient recheck failures before the
+                                                socket is closed with code 1013
+
 Commands (run in $PLANE_APP_DIR; FORK_N must be exported or in plane.env)
 
   C="docker compose -f docker-compose.yaml -f docker-compose.override.yaml --env-file plane.env"
