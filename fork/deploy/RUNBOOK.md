@@ -78,6 +78,44 @@ Fill in the table below from the output (values `set`, `unset`, `match`, `no-mat
 
 Free disk must exceed twice the size of the image archive (about 1.5 GB for the three fork images).
 
+## 1a. Go/no-go gate (before any change)
+
+Run this on the workstation with this repository checked out, after step 1 and before step 2. It changes nothing and prints one PASS or FAIL line per item, then `RESULT: GO` (exit 0) or `RESULT: NO-GO` with the failing items (exit 1). Do not start step 2 unless it prints GO. A bad argument exits 2.
+
+Inputs, all supplied by you at run time (no secret is ever printed; only key names):
+
+| Input             | Meaning                                                                                          |
+| ----------------- | ------------------------------------------------------------------------------------------------ |
+| `RELEASE_SHA`     | argument: the full sha being deployed                                                            |
+| `QA_RECORD`       | file with the QA verdict text; needs a line `QA: PASS @ <sha>` naming the release sha            |
+| `IMAGE_TAR`, `IMAGE_SHA256` | the archive and the sha256 from the build output (or `BUILD_NOTES`, a file with the `Tar sha256:` line) |
+| `RUNBOOK_FILE`    | your copy of this file with the inspection table above filled in (default: the shipped file, which fails because its table is empty) |
+| `STOCK_RELEASE`   | the stock image tag from the inspection, used by rollback L2                                      |
+| `PVE_HOST`, `PLANE_CTID`, `PLANE_APP_DIR` | as in step 1; the gate runs `inspect.sh` the same way                       |
+| `ENV_FILE`        | a copy of the deploy settings (`plane.env`), passed with `-e`; without `-e` they are read from the environment |
+
+```
+QA_RECORD=<file> IMAGE_TAR=<archive> IMAGE_SHA256=<hash> RUNBOOK_FILE=<filled copy> STOCK_RELEASE=<tag> \
+  PVE_HOST=$PVE_HOST PLANE_CTID=$PLANE_CTID PLANE_APP_DIR=$PLANE_APP_DIR \
+  bash fork/deploy/gate.sh -e <env-file-copy> <release-sha>
+```
+
+Checks, each a PASS or a FAIL:
+
+- the release sha is an ancestor of `origin/live-updates/v1.4.2` (the gate fetches that branch first);
+- the QA record has a PASS naming the sha and no FAIL for it;
+- the archive sha256 matches the build output (done by `fetch-images.sh` with `SKIP_LOAD=1`, which copies the archive to a temporary directory, so keep free disk for one more copy; nothing is loaded);
+- every row of the inspection table has a result;
+- `LIVE_EVENTS_TRUSTED_PROXIES` is non-empty and every entry is an address or CIDR range (a `/0` range is refused);
+- `PAGES_REBASE_MAX_HTML_BYTES` is at least `PAGES_API_MAX_HTML_BYTES` (unset values count as the code defaults, 524288 and 262144);
+- `PAGES_REBASE_WORKER_MAX_MB` is between 64 and 4096 (unset is the code default, 256);
+- `NODE_OPTIONS` has no `--max-old-space-size`;
+- `LIVE_SERVER_SECRET_KEY` is set and not the shipped placeholder;
+- `inspect.sh` exits 0;
+- rollback is available: the five L1 flag lines are in the override, and `STOCK_RELEASE` is set and is not a fork tag.
+
+Any FAIL means stop and fix the item or escalate; there is no override. Without `-e`, a `NODE_OPTIONS` in your own shell is read too.
+
 ## 2. Pause and snapshot
 
 1. Pause automated changes: create the pause flag at `$PAUSE_FLAG_PATH` on the machine that owns it. Remove it only in step 12.
