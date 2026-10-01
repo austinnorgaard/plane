@@ -83,13 +83,16 @@ describe("time budget", () => {
   it("answers 503 when the conversion exceeds the budget, stops the worker, and recovers", async () => {
     process.env.PAGES_REBASE_MAX_HTML_BYTES = "4000000";
     process.env.PAGES_REBASE_TIMEOUT_MS = "100";
+    await stopRebaseWorkers();
+    await vi.waitFor(() => expect(getRebaseWorkerCount()).toBe(0));
     const started = Date.now();
     const res = await postRebase(app.base, { base_binary: base(), description_html: htmlOfSize(1_000_000) });
     expect(res.status).toBe(503);
     expect(Date.now() - started).toBeLessThan(3000);
 
-    // the terminated worker's thread goes away and the next request is served by a fresh one
-    await vi.waitFor(() => expect(getRebaseWorkerCount()).toBeLessThanOrEqual(1));
+    // the thread is really stopped (the conversion alone would run for seconds more), and the next
+    // request is served by a fresh worker
+    await vi.waitFor(() => expect(getRebaseWorkerCount()).toBe(0), { timeout: 1500 });
     process.env.PAGES_REBASE_TIMEOUT_MS = "30000";
     const ok = await postRebase(app.base, { base_binary: base(), description_html: "<p>after</p>" });
     expect(ok.status).toBe(200);

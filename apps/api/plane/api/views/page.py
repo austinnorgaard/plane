@@ -47,6 +47,19 @@ def _pages_api_enabled():
     return os.environ.get("PAGES_API_ENABLED") == "1"
 
 
+DEFAULT_MAX_HTML_BYTES = 262144
+
+
+def _max_html_bytes():
+    """Cap on description_html in bytes (PAGES_API_MAX_HTML_BYTES), read per call. The live service
+    converts the html on a rebase, and that cost grows faster than linearly with its size."""
+    try:
+        value = int(os.environ.get("PAGES_API_MAX_HTML_BYTES", ""))
+    except ValueError:
+        return DEFAULT_MAX_HTML_BYTES
+    return value if value > 0 else DEFAULT_MAX_HTML_BYTES
+
+
 def _has_binary(page):
     return bool(page.description_binary)
 
@@ -54,6 +67,12 @@ def _has_binary(page):
 def _external_lock_key(project_id, external_source, external_id):
     digest = hashlib.sha256(f"{project_id}:{external_source}:{external_id}".encode()).digest()
     return int.from_bytes(digest[:8], "big", signed=True)
+
+
+class HtmlTooLarge(Exception):
+    def __init__(self, limit):
+        super().__init__("description_html too large")
+        self.limit = limit
 
 
 class PageBaseAPIEndpoint(BaseAPIView):
@@ -68,6 +87,11 @@ class PageBaseAPIEndpoint(BaseAPIView):
     def handle_exception(self, exc):
         if isinstance(exc, RequestDataTooBig):
             return Response({"error": "request body too large"}, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+        if isinstance(exc, HtmlTooLarge):
+            return Response(
+                {"error": "description_html too large", "max_bytes": exc.limit},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
         return super().handle_exception(exc)
 
     def check_body_size(self, request):
@@ -78,6 +102,15 @@ class PageBaseAPIEndpoint(BaseAPIView):
             length = 0
         if length > settings.FILE_SIZE_LIMIT:
             raise RequestDataTooBig()
+
+    def check_html_size(self, request):
+        """Cap description_html by its decoded size in bytes, before the sanitiser or live see it
+        (the Content-Length check above does not bound it: it is only the whole body)."""
+        data = request.data
+        html = data.get("description_html") if hasattr(data, "get") else None
+        limit = _max_html_bytes()
+        if isinstance(html, str) and len(html.encode("utf-8")) > limit:
+            raise HtmlTooLarge(limit)
 
     def base_queryset(self, slug, project_id):
         """Pages of the project in the url that the caller may see (design 2.2)."""
@@ -139,6 +172,7 @@ class PageListCreateAPIEndpoint(PageBaseAPIEndpoint):
 
     def post(self, request, slug, project_id):
         self.check_body_size(request)
+        self.check_html_size(request)
         project = self.get_project(slug, project_id)
         if not project.page_view:
             return Response({"error": "Pages are disabled for this project"}, status=status.HTTP_400_BAD_REQUEST)
@@ -215,6 +249,7 @@ class PageDetailAPIEndpoint(PageBaseAPIEndpoint):
 
     def patch(self, request, slug, project_id, page_id):
         self.check_body_size(request)
+        self.check_html_size(request)
         page = self.get_page(slug, project_id, page_id)
 
         # Guards: unknown key, empty body, locked, archived.
