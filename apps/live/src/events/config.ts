@@ -28,7 +28,16 @@ const eventsEnvSchema = z.object({
   LIVE_EVENTS_MAX_SOCKETS: intFrom(500),
   LIVE_EVENTS_MAX_SOCKETS_PER_USER: intFrom(10),
   LIVE_EVENTS_MAX_PROJECTS_PER_SOCKET: intFrom(100),
+  LIVE_EVENTS_MAX_PENDING_SOCKETS: intFrom(100),
+  LIVE_EVENTS_MAX_SOCKETS_PER_ADDRESS: intFrom(25),
+  LIVE_EVENTS_AUTH_TIMEOUT_MS: intFrom(8000),
+  LIVE_EVENTS_AUTH_FAIL_CACHE_MS: intFrom(30_000, 0),
+  LIVE_EVENTS_TRUSTED_PROXIES: z.string().default(""),
 });
+
+// The upstream session lookup is aborted after this long (APIService). The hub's own auth
+// timeout is always kept below it so a hung upstream is cut off by the hub first.
+export const UPSTREAM_TIMEOUT_MS = 20_000;
 
 export type EventsConfig = {
   enabled: boolean;
@@ -39,6 +48,11 @@ export type EventsConfig = {
   maxSockets: number;
   maxSocketsPerUser: number;
   maxProjectsPerSocket: number;
+  maxPendingSockets: number;
+  maxSocketsPerAddress: number;
+  authTimeoutMs: number;
+  authFailCacheMs: number;
+  trustedProxies: string[];
   maxMessageBytes: number;
   maxInboundPerSec: number;
   maxBufferedBytes: number;
@@ -64,6 +78,13 @@ export const parseEventsConfig = (source: Record<string, string | undefined> = p
     maxSockets: parsed.LIVE_EVENTS_MAX_SOCKETS,
     maxSocketsPerUser: parsed.LIVE_EVENTS_MAX_SOCKETS_PER_USER,
     maxProjectsPerSocket: parsed.LIVE_EVENTS_MAX_PROJECTS_PER_SOCKET,
+    maxPendingSockets: parsed.LIVE_EVENTS_MAX_PENDING_SOCKETS,
+    maxSocketsPerAddress: parsed.LIVE_EVENTS_MAX_SOCKETS_PER_ADDRESS,
+    authTimeoutMs: Math.min(parsed.LIVE_EVENTS_AUTH_TIMEOUT_MS, UPSTREAM_TIMEOUT_MS - 1000),
+    authFailCacheMs: parsed.LIVE_EVENTS_AUTH_FAIL_CACHE_MS,
+    trustedProxies: parsed.LIVE_EVENTS_TRUSTED_PROXIES.split(",")
+      .map((v) => v.trim())
+      .filter(Boolean),
     maxMessageBytes: 4 * 1024,
     maxInboundPerSec: 5,
     maxBufferedBytes: 256 * 1024,

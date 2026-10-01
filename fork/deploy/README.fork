@@ -48,6 +48,15 @@ Variables (supplied by the operator; nothing host-specific is stored in the repo
                                PUBLIC_URL and LAN_URL)
   PLANE_APP_DIR                directory containing docker-compose.yaml and plane.env
 
+Optional live events limits (set in the live service environment; defaults shown)
+  LIVE_EVENTS_MAX_PENDING_SOCKETS       100    sockets that have not authenticated yet
+  LIVE_EVENTS_MAX_SOCKETS_PER_ADDRESS   25     sockets per remote address
+  LIVE_EVENTS_AUTH_TIMEOUT_MS           8000   hub-side authentication timeout (kept below 20000)
+  LIVE_EVENTS_AUTH_FAIL_CACHE_MS        30000  how long a rejected session cookie is refused without a
+                                               lookup (0 disables)
+  LIVE_EVENTS_TRUSTED_PROXIES           empty  comma-separated IPs or CIDR ranges of reverse proxies whose
+                                               X-Forwarded-For is trusted for the per-address limit
+
 Commands (run in $PLANE_APP_DIR; FORK_N must be exported or in plane.env)
 
   C="docker compose -f docker-compose.yaml -f docker-compose.override.yaml --env-file plane.env"

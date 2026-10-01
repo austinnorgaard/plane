@@ -4,9 +4,12 @@
  * See the LICENSE file for details.
  */
 
+import { createHmac, randomBytes } from "crypto";
 import type { IncomingHttpHeaders } from "http";
+import type { BlockList } from "net";
 import { z } from "zod";
 import { logger } from "@plane/logger";
+import { buildTrustedProxies, resolveClientAddress } from "./address";
 import type { EventsAuthApi } from "./auth";
 import {
   CLOSE_AUTH,
@@ -58,6 +61,8 @@ export type HubDeps = {
 export type WarnLog = { warn: (message: string) => unknown };
 
 const INVALID_WARN_INTERVAL_MS = 60_000;
+const AUTH_FAIL_WARN_INTERVAL_MS = 60_000;
+const MAX_NEGATIVE_CACHE_ENTRIES = 10_000;
 
 export const EVENT_KINDS = [
   "issue",
@@ -116,6 +121,10 @@ type Client = {
   cookie: string;
   userId: string | null;
   authed: Promise<boolean>;
+  address: string | null;
+  pending: boolean; // authentication not finished yet
+  gotMessage: boolean;
+  authTimer: ReturnType<typeof setTimeout> | null;
   chain: Promise<void>;
   projects: Map<string, string>; // project id -> workspace slug
   retry: Map<string, string>; // requested while the roles lookup failed transiently: id -> slug
@@ -150,6 +159,13 @@ export class EventsHub {
   private readonly rate = new Map<string, { start: number; count: number }>();
   private readonly settleTimers = new Set<ReturnType<typeof setTimeout>>();
   private readonly settleState = new Map<string, { count: number; wildcard: ReturnType<typeof setTimeout> | null }>();
+  private readonly trusted: BlockList;
+  private readonly cacheKey = randomBytes(32);
+  private readonly failedCookies = new Map<string, number>(); // keyed digest -> expiry (ms)
+  private readonly perAddress = new Map<string, number>();
+  private pendingCount = 0;
+  private authFailures = 0;
+  private lastAuthFailWarn = 0;
   private subscriber: SubscriberLike | null = null;
   private seenReady = false;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -167,6 +183,11 @@ export class EventsHub {
     this.createSubscriber = deps.createSubscriber;
     this.log = deps.log ?? logger;
     this.allowlist = buildAllowlist([...deps.config.allowedOrigins, deps.config.webUrl]);
+    const trusted = buildTrustedProxies(deps.config.trustedProxies);
+    this.trusted = trusted.list;
+    if (trusted.invalid > 0) {
+      this.log.warn(`LIVE_EVENTS: ignored ${trusted.invalid} unusable trusted proxy entries`);
+    }
   }
 
   get socketCount() {
@@ -216,7 +237,10 @@ export class EventsHub {
 
   // ---------------------------------------------------------------- sockets
 
-  handleConnection(ws: SocketLike, req: { headers: IncomingHttpHeaders }): void {
+  handleConnection(
+    ws: SocketLike,
+    req: { headers: IncomingHttpHeaders; socket?: { remoteAddress?: string } | null }
+  ): void {
     const reject = (code: number, reason: string) => {
       try {
         ws.close(code, reason);
@@ -241,13 +265,27 @@ export class EventsHub {
     }
     const cookie = extractSessionCookie(headers.cookie);
     if (!cookie) return reject(CLOSE_AUTH, "unauthenticated");
-    if (this.clients.size >= this.config.maxSockets) return reject(CLOSE_LIMIT, "too many connections");
+    // a cookie that was just refused is refused again without any upstream work
+    if (this.isCookieFailed(cookie)) return reject(CLOSE_AUTH, "unauthenticated");
+    const address = resolveClientAddress(req.socket?.remoteAddress, headers["x-forwarded-for"], this.trusted);
+    if (address && (this.perAddress.get(address) ?? 0) >= this.config.maxSocketsPerAddress) {
+      return reject(CLOSE_LIMIT, "too many connections");
+    }
+    if (this.pendingCount >= this.config.maxPendingSockets) return reject(CLOSE_LIMIT, "too many connections");
+    // sockets that have not authenticated yet do not use up the budget of authenticated users
+    if (this.clients.size - this.pendingCount >= this.config.maxSockets) {
+      return reject(CLOSE_LIMIT, "too many connections");
+    }
 
     const client: Client = {
       ws,
       cookie,
       userId: null,
       authed: Promise.resolve(false),
+      address,
+      pending: true,
+      gotMessage: false,
+      authTimer: null,
       chain: Promise.resolve(),
       projects: new Map(),
       retry: new Map(),
@@ -258,6 +296,13 @@ export class EventsHub {
       closed: false,
     };
     this.clients.add(client);
+    this.pendingCount++;
+    if (address) this.perAddress.set(address, (this.perAddress.get(address) ?? 0) + 1);
+    client.authTimer = setTimeout(() => {
+      client.authTimer = null;
+      this.noteAuthFailure();
+      this.close(client, CLOSE_DEADLINE, "authentication timed out");
+    }, this.config.authTimeoutMs);
     client.deadline = setTimeout(
       () => this.close(client, CLOSE_DEADLINE, "no message received"),
       this.config.firstMessageMs
@@ -273,9 +318,18 @@ export class EventsHub {
           this.close(client, CLOSE_LIMIT, "too many connections for user");
           return false;
         }
+        if (this.clients.size - this.pendingCount >= this.config.maxSockets) {
+          this.close(client, CLOSE_LIMIT, "too many connections");
+          return false;
+        }
+        this.markAuthenticated(client);
         return true;
       })
-      .catch(() => {
+      .catch((error) => {
+        if (client.closed) return false;
+        // only a definitive answer is remembered; a timeout or upstream error is not
+        if (isSessionGone(error)) this.rememberFailedCookie(cookie);
+        this.noteAuthFailure();
         this.close(client, CLOSE_AUTH, "unauthenticated");
         return false;
       });
@@ -290,10 +344,9 @@ export class EventsHub {
 
   private onClientMessage(client: Client, data: unknown, isBinary?: boolean): void {
     if (client.closed) return;
-    if (client.deadline) {
-      clearTimeout(client.deadline);
-      client.deadline = null;
-    }
+    // The first-message deadline keeps running until authentication has succeeded.
+    client.gotMessage = true;
+    if (!client.pending) this.clearDeadline(client);
     const now = Date.now();
     if (now - client.inboundStart >= 1000) {
       client.inboundStart = now;
@@ -386,10 +439,32 @@ export class EventsHub {
     }
   }
 
+  private clearDeadline(client: Client) {
+    if (client.deadline) clearTimeout(client.deadline);
+    client.deadline = null;
+  }
+
+  private markAuthenticated(client: Client) {
+    if (!client.pending) return;
+    client.pending = false;
+    this.pendingCount--;
+    if (client.authTimer) clearTimeout(client.authTimer);
+    client.authTimer = null;
+    if (client.gotMessage) this.clearDeadline(client);
+  }
+
   private release(client: Client) {
     if (client.closed) return;
     client.closed = true;
     if (client.deadline) clearTimeout(client.deadline);
+    if (client.authTimer) clearTimeout(client.authTimer);
+    if (client.pending) this.pendingCount--;
+    client.pending = false;
+    if (client.address) {
+      const left = (this.perAddress.get(client.address) ?? 1) - 1;
+      if (left <= 0) this.perAddress.delete(client.address);
+      else this.perAddress.set(client.address, left);
+    }
     for (const id of client.projects.keys()) this.removeProject(client, id);
     client.retry.clear();
     this.clients.delete(client);
@@ -521,6 +596,45 @@ export class EventsHub {
     } catch {
       this.noteInvalid();
     }
+  }
+
+  // ------------------------------------------------------ failed-cookie cache
+
+  // Keyed digest of the cookie, never the cookie itself; the key is random per process.
+  private digest(cookie: string): string {
+    return createHmac("sha256", this.cacheKey).update(cookie).digest("hex");
+  }
+
+  private isCookieFailed(cookie: string): boolean {
+    if (this.config.authFailCacheMs <= 0 || this.failedCookies.size === 0) return false;
+    const key = this.digest(cookie);
+    const expiry = this.failedCookies.get(key);
+    if (expiry === undefined) return false;
+    if (expiry > Date.now()) return true;
+    this.failedCookies.delete(key);
+    return false;
+  }
+
+  private rememberFailedCookie(cookie: string) {
+    if (this.config.authFailCacheMs <= 0) return;
+    const now = Date.now();
+    if (this.failedCookies.size >= MAX_NEGATIVE_CACHE_ENTRIES) {
+      for (const [key, expiry] of this.failedCookies) if (expiry <= now) this.failedCookies.delete(key);
+      // still full: drop the oldest entries (Map keeps insertion order)
+      for (const key of this.failedCookies.keys()) {
+        if (this.failedCookies.size < MAX_NEGATIVE_CACHE_ENTRIES) break;
+        this.failedCookies.delete(key);
+      }
+    }
+    this.failedCookies.set(this.digest(cookie), now + this.config.authFailCacheMs);
+  }
+
+  private noteAuthFailure() {
+    this.authFailures++;
+    const now = Date.now();
+    if (now - this.lastAuthFailWarn < AUTH_FAIL_WARN_INTERVAL_MS) return;
+    this.lastAuthFailWarn = now;
+    this.log.warn(`LIVE_EVENTS: authentication failures, running count ${this.authFailures}`);
   }
 
   private noteInvalid() {

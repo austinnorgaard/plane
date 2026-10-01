@@ -7,7 +7,6 @@
 import { z } from "zod";
 import { AppError } from "@/lib/errors";
 import { APIService } from "@/services/api.service";
-import { UserService } from "@/services/user.service";
 
 export const SESSION_COOKIE_NAME = "session-id";
 // Only project roles above this value (member and up) may receive events; guests are denied.
@@ -53,12 +52,25 @@ class ProjectRolesService extends APIService {
   }
 }
 
+// Session lookup without per-failure logging: failures are counted and logged at a limited
+// rate by the hub, so unauthenticated callers cannot drive the log volume.
+class CurrentUserService extends APIService {
+  async getUser(cookie: string): Promise<{ id?: unknown } | undefined> {
+    try {
+      const response = await this.get("/api/users/me/", { headers: { Cookie: cookie } });
+      return response?.data;
+    } catch (error) {
+      throw new AppError(error, { context: { operation: "currentUser" } });
+    }
+  }
+}
+
 export class DefaultEventsAuth implements EventsAuthApi {
-  private users = new UserService();
+  private users = new CurrentUserService();
   private roles = new ProjectRolesService();
 
   async currentUser(cookie: string) {
-    const user = await this.users.currentUser(cookie);
+    const user = await this.users.getUser(cookie);
     if (!user?.id) throw new AppError("no user in session");
     return { id: String(user.id) };
   }
