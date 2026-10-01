@@ -19,7 +19,7 @@ test("backoff and close codes", () => {
   assert.equal(C.decideOnClose(4400), "stop");
   assert.equal(C.decideOnClose(4413), "stop");
   assert.equal(C.decideOnClose(4408), "retry");
-  assert.equal(C.decideOnClose(1013), "retry");
+  assert.equal(C.decideOnClose(1013), "retry-max");
   assert.equal(C.decideOnClose(1006), "retry");
 });
 test("parseFrame follows the hub frames", () => {
@@ -323,10 +323,11 @@ test("client: reconnect delays follow the backoff and are capped, reset after a 
     assert.equal(FakeWS.all.length, before + 1, `attempt ${i}: reconnects at ${delay} ms`);
   }
   FakeWS.all.at(-1).open();
+  FakeWS.all.at(-1).fire("message", { data: JSON.stringify({ type: "ping" }) }); // proved stable
   FakeWS.all.at(-1).fire("close", { code: 1006 });
   const before = FakeWS.all.length;
   t.mock.timers.tick(1000);
-  assert.equal(FakeWS.all.length, before + 1, "backoff restarts from the minimum after an open");
+  assert.equal(FakeWS.all.length, before + 1, "backoff restarts from the minimum after a stable connection");
 });
 
 test("client: no refetch for a short blip, exactly one for a long gap", (t) => {
@@ -377,7 +378,7 @@ test("client: one resync per project after a long gap, not one per reconnect att
   client.subscribe("w", "q", (e) => got.push(e.project_id));
   FakeWS.all[0].open();
   FakeWS.all[0].fire("close", { code: 1013 });
-  t.mock.timers.tick(10_000);
+  t.mock.timers.tick(30_000);
   FakeWS.all[1].open();
   assert.deepEqual(got.toSorted(), ["p", "q"]);
 });
@@ -430,4 +431,109 @@ test("client: an online event with a healthy socket leaves no stale resync behin
   t.mock.timers.tick(500);
   FakeWS.all[1].open();
   assert.deepEqual(got, [], "a short blip after a spurious online event does not refetch");
+});
+
+test("client: a hub that opens and closes with 1013 does not reset the backoff", (t) => {
+  env(t);
+  t.mock.method(Math, "random", () => 1);
+  const client = new C.LiveEventsClient();
+  client.subscribe("w", "p", () => {});
+  const delays = [];
+  for (let i = 0; i < 4; i++) {
+    const ws = FakeWS.all.at(-1);
+    ws.open();
+    ws.fire("close", { code: 1013 });
+    const before = FakeWS.all.length;
+    let waited = 0;
+    while (FakeWS.all.length === before && waited < 100_000) {
+      t.mock.timers.tick(500);
+      waited += 500;
+    }
+    delays.push(waited);
+  }
+  // 1013 retries at the maximum backoff and never falls back to the first step
+  assert.deepEqual(delays, [30000, 30000, 30000, 30000]);
+});
+
+test("client: open then plain drops grow the delays until the connection proves stable", (t) => {
+  env(t);
+  t.mock.method(Math, "random", () => 1);
+  const client = new C.LiveEventsClient();
+  client.subscribe("w", "p", () => {});
+  const delays = [];
+  for (let i = 0; i < 4; i++) {
+    const ws = FakeWS.all.at(-1);
+    ws.open();
+    t.mock.timers.tick(100); // open for less than the settle window, no frame
+    ws.fire("close", { code: 1011 });
+    const before = FakeWS.all.length;
+    let waited = 0;
+    while (FakeWS.all.length === before && waited < 100_000) {
+      t.mock.timers.tick(500);
+      waited += 500;
+    }
+    delays.push(waited);
+  }
+  assert.deepEqual(delays, [1000, 2000, 4000, 8000]);
+});
+
+test("client: the counter resets after a first frame, and after staying open for the settle window", (t) => {
+  env(t);
+  t.mock.method(Math, "random", () => 1);
+  const client = new C.LiveEventsClient();
+  client.subscribe("w", "p", () => {});
+  const dropAndMeasure = () => {
+    FakeWS.all.at(-1).fire("close", { code: 1006 });
+    const before = FakeWS.all.length;
+    let waited = 0;
+    while (FakeWS.all.length === before && waited < 100_000) {
+      t.mock.timers.tick(250);
+      waited += 250;
+    }
+    return waited;
+  };
+  // grow the backoff: three failed attempts
+  assert.equal(dropAndMeasure(), 1000);
+  assert.equal(dropAndMeasure(), 2000);
+  assert.equal(dropAndMeasure(), 4000);
+  // the server opens, sends a frame and stays up: reset
+  FakeWS.all.at(-1).open();
+  FakeWS.all.at(-1).fire("message", { data: JSON.stringify({ type: "subscribed", project_ids: ["p"], denied: [] }) });
+  assert.equal(dropAndMeasure(), 1000, "reset after the first server frame");
+  assert.equal(dropAndMeasure(), 2000);
+  // opens and stays up without a frame for the settle window: reset as well
+  FakeWS.all.at(-1).open();
+  t.mock.timers.tick(C.SETTLE_WINDOW_MS - 1);
+  FakeWS.all.at(-1).fire("close", { code: 1006 });
+  const grown = (() => {
+    const before = FakeWS.all.length;
+    let waited = 0;
+    while (FakeWS.all.length === before) {
+      t.mock.timers.tick(250);
+      waited += 250;
+    }
+    return waited;
+  })();
+  assert.equal(grown, 4000, "just under the settle window does not reset");
+  FakeWS.all.at(-1).open();
+  t.mock.timers.tick(C.SETTLE_WINDOW_MS);
+  assert.equal(dropAndMeasure(), 1000, "reset after staying open for the settle window");
+});
+
+test("client: a hub resync frame right after the reopen resync is not a second refetch", (t) => {
+  env(t);
+  t.mock.method(Math, "random", () => 0);
+  const client = new C.LiveEventsClient();
+  const got = [];
+  client.subscribe("w", "p", (e) => got.push(e.type));
+  FakeWS.all[0].open();
+  FakeWS.all[0].fire("close", { code: 1006 });
+  t.mock.timers.tick(30_000);
+  FakeWS.all[1].open();
+  assert.deepEqual(got, ["resync"]);
+  FakeWS.all[1].fire("message", { data: JSON.stringify({ type: "resync" }) });
+  assert.deepEqual(got, ["resync"], "duplicate inside the settle window is skipped");
+  t.mock.timers.tick(C.SETTLE_WINDOW_MS + 1);
+  FakeWS.all[1].fire("message", { data: JSON.stringify({ type: "resync" }) });
+  assert.deepEqual(got, ["resync", "resync"], "a later hub resync still refetches");
 });
