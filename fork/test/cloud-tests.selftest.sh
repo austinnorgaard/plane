@@ -93,6 +93,11 @@ check "api apt refuses a non-loopback DB_HOST" 2 "$(DB_HOST=db.example.invalid r
 check "api apt refusal message" 1 "$(grep -c 'not a loopback address' "$T/apilog")"
 check "api docker refuses a non-loopback MQ_HOST" 2 "$(MQ_HOST=10.0.0.5 run_api --services docker)"
 check "api apt rejects a quote in DB_PASS" 2 "$(DB_PASS="x'y" run_api --services apt)"
+check "api apt refuses 127.evil.example.com (glob injection)" 2 "$(DB_HOST=127.evil.example.com run_api --services apt)"
+check "api apt accepts 127.0.0.1" 1 "$(DB_HOST=127.0.0.1 run_api --services apt)"
+check "api apt refuses @ in DB_PASS" 2 "$(DB_PASS="x@y" run_api --services apt)"
+check "api apt refuses @ in MQ_PASS" 2 "$(MQ_PASS="x@y" run_api --services apt)"
+check "api apt refuses - in DB_NAME" 2 "$(DB_NAME="plane-test" run_api --services apt)"
 check "api external allows other hosts" 1 "$(DB_HOST=db.example.invalid run_api --services external)"
 
 echo "selftest failures: $fails"
