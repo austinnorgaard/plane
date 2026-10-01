@@ -15,7 +15,6 @@
 import { existsSync } from "node:fs";
 import { Worker } from "node:worker_threads";
 import { InvalidBaseStateError } from "./rebase";
-import type { TRebaseInput, TRebaseResult } from "./rebase";
 import type { TWorkerReply } from "./rebase.worker";
 
 export class RebaseTimeoutError extends Error {
@@ -47,13 +46,30 @@ export type TRunRebaseOptions = {
 // How long a new worker may take to load before the job waiting for it is failed.
 const STARTUP_TIMEOUT_MS = 10_000;
 
-type TJob = { resolve: (result: TRebaseResult) => void; reject: (error: Error) => void; input: TRebaseInput };
+export type TRebaseWorkerInput = {
+  /** the stored document state, base64 (decoded inside the worker) */
+  baseBinaryBase64: string;
+  descriptionHtml: string | null;
+  name: string | null;
+};
+
+type TJob = { resolve: (json: string) => void; reject: (error: Error) => void; input: TRebaseWorkerInput };
 type TSlot = {
   worker: Worker;
   state: "starting" | "idle" | "busy" | "dying";
   job?: TJob;
   timer?: NodeJS.Timeout;
   timeoutMs: number;
+  readyWaiters: { resolve: () => void; reject: (error: Error) => void }[];
+};
+
+const DEFAULT_WORKER_MAX_MB = 256;
+
+// Heap cap of one worker (PAGES_REBASE_WORKER_MAX_MB), read when a worker is started. A worker that
+// exceeds it is stopped by node and the call fails; the pool starts a new worker for the next call.
+export const getRebaseWorkerMaxMb = (): number => {
+  const parsed = Number.parseInt(process.env.PAGES_REBASE_WORKER_MAX_MB ?? "", 10);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : DEFAULT_WORKER_MAX_MB;
 };
 
 const slots = new Set<TSlot>();
@@ -104,8 +120,10 @@ const dispatch = (slot: TSlot) => {
 };
 
 const startSlot = (): TSlot => {
-  const worker = new Worker(workerUrlOverride ?? resolveWorkerUrl());
-  const slot: TSlot = { worker, state: "starting", timeoutMs: 0 };
+  const worker = new Worker(workerUrlOverride ?? resolveWorkerUrl(), {
+    resourceLimits: { maxOldGenerationSizeMb: getRebaseWorkerMaxMb() },
+  });
+  const slot: TSlot = { worker, state: "starting", timeoutMs: 0, readyWaiters: [] };
   slots.add(slot);
 
   worker.on("message", (reply: TWorkerReply) => {
@@ -117,6 +135,7 @@ const startSlot = (): TSlot => {
         slot.state = "idle";
         worker.unref();
       }
+      slot.readyWaiters.splice(0).forEach((waiter) => waiter.resolve());
       return;
     }
     const job = slot.job;
@@ -125,21 +144,43 @@ const startSlot = (): TSlot => {
     slot.state = "idle";
     worker.unref();
     if (!job) return;
-    if (reply.ok) job.resolve(reply.result);
+    if (reply.ok) job.resolve(reply.json);
     else job.reject(reply.kind === "invalid_base" ? new InvalidBaseStateError() : new RebaseWorkerError(reply.name));
   });
   worker.on("error", (error) => {
     slot.state = "dying";
-    failJob(slot, new RebaseWorkerError(error instanceof Error ? error.name : "unknown"));
+    // an out-of-memory stop arrives here (ERR_WORKER_OUT_OF_MEMORY); only the error code is kept
+    const code = (error as { code?: string } | undefined)?.code;
+    const failure = new RebaseWorkerError(code ?? (error instanceof Error ? error.name : "unknown"));
+    failJob(slot, failure);
+    slot.readyWaiters.splice(0).forEach((waiter) => waiter.reject(failure));
   });
   worker.on("exit", () => {
     slot.state = "dying";
     slots.delete(slot);
     failJob(slot, new RebaseWorkerError("WorkerExited"));
+    slot.readyWaiters.splice(0).forEach((waiter) => waiter.reject(new RebaseWorkerError("WorkerExited")));
   });
   worker.unref();
   return slot;
 };
+
+/** Resolves when a loaded worker is available (starting one if none exists). Rejects if it fails to start. */
+export const waitForRebaseWorker = (): Promise<void> =>
+  new Promise<void>((resolve, reject) => {
+    try {
+      const slot =
+        [...slots].find((candidate) => candidate.state === "idle" || candidate.state === "starting") ?? startSlot();
+      if (slot.state === "idle") resolve();
+      else {
+        // an unref'd starting worker would let the process exit while the caller waits for it
+        slot.worker.ref();
+        slot.readyWaiters.push({ resolve, reject });
+      }
+    } catch (error) {
+      reject(error instanceof Error ? error : new RebaseWorkerError("WorkerStartFailed"));
+    }
+  });
 
 /** Starts one worker ahead of the first request so that request does not pay the load time. */
 export const prewarmRebaseWorker = () => {
@@ -150,8 +191,9 @@ export const prewarmRebaseWorker = () => {
   }
 };
 
-export const runRebase = (input: TRebaseInput, options: TRunRebaseOptions): Promise<TRebaseResult> =>
-  new Promise<TRebaseResult>((resolve, reject) => {
+/** Resolves with the answer of the route, already serialised as json. */
+export const runRebase = (input: TRebaseWorkerInput, options: TRunRebaseOptions): Promise<string> =>
+  new Promise<string>((resolve, reject) => {
     let slot = [...slots].find(
       (candidate) => candidate.state === "idle" || (candidate.state === "starting" && !candidate.job)
     );

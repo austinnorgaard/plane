@@ -394,6 +394,33 @@ class TestHtmlSizeCap:
 
 
 @pytest.mark.contract
+class TestLiveRefusesSize:
+    """A live 413 reaches the caller as 413 with a generic body; any other live failure stays 503."""
+
+    def test_live_413_is_caller_413_without_detail(self, session_client, project, create_user, settings, mocker):
+        settings.LIVE_URL = "http://localhost:3100/live/"
+        post = mocker.patch("plane.utils.live_pages.requests.post")
+        post.return_value.status_code = 413
+        post.return_value.json.return_value = {"error": "description_html too large", "max_bytes": 524288}
+        mocker.patch("plane.utils.live_pages.is_page_loaded", return_value=False)
+        page = binary_page(project, create_user)
+        response = session_client.patch(detail(project, page), {"description_html": "<p>x</p>"}, format="json")
+        assert response.status_code == 413
+        assert response.json() == {"error": "description_html too large"}
+        page.refresh_from_db()
+        assert page.description_html == "<p>hello</p>"
+
+    def test_live_500_stays_503(self, session_client, project, create_user, settings, mocker):
+        settings.LIVE_URL = "http://localhost:3100/live/"
+        post = mocker.patch("plane.utils.live_pages.requests.post")
+        post.return_value.status_code = 500
+        page = binary_page(project, create_user)
+        response = session_client.patch(detail(project, page), {"description_html": "<p>x</p>"}, format="json")
+        assert response.status_code == 503
+        assert response.json() == LIVE_DOWN_MSG
+
+
+@pytest.mark.contract
 class TestPatchNoBinary:
     def test_writes_directly_when_not_loaded(
         self, session_client, project, create_user, mocker, celery_mocks, django_capture_on_commit_callbacks
@@ -751,6 +778,18 @@ class TestLiveClient:
         settings.LIVE_URL = None
         with pytest.raises(live_pages.LiveServiceError):
             live_pages.rebase_page(uuid4(), "AQ==", "<p>x</p>", None)
+
+    def test_rebase_413_is_marked_too_large(self, mocker, settings):
+        settings.LIVE_URL = "http://localhost:3100/live/"
+        post = mocker.patch("plane.utils.live_pages.requests.post")
+        post.return_value.status_code = 413
+        with pytest.raises(live_pages.LiveServiceError) as raised:
+            live_pages.rebase_page(uuid4(), "AQ==", "<p>x</p>", None)
+        assert raised.value.too_large is True
+        post.return_value.status_code = 500
+        with pytest.raises(live_pages.LiveServiceError) as raised:
+            live_pages.rebase_page(uuid4(), "AQ==", "<p>x</p>", None)
+        assert raised.value.too_large is False
 
 
 @pytest.mark.unit

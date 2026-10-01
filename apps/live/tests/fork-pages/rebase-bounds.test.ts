@@ -6,7 +6,7 @@ import { Hocuspocus } from "@hocuspocus/server";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getBinaryDataFromDocumentEditorHTMLString } from "@plane/editor/lib";
-import { getRebaseWorkerCount, stopRebaseWorkers } from "@/fork-pages/rebase-runner";
+import { getRebaseWorkerCount, stopRebaseWorkers, waitForRebaseWorker } from "@/fork-pages/rebase-runner";
 import { authHeaders, postRebase, startApp, TEST_KEY } from "./helpers";
 
 const mockEnv = vi.hoisted(() => ({ LIVE_SERVER_SECRET_KEY: "" }));
@@ -24,11 +24,17 @@ const htmlOfSize = (bytes: number) => {
 
 let app: Awaited<ReturnType<typeof startApp>>;
 
+// Generous on purpose: covers a cold worker load on a loaded machine. Assertions are not relaxed.
+const COLD_START_TIMEOUT_MS = 120_000;
+
 beforeAll(async () => {
   mockEnv.LIVE_SERVER_SECRET_KEY = TEST_KEY;
   process.env.PAGES_API_ENABLED = "1";
   app = await startApp(new Hocuspocus({ quiet: true }));
-});
+  // A cold worker needs about 2 s (much more under CPU load) to load the editor modules; the tests
+  // below must not pay that inside their own timing windows.
+  await waitForRebaseWorker();
+}, COLD_START_TIMEOUT_MS);
 afterAll(async () => {
   await app.close();
   await stopRebaseWorkers();
@@ -80,60 +86,62 @@ describe("html size cap", () => {
 });
 
 describe("time budget", () => {
-  it("answers 503 when the conversion exceeds the budget, stops the worker, and recovers", async () => {
-    process.env.PAGES_REBASE_MAX_HTML_BYTES = "4000000";
-    process.env.PAGES_REBASE_TIMEOUT_MS = "100";
-    await stopRebaseWorkers();
-    await vi.waitFor(() => expect(getRebaseWorkerCount()).toBe(0));
-    const started = Date.now();
-    const res = await postRebase(app.base, { base_binary: base(), description_html: htmlOfSize(1_000_000) });
-    expect(res.status).toBe(503);
-    expect(Date.now() - started).toBeLessThan(3000);
+  it(
+    "answers 503 when the conversion exceeds the budget, stops the worker, and recovers",
+    async () => {
+      process.env.PAGES_REBASE_MAX_HTML_BYTES = "4000000";
+      process.env.PAGES_REBASE_TIMEOUT_MS = "100";
+      await waitForRebaseWorker();
+      const workersBefore = getRebaseWorkerCount();
+      const started = Date.now();
+      const res = await postRebase(app.base, { base_binary: base(), description_html: htmlOfSize(1_000_000) });
+      expect(res.status).toBe(503);
+      expect(Date.now() - started).toBeLessThan(3000);
 
-    // the thread is really stopped (the conversion alone would run for seconds more), and the next
-    // request is served by a fresh worker
-    await vi.waitFor(() => expect(getRebaseWorkerCount()).toBe(0), { timeout: 1500 });
-    process.env.PAGES_REBASE_TIMEOUT_MS = "30000";
-    const ok = await postRebase(app.base, { base_binary: base(), description_html: "<p>after</p>" });
-    expect(ok.status).toBe(200);
-  }, 30000);
+      // the thread is really stopped (the conversion alone would run for seconds more), and the next
+      // request is served by a fresh worker
+      await vi.waitFor(() => expect(getRebaseWorkerCount()).toBeLessThan(workersBefore), { timeout: 10_000 });
+      process.env.PAGES_REBASE_TIMEOUT_MS = "30000";
+      // the stopped worker is replaced by a new one; load it before the timed request
+      await waitForRebaseWorker();
+      const ok = await postRebase(app.base, { base_binary: base(), description_html: "<p>after</p>" });
+      expect(ok.status).toBe(200);
+    },
+    COLD_START_TIMEOUT_MS
+  );
 
-  it("answers 503 with Retry-After at once when every worker is busy", async () => {
-    process.env.PAGES_REBASE_MAX_HTML_BYTES = "4000000";
-    process.env.PAGES_REBASE_MAX_CONCURRENCY = "1";
-    process.env.PAGES_REBASE_TIMEOUT_MS = "30000";
-    // make sure the single worker is loaded, then occupy it
-    expect((await postRebase(app.base, { base_binary: base(), description_html: "<p>warm</p>" })).status).toBe(200);
-    const slow = postRebase(app.base, { base_binary: base(), description_html: htmlOfSize(400_000) });
-    await new Promise((r) => setTimeout(r, 100));
-    const refused = await postRebase(app.base, { base_binary: base(), description_html: "<p>x</p>" });
-    expect(refused.status).toBe(503);
-    expect(refused.headers.get("retry-after")).toBe("5");
-    expect((await slow).status).toBe(200);
-  }, 60000);
+  it(
+    "answers 503 with Retry-After at once when every worker is busy",
+    async () => {
+      process.env.PAGES_REBASE_MAX_HTML_BYTES = "4000000";
+      process.env.PAGES_REBASE_MAX_CONCURRENCY = "1";
+      process.env.PAGES_REBASE_TIMEOUT_MS = "30000";
+      // start from exactly one loaded worker, then occupy it
+      await stopRebaseWorkers();
+      await vi.waitFor(() => expect(getRebaseWorkerCount()).toBe(0), { timeout: 10_000 });
+      await waitForRebaseWorker();
+      expect((await postRebase(app.base, { base_binary: base(), description_html: "<p>warm</p>" })).status).toBe(200);
+      const slow = postRebase(app.base, { base_binary: base(), description_html: htmlOfSize(400_000) });
+      await new Promise((r) => setTimeout(r, 100));
+      const refused = await postRebase(app.base, { base_binary: base(), description_html: "<p>x</p>" });
+      expect(refused.status).toBe(503);
+      expect(refused.headers.get("retry-after")).toBe("5");
+      expect((await slow).status).toBe(200);
+    },
+    COLD_START_TIMEOUT_MS
+  );
 });
 
 describe("event loop", () => {
-  it("keeps answering other requests while a large conversion runs", async () => {
-    process.env.PAGES_REBASE_MAX_HTML_BYTES = "4000000";
-    process.env.PAGES_REBASE_TIMEOUT_MS = "60000";
-    // warm the worker so the measured window is the conversion itself
-    expect((await postRebase(app.base, { base_binary: base(), description_html: "<p>warm</p>" })).status).toBe(200);
-
-    const histogram = monitorEventLoopDelay({ resolution: 5 });
-    histogram.enable();
-    const started = Date.now();
-    const big = postRebase(app.base, { base_binary: base(), description_html: htmlOfSize(1_000_000) }).then((r) => {
-      return { status: r.status, doneAt: Date.now() };
-    });
-
-    // cheap requests against the same server for as long as the conversion runs
-    const latencies: number[] = [];
+  // Probes the server with cheap requests for `ms` (or until `until` settles); returns each latency.
+  const probe = async (ms: number, until?: Promise<unknown>) => {
     let finished = false;
-    void big.then(() => (finished = true));
-    // sequential polling is the point: each probe measures one request while the conversion runs
+    void until?.then(() => (finished = true));
+    const latencies: number[] = [];
+    const end = Date.now() + ms;
+    // sequential polling is the point: each probe measures one request
     // oxlint-disable-next-line no-unmodified-loop-condition
-    while (!finished) {
+    while (until ? !finished : Date.now() < end) {
       const t = performance.now();
       // oxlint-disable-next-line no-await-in-loop
       const res = await fetch(`${app.base}/fork/pages/${PAGE}/loaded`, { headers: authHeaders() });
@@ -142,21 +150,53 @@ describe("event loop", () => {
       // oxlint-disable-next-line no-await-in-loop
       await new Promise((r) => setTimeout(r, 20));
     }
-    histogram.disable();
-    const result = await big;
-    const conversionMs = result.doneAt - started;
+    return latencies;
+  };
 
-    expect(result.status).toBe(200);
-    expect(conversionMs).toBeGreaterThan(1000); // the conversion was long enough to matter
-    expect(latencies.length).toBeGreaterThan(10);
-    const worst = Math.max(...latencies);
-    const maxLagMs = histogram.max / 1e6;
-    console.log(
-      `rebase 1 MB: ${conversionMs} ms; ${latencies.length} cheap requests, worst ${worst.toFixed(0)} ms; ` +
-        `event loop delay max ${maxLagMs.toFixed(0)} ms`
-    );
-    expect(worst).toBeLessThan(250);
-    // main-thread cost of the large body and reply (parse, encode) is linear and small next to the conversion
-    expect(maxLagMs).toBeLessThan(750);
-  }, 120000);
+  it(
+    "keeps answering other requests while a large conversion runs",
+    async () => {
+      process.env.PAGES_REBASE_MAX_HTML_BYTES = "4000000";
+      process.env.PAGES_REBASE_TIMEOUT_MS = "60000";
+      // warm the worker so the measured window is the conversion itself
+      expect((await postRebase(app.base, { base_binary: base(), description_html: "<p>warm</p>" })).status).toBe(200);
+
+      // Baseline on the same, idle server in the same window of machine load: on a busy machine the
+      // process itself is starved of CPU by other processes, which shows up as loop delay and request
+      // latency too. The bounds below are margins ABOVE this baseline, so they measure what the
+      // conversion adds (a blocked loop would add seconds), not the machine's load.
+      const idleLoop = monitorEventLoopDelay({ resolution: 5 });
+      idleLoop.enable();
+      const idleLatencies = await probe(2000);
+      idleLoop.disable();
+      const baselineLagMs = idleLoop.max / 1e6;
+      const baselineWorstMs = Math.max(...idleLatencies);
+
+      const histogram = monitorEventLoopDelay({ resolution: 5 });
+      histogram.enable();
+      const started = Date.now();
+      const big = postRebase(app.base, { base_binary: base(), description_html: htmlOfSize(1_000_000) }).then((r) => ({
+        status: r.status,
+        doneAt: Date.now(),
+      }));
+      const latencies = await probe(0, big);
+      histogram.disable();
+      const result = await big;
+      const conversionMs = result.doneAt - started;
+
+      expect(result.status).toBe(200);
+      expect(conversionMs).toBeGreaterThan(1000); // the conversion was long enough to matter
+      expect(latencies.length).toBeGreaterThan(10);
+      const worst = Math.max(...latencies);
+      const maxLagMs = histogram.max / 1e6;
+      console.log(
+        `rebase 1 MB: ${conversionMs} ms; ${latencies.length} cheap requests, worst ${worst.toFixed(0)} ms ` +
+          `(idle ${baselineWorstMs.toFixed(0)}); event loop delay max ${maxLagMs.toFixed(0)} ms (idle ${baselineLagMs.toFixed(0)})`
+      );
+      expect(worst).toBeLessThan(baselineWorstMs + 250);
+      // main-thread cost of the large body and reply (parse, encode) is linear and small next to the conversion
+      expect(maxLagMs).toBeLessThan(baselineLagMs + 750);
+    },
+    COLD_START_TIMEOUT_MS
+  );
 });

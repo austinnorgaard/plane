@@ -120,15 +120,15 @@ export class PagesController {
 
     try {
       // Off the event loop, under a time budget; see rebase-runner.ts.
-      const result = await runRebase(
+      const json = await runRebase(
         {
-          baseBinary: new Uint8Array(Buffer.from(parsed.data.base_binary, "base64")),
+          baseBinaryBase64: parsed.data.base_binary,
           descriptionHtml: parsed.data.description_html ?? null,
           name: parsed.data.name ?? null,
         },
         { timeoutMs: limits.timeoutMs, maxConcurrency: limits.maxConcurrency }
       );
-      return res.status(200).json(result);
+      return res.status(200).type("application/json").send(json);
     } catch (error) {
       if (error instanceof RebaseTimeoutError || error instanceof RebaseBusyError) {
         if (error instanceof RebaseBusyError) res.setHeader("Retry-After", "5");

@@ -296,7 +296,12 @@ class PageDetailAPIEndpoint(PageBaseAPIEndpoint):
                         data.get("description_html"),
                         data.get("name"),
                     )
-                except live_pages.LiveServiceError:
+                except live_pages.LiveServiceError as exc:
+                    if getattr(exc, "too_large", False) is True:
+                        # live refused the size: not retryable, and nothing internal is revealed
+                        return Response(
+                            {"error": "description_html too large"}, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+                        )
                     return Response(LIVE_UNAVAILABLE, status=status.HTTP_503_SERVICE_UNAVAILABLE)
                 rebased = PageBinaryUpdateSerializer(data=result)
                 if not rebased.is_valid() or not rebased.validated_data.get("description_binary"):

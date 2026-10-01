@@ -15,7 +15,7 @@ export default async function setup() {
   await build({
     config: false,
     cwd: root,
-    entry: { "rebase.worker": "src/fork-pages/rebase.worker.ts" },
+    entry: { "rebase.worker": "src/fork-pages/rebase.worker.ts", "rebase-runner": "src/fork-pages/rebase-runner.ts" },
     outDir: WORKER_BUNDLE_DIR,
     format: ["esm"],
     dts: false,

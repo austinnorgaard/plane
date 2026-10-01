@@ -75,12 +75,20 @@ Optional pages API size and time limits (defaults shown; leave unset to use them
                                                 pages API on create and update; larger answers 413
   live service:
   PAGES_REBASE_MAX_HTML_BYTES           524288  largest description_html the rebase route converts;
-                                                larger answers 413 (keep it at or above the api value)
+                                                larger answers 413, which the api passes on
+                                                as 413. Keep it at or above the api value
   PAGES_REBASE_TIMEOUT_MS               8000    time budget of one conversion; on expiry the worker thread
                                                 is stopped and the route answers 503 (keep it below the api
                                                 client timeout of 10 s)
   PAGES_REBASE_MAX_CONCURRENCY          2       conversions (worker threads) at the same time; more are
-                                                refused at once with 503 and Retry-After
+                                                refused at once with 503 and Retry-After. Do not set it
+                                                above the spare CPU cores of the live container (use 1 on
+                                                a 2-core host): busy workers compete with the main thread
+  PAGES_REBASE_WORKER_MAX_MB            256     heap limit of one worker thread; a worker that exceeds it
+                                                is stopped, the request fails (the api answers 503) and
+                                                the next request gets a fresh worker. A base document over
+                                                about 2 MB of binary state can need more. A
+                                                --max-old-space-size in NODE_OPTIONS overrides this limit
 
 Commands (run in $PLANE_APP_DIR; FORK_N must be exported or in plane.env)
 
