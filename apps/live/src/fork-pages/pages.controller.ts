@@ -9,10 +9,10 @@ import { z } from "zod";
 import { Controller, Get, Middleware, Post } from "@plane/decorators";
 import { logger } from "@plane/logger";
 import { requirePagesApiAccess } from "./auth";
-import { InvalidBaseStateError, rebase } from "./rebase";
+import { InvalidBaseStateError } from "./rebase";
+import { prewarmRebaseWorker, RebaseBusyError, RebaseTimeoutError, runRebase } from "./rebase-runner";
 
 export const REBASE_CONTENT_TYPE = "application/vnd.plane-fork.rebase+json";
-const REBASE_BODY_LIMIT = "25mb";
 const MAX_BASE_BINARY_BYTES = 10 * 1024 * 1024;
 // base64 length of the largest allowed binary (4 chars per 3 bytes, padded)
 const MAX_BASE_BINARY_CHARS = Math.ceil(MAX_BASE_BINARY_BYTES / 3) * 4;
@@ -32,11 +32,27 @@ const rebaseBodySchema = z
   })
   .refine((body) => body.description_html != null || body.name != null, "description_html or name is required");
 
-const rawRebaseBody = express.raw({ type: REBASE_CONTENT_TYPE, limit: REBASE_BODY_LIMIT });
+// Limits of the rebase route, read per request from the environment (names and defaults in
+// fork/deploy/README.fork). The html default is twice the API default, as headroom.
+const DEFAULT_MAX_HTML_BYTES = 524288;
+const DEFAULT_TIMEOUT_MS = 8000;
+const DEFAULT_MAX_CONCURRENCY = 2;
+const readPositiveInt = (name: string, fallback: number): number => {
+  const parsed = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+};
+export const getRebaseLimits = () => ({
+  maxHtmlBytes: readPositiveInt("PAGES_REBASE_MAX_HTML_BYTES", DEFAULT_MAX_HTML_BYTES),
+  timeoutMs: readPositiveInt("PAGES_REBASE_TIMEOUT_MS", DEFAULT_TIMEOUT_MS),
+  maxConcurrency: readPositiveInt("PAGES_REBASE_MAX_CONCURRENCY", DEFAULT_MAX_CONCURRENCY),
+});
+// Raw body cap: the base64 binary, plus the html with worst case json escaping (6 bytes per
+// byte), plus room for the name and the json framing.
+const getRebaseBodyLimit = () => MAX_BASE_BINARY_CHARS + 6 * getRebaseLimits().maxHtmlBytes + 1024 * 1024;
 
 // Wraps express.raw so oversize or malformed bodies get a JSON error instead of the default HTML page.
 const parseRebaseBody: RequestHandler = (req: Request, res: Response, next: NextFunction) => {
-  rawRebaseBody(req, res, (error?: unknown) => {
+  express.raw({ type: REBASE_CONTENT_TYPE, limit: getRebaseBodyLimit() })(req, res, (error?: unknown) => {
     if (error) {
       const status = (error as { status?: number }).status === 413 ? 413 : 400;
       res.status(status).json({ error: status === 413 ? "Payload too large" : "Invalid request body" });
@@ -57,6 +73,7 @@ export class PagesController {
 
   constructor(hocusPocusServer: Hocuspocus) {
     this.hocusPocusServer = hocusPocusServer;
+    prewarmRebaseWorker();
   }
 
   // Read-only: only inspects the maps, never creates or loads a document. A document is in
@@ -78,7 +95,7 @@ export class PagesController {
   @Post("/rebase")
   @Middleware(parseRebaseBody)
   @Middleware(requirePagesApiAccess)
-  rebase(req: Request, res: Response) {
+  async rebase(req: Request, res: Response) {
     let payload: unknown;
     try {
       payload = JSON.parse((req.body as Buffer).toString("utf8"));
@@ -93,14 +110,30 @@ export class PagesController {
       return res.status(400).json({ error: "Validation error", issues });
     }
 
+    const limits = getRebaseLimits();
+    if (
+      parsed.data.description_html != null &&
+      Buffer.byteLength(parsed.data.description_html, "utf8") > limits.maxHtmlBytes
+    ) {
+      return res.status(413).json({ error: "description_html too large", max_bytes: limits.maxHtmlBytes });
+    }
+
     try {
-      const result = rebase({
-        baseBinary: new Uint8Array(Buffer.from(parsed.data.base_binary, "base64")),
-        descriptionHtml: parsed.data.description_html ?? null,
-        name: parsed.data.name ?? null,
-      });
+      // Off the event loop, under a time budget; see rebase-runner.ts.
+      const result = await runRebase(
+        {
+          baseBinary: new Uint8Array(Buffer.from(parsed.data.base_binary, "base64")),
+          descriptionHtml: parsed.data.description_html ?? null,
+          name: parsed.data.name ?? null,
+        },
+        { timeoutMs: limits.timeoutMs, maxConcurrency: limits.maxConcurrency }
+      );
       return res.status(200).json(result);
     } catch (error) {
+      if (error instanceof RebaseTimeoutError || error instanceof RebaseBusyError) {
+        if (error instanceof RebaseBusyError) res.setHeader("Retry-After", "5");
+        return res.status(503).json({ error: "Service unavailable" });
+      }
       if (error instanceof InvalidBaseStateError) {
         return res.status(400).json({ error: "base_binary is not a valid document state" });
       }
