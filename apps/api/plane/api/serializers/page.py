@@ -6,6 +6,7 @@ from rest_framework import serializers
 # Module imports
 from plane.db.models import Page, ProjectPage
 from plane.utils.content_validator import validate_html_content
+from plane.utils.openapi.pages import PAGE_ACCESS_CHOICES
 
 EMPTY_HTML = "<p></p>"
 PATCHABLE_FIELDS = ("name", "description_html")
@@ -59,7 +60,7 @@ class PageListAPISerializer(PageAPISerializer):
 class PageCreateAPISerializer(serializers.Serializer):
     name = serializers.CharField(required=False, allow_blank=True, default="")
     description_html = serializers.CharField(required=False, allow_blank=True, allow_null=True, default=EMPTY_HTML)
-    access = serializers.ChoiceField(choices=[0, 1], required=False, default=0)
+    access = serializers.ChoiceField(choices=PAGE_ACCESS_CHOICES, required=False, default=0)
     color = serializers.CharField(required=False, allow_blank=True, max_length=255, default="")
     parent = serializers.UUIDField(required=False, allow_null=True, default=None)
     external_id = serializers.CharField(required=False, allow_null=True, allow_blank=True, max_length=255, default=None)

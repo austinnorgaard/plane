@@ -285,6 +285,7 @@ SPECTACULAR_SETTINGS = {
     "ENUM_NAME_OVERRIDES": {
         "ModuleStatusEnum": "plane.db.models.module.ModuleStatus",
         "IntakeWorkItemStatusEnum": "plane.db.models.intake.IntakeIssueStatus",
+        "IssueCommentAccessEnum": "plane.utils.openapi.pages.COMMENT_ACCESS_CHOICES",
         "PageAccessEnum": "plane.utils.openapi.pages.PAGE_ACCESS_CHOICES",
     },
 }

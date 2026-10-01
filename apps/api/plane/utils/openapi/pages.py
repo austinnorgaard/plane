@@ -8,6 +8,10 @@ from drf_spectacular.utils import OpenApiExample, OpenApiParameter, OpenApiRespo
 # The two page access values (public, private); used to give the `access` enum one stable name.
 PAGE_ACCESS_CHOICES = ((0, "Public"), (1, "Private"))
 
+# The work item comment `access` values. Naming this set as well keeps the generator from warning about
+# two differently named choice sets for fields called `access`.
+COMMENT_ACCESS_CHOICES = (("INTERNAL", "INTERNAL"), ("EXTERNAL", "EXTERNAL"))
+
 PAGE_ID_PARAMETER = OpenApiParameter(
     name="page_id",
     description="Page ID",
@@ -86,8 +90,9 @@ PAGE_CONFLICT_UPDATE_RESPONSE = OpenApiResponse(
     description=(
         "The page cannot be updated now because it is open in an editor, or because whether it is open "
         "could not be determined and the page has no stored document (a page with a stored document "
-        "returns 503 instead when the live service fails). Retry later; "
-        "if the response carries a Retry-After header, wait at least that long."
+        "returns 503 instead when the live service fails). The response carries a Retry-After header "
+        "in seconds (default 60, maximum 3600, set by PAGES_API_RETRY_AFTER_SECONDS); wait at least that long. "
+        "The 413 and 503 responses carry no Retry-After header."
     ),
     examples=[_example("Open in editor", {"error": "page is open in an editor; retry later"})],
 )

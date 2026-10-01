@@ -82,9 +82,39 @@ class TestPagesOpenAPI:
         archived = _body_schema(schema, schema["paths"][ARCHIVE]["post"]["responses"]["200"])
         assert "archived_at" in archived["properties"]
 
-    def test_error_body_schemas(self, schema):
+    @pytest.mark.parametrize(
+        ("path", "method", "code", "component"),
+        [
+            (PAGES, "get", "400", "PageListErrorAPI"),
+            (PAGES, "post", "400", "PageValidationErrorAPI"),
+            (PAGES, "post", "409", "PageConflictAPI"),
+            (PAGES, "post", "413", "PageTooLargeAPI"),
+            (PAGE, "patch", "400", "PageValidationErrorAPI"),
+            (PAGE, "patch", "409", "PageConflictAPI"),
+            (PAGE, "patch", "413", "PageTooLargeAPI"),
+            (PAGE, "patch", "503", "PageErrorAPI"),
+            (ARCHIVE, "post", "400", "PageErrorAPI"),
+            (PAGES, "post", "201", "PageAPI"),
+            (PAGE, "patch", "200", "PageAPI"),
+            (ARCHIVE, "post", "200", "PageArchiveResultAPI"),
+        ],
+    )
+    def test_response_component_per_status(self, schema, path, method, code, component):
+        ref = schema["paths"][path][method]["responses"][code]["content"]["application/json"]["schema"]["$ref"]
+        assert ref.rsplit("/", 1)[1] == component
+
+    def test_error_body_properties(self, schema):
         patch = schema["paths"][PAGE]["patch"]["responses"]
         assert {"error", "id"} == set(_body_schema(schema, patch["409"])["properties"])
         assert {"error", "max_bytes"} == set(_body_schema(schema, patch["413"])["properties"])
-        assert "error" in _body_schema(schema, patch["503"])["properties"]
-        assert "Retry-After" in patch["409"]["description"]
+        assert {"error"} == set(_body_schema(schema, patch["503"])["properties"])
+        listing_400 = schema["paths"][PAGES]["get"]["responses"]["400"]
+        assert {"detail"} == set(_body_schema(schema, listing_400)["properties"])
+
+    def test_409_documents_retry_after(self, schema):
+        description = schema["paths"][PAGE]["patch"]["responses"]["409"]["description"]
+        assert "Retry-After" in description
+        assert "3600" in description
+
+    def test_page_access_enum_has_a_stable_name(self, schema):
+        assert "PageAccessEnum" in schema["components"]["schemas"]
