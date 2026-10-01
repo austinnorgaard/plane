@@ -70,6 +70,24 @@ _client_pid = None
 _client_lock = threading.Lock()
 
 
+def _reset_after_fork():
+    """In a forked child: drop the parent's client and use a new lock.
+
+    The lock could have been held by another parent thread at fork time, and
+    that thread does not exist in the child, so the old lock would never be
+    released. The inherited client is abandoned, not closed: the parent still
+    owns those sockets.
+    """
+    global _client, _client_pid, _client_lock
+    _client = None
+    _client_pid = None
+    _client_lock = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_after_fork)
+
+
 def _publish_client():
     """The shared publish client, created lazily on first use.
 

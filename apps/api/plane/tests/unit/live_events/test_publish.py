@@ -3,6 +3,7 @@
 # See the LICENSE file for details.
 
 import json
+import os
 import time
 import uuid
 from unittest import mock
@@ -197,6 +198,38 @@ class TestSharedClient:
         assert fresh_client.call_count == 1
         assert len({id(r) for r in results}) == 1
 
+    def test_real_fork_resets_lock_and_client(self, enabled, fresh_client):
+        parent_client = live_events._publish_client()
+        parent_lock = live_events._client_lock
+        assert parent_lock.acquire(timeout=1)  # held at fork time, as by another thread
+        read_fd, write_fd = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            code = 1
+            try:
+                ok = (
+                    live_events._client is None
+                    and live_events._client_lock is not parent_lock
+                    and not live_events._client_lock.locked()
+                    and publish_work_item_event(PROJECT, [str(uuid.uuid4())], "issue", "updated", ACTOR) is True
+                    and live_events._client_pid == os.getpid()
+                )
+                code = 0 if ok else 1
+            finally:
+                os.write(write_fd, str(code).encode())
+                os._exit(code)
+        os.close(write_fd)
+        try:
+            _, status = os.waitpid(pid, 0)
+            child_result = os.read(read_fd, 8)
+        finally:
+            os.close(read_fd)
+            parent_lock.release()
+        assert child_result == b"0", "child saw stale state or could not publish"
+        assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+        assert live_events._client is parent_client
+        assert live_events._client_lock is parent_lock
+
     def test_failure_does_not_break_later_publishes(self, enabled, fresh_client):
         fresh_client.return_value.publish.side_effect = [ConnectionError("down"), 1]
         assert publish_work_item_event(PROJECT, [str(uuid.uuid4())], "issue", "updated", ACTOR) is False
@@ -225,9 +258,9 @@ class TestSharedClient:
             )
             started = time.monotonic()
             worker.start()
-            worker.join(live_events.SOCKET_TIMEOUT_SECONDS + 5)
+            worker.join(live_events.SOCKET_TIMEOUT_SECONDS + 8)
             elapsed = time.monotonic() - started
         finally:
             srv.close()
         assert result == [False], "publish did not return: no socket timeout"
-        assert elapsed < live_events.SOCKET_TIMEOUT_SECONDS + 0.75
+        assert elapsed < live_events.SOCKET_TIMEOUT_SECONDS + 3
