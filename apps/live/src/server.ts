@@ -20,6 +20,7 @@ import { CONTROLLERS } from "@/controllers";
 // env
 import { env } from "@/env";
 // hocuspocus server
+import { stopRebaseWorkers } from "@/fork-pages/rebase-runner";
 import { HocusPocusServerManager } from "@/hocuspocus";
 // redis
 import { redisManager } from "@/redis";
@@ -108,6 +109,9 @@ export class Server {
       this.hocuspocusServer.closeConnections();
       logger.info("SERVER: HocusPocus connections closed gracefully.");
     }
+
+    await stopRebaseWorkers();
+    logger.info("SERVER: Rebase workers stopped.");
 
     await redisManager.disconnect();
     logger.info("SERVER: Redis connection closed gracefully.");

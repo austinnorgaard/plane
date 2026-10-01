@@ -7,6 +7,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import * as Y from "yjs";
 import { convertBase64StringToBinaryData, getBinaryDataFromDocumentEditorHTMLString } from "@plane/editor/lib";
 import { REBASE_CONTENT_TYPE } from "@/fork-pages/pages.controller";
+import { waitForRebaseWorker } from "@/fork-pages/rebase-runner";
 import { authHeaders, postRebase, startApp, TEST_KEY } from "./helpers";
 
 const mockEnv = vi.hoisted(() => ({ LIVE_SERVER_SECRET_KEY: "" }));
@@ -20,6 +21,10 @@ const deferred = () => {
 };
 const b64 = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64");
 const base = () => b64(getBinaryDataFromDocumentEditorHTMLString("<p>old</p>", "Old"));
+
+// A cold worker needs about 2 s (much more under CPU load) to load the editor modules; load it once
+// up front so no test pays that inside its own timeout.
+beforeAll(() => waitForRebaseWorker(), 120_000);
 
 beforeEach(() => {
   process.env.PAGES_API_ENABLED = "1";
