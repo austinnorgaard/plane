@@ -251,6 +251,12 @@ run_build --sha $SHA --n 1 --out-dir "$work/out4m" --engine docker --ca-bundle "
 [ $rc -ne 0 ] && echo "$out" | grep -q 'cannot patch' && [ "$(calls_of docker)" -eq 0 ]; check "ca-bundle: multi-line RUN refused before building" $?
 cp "$work/live.orig" "$tree/apps/live/Dockerfile.live"
 
+# 4b3. RUN with flags before exec-form is detected and refused
+printf '%s\n' 'FROM x' 'RUN --mount=type=cache,id=x,target=/x [ "echo", "test" ]' > "$tree/apps/live/Dockerfile.live"
+run_build --sha $SHA --n 1 --out-dir "$work/out4n" --engine docker --ca-bundle "$work/ca.pem"
+[ $rc -ne 0 ] && echo "$out" | grep -q 'cannot patch' && [ "$(calls_of docker)" -eq 0 ]; check "ca-bundle: RUN with flags before exec-form refused" $?
+cp "$work/live.orig" "$tree/apps/live/Dockerfile.live"
+
 # 4c. n is normalized: 007 is build 7
 FAKE_TAG=v1.4.2-live.7 run_build --sha $SHA --n 007 --out-dir "$work/out4h" --engine docker
 [ $rc -eq 0 ] && [ -f "$work/out4h/plane-fork-live.7.tar" ] && grep -q '^### Build 7 - ' "$repo/fork/README.md" && grep -q 'plane-fork-web:v1.4.2-live.7 ' "$CALLS"; check "n: 007 normalized to 7 (tag, files, README)" $?
