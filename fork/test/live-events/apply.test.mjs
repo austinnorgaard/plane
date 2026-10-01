@@ -94,8 +94,11 @@ test("helpers", () => {
   assert.equal(A.isOwnItem({ actor_ids: ["me", "x"] }, "me"), false);
   assert.equal(A.isOwnItem({ actor_ids: [] }, "me"), false);
 });
-function setup(t, { route = {}, peek, present = {}, listed = [], filtered = false } = {}) {
-  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+function setup(
+  t,
+  { route = {}, peek, present = {}, listed = [], filtered = false, projectId = "p", timers = true } = {}
+) {
+  if (timers) t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
   const calls = [];
   const map = { ...present };
   const issueMap = {
@@ -136,7 +139,7 @@ function setup(t, { route = {}, peek, present = {}, listed = [], filtered = fals
   };
   const applier = new LiveWorkItemsApplier({
     workspaceSlug: "w",
-    projectId: "p",
+    projectId,
     getRoute: () => route,
     getCurrentUserId: () => "me",
     issueMap,
@@ -219,6 +222,47 @@ test("full_refresh / resync -> coarse", async (t) => {
   const { applier, calls } = setup(t);
   applier.handle({ type: "resync", project_id: "p" });
   applier.handle({ type: "events", project_id: "p", items: [], full_refresh: true });
+  await tick(t, 1000);
+  assert.equal(calls.filter((c) => c[0] === "coarse").length, 1);
+});
+const bulk = (project_id = "p") => ({ type: "events", project_id, items: [], full_refresh: true });
+test("bulk '*' events: three in one window cause exactly one refetch and no per-id fetch", async (t) => {
+  const { applier, calls, retrieved } = setup(t);
+  applier.handle(bulk());
+  await tick(t, 300);
+  applier.handle(bulk());
+  await tick(t, 300);
+  applier.handle(bulk());
+  await tick(t, 300);
+  assert.equal(calls.filter((c) => c[0] === "coarse").length, 0);
+  await tick(t, 1000);
+  assert.equal(calls.filter((c) => c[0] === "coarse").length, 1);
+  assert.equal(retrieved.length, 0);
+  assert.equal(calls.filter((c) => c[0] === "fetchIssue").length, 0);
+  // a later '*' after the window fired starts a new window
+  applier.handle(bulk());
+  await tick(t, 1000);
+  assert.equal(calls.filter((c) => c[0] === "coarse").length, 2);
+});
+test("bulk '*' events of different projects each refetch their own project once", async (t) => {
+  const a = setup(t, { projectId: "p" });
+  const b = setup(t, { projectId: "q", timers: false });
+  for (const event of [bulk("p"), bulk("q"), bulk("p"), bulk("q"), bulk("p")]) {
+    a.applier.handle(event);
+    b.applier.handle(event);
+  }
+  await tick(t, 1000);
+  assert.equal(a.calls.filter((c) => c[0] === "coarse").length, 1);
+  assert.equal(b.calls.filter((c) => c[0] === "coarse").length, 1);
+});
+test("id events keep the per-id path while a '*' is pending", async (t) => {
+  const { applier, calls, retrieved } = setup(t);
+  globalThis.__resp = (ids) => ids.map((id) => ({ id, project_id: "p" }));
+  applier.handle(bulk());
+  applier.handle(ev(["a"]));
+  await tick(t, 300);
+  assert.deepEqual(retrieved, [["a"]]);
+  assert.equal(calls.filter((c) => c[0] === "coarse").length, 0);
   await tick(t, 1000);
   assert.equal(calls.filter((c) => c[0] === "coarse").length, 1);
 });
