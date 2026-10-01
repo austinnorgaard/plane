@@ -118,6 +118,40 @@ cp "$T/compose.good" "$T/app/docker-compose.yaml"
 run
 [ "$RC" = 0 ] && ok "restored compose is clean" || bad "restored compose rc=$RC"
 
+# Hint detection tests: create separate test directories for each hint scenario
+mkdir -p "$T/hint-root/plane-app"
+cp "$T/compose.good" "$T/hint-root/plane-app/docker-compose.yaml"
+{ echo 'WEB_URL=https://plane.example.test'; echo "LIVE_SERVER_SECRET_KEY=$SENTINEL"; } >"$T/hint-root/plane-app/plane.env"
+
+mkdir -p "$T/hint-correct"
+cp "$T/compose.good" "$T/hint-correct/docker-compose.yaml"
+{ echo 'WEB_URL=https://plane.example.test'; echo "LIVE_SERVER_SECRET_KEY=$SENTINEL"; } >"$T/hint-correct/plane.env"
+
+mkdir -p "$T/hint-neither"
+{ echo 'WEB_URL=https://plane.example.test'; echo "LIVE_SERVER_SECRET_KEY=$SENTINEL"; } >"$T/hint-neither/plane.env"
+
+# Test 1: install root with plane-app subdir (hint should appear, even if there are STOP lines)
+PLANE_APP_DIR="$T/hint-root" run
+echo "$OUT" | grep -q '^HINT: PLANE_APP_DIR looks like the install root' && ok "hint printed for install root" || bad "hint not printed for install root"
+echo "$OUT" | grep -q 'set it to "' && ok "hint path is quoted" || bad "hint path not quoted"
+echo "$OUT" | grep -q "hint-root/plane-app" && ok "hint shows correct path" || bad "hint shows incorrect path"
+hint_count=$(echo "$OUT" | grep -c '^HINT:' || true)
+[ "$hint_count" = 1 ] && ok "hint printed exactly once" || bad "hint printed $hint_count times (expected 1)"
+
+# Test 2: correct plane-app directory (no hint)
+PLANE_APP_DIR="$T/hint-correct" run
+[ "$RC" = 0 ] && ok "correct dir scenario exits 0" || bad "correct dir rc=$RC"
+echo "$OUT" | grep -q '^HINT:' && bad "hint wrongly shown for correct dir" || ok "no hint for correct directory"
+
+# Test 3: neither layout (no compose at all, no hint)
+PLANE_APP_DIR="$T/hint-neither" run
+[ "$RC" = 0 ] && ok "missing compose scenario exits 0" || bad "missing compose rc=$RC"
+echo "$OUT" | grep -q '^HINT:' && bad "hint shown when neither layout has compose" || ok "no hint when neither layout has compose"
+echo "$OUT" | grep -q '^WARN: no compose file found in PLANE_APP_DIR' && ok "warning shown for missing compose" || bad "warning not shown"
+
+# Reset PLANE_APP_DIR for remaining tests
+export PLANE_APP_DIR="$T/app"
+
 # The documented use feeds the script on stdin (bash -s < inspect.sh). A pct that
 # reads stdin must not eat the rest of the script: the RESULT line must still print.
 : >"$STUB_LOG"
