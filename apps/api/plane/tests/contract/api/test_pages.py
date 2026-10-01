@@ -558,6 +558,44 @@ class TestRetryAfterHeader:
         assert response.status_code == 200
         assert response.get("Retry-After") is None
 
+    def test_409_retry_after_clamped_to_max_3600(
+        self, session_client, project, create_user, mocker, monkeypatch
+    ):
+        monkeypatch.setenv("PAGES_API_RETRY_AFTER_SECONDS", "7200")
+        live = mocker.patch(LIVE)
+        live.is_page_loaded.return_value = True
+        page = make_page(project, create_user)
+        response = session_client.patch(detail(project, page), {"name": "x"}, format="json")
+        assert response.status_code == 409
+        assert response.data == OPEN_MSG
+        assert response.get("Retry-After") == "3600"
+
+    def test_409_retry_after_clamped_to_max_on_binary_page(
+        self, session_client, project, create_user, mocker, monkeypatch
+    ):
+        monkeypatch.setenv("PAGES_API_RETRY_AFTER_SECONDS", "9999")
+        live = mocker.patch(LIVE)
+        live.LiveServiceError = live_pages.LiveServiceError
+        live.rebase_page.return_value = rebase_answer()
+        live.is_page_loaded.return_value = True
+        page = binary_page(project, create_user)
+        response = session_client.patch(detail(project, page), {"name": "x"}, format="json")
+        assert response.status_code == 409
+        assert response.data == OPEN_MSG
+        assert response.get("Retry-After") == "3600"
+
+    def test_409_retry_after_zero_falls_back_to_60(
+        self, session_client, project, create_user, mocker, monkeypatch
+    ):
+        monkeypatch.setenv("PAGES_API_RETRY_AFTER_SECONDS", "0")
+        live = mocker.patch(LIVE)
+        live.is_page_loaded.return_value = True
+        page = make_page(project, create_user)
+        response = session_client.patch(detail(project, page), {"name": "x"}, format="json")
+        assert response.status_code == 409
+        assert response.data == OPEN_MSG
+        assert response.get("Retry-After") == "60"
+
 
 @pytest.mark.contract
 class TestPatchWithBinary:

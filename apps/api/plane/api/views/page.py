@@ -62,12 +62,16 @@ def _max_html_bytes():
 
 def _get_retry_after_seconds():
     """Get the Retry-After header value in seconds (PAGES_API_RETRY_AFTER_SECONDS), read per call.
-    Defaults to 60 seconds."""
+    Defaults to 60 seconds, minimum 1, maximum 3600."""
     try:
         value = int(os.environ.get("PAGES_API_RETRY_AFTER_SECONDS", ""))
     except ValueError:
         return 60
-    return value if value > 0 else 60
+    if value < 1:
+        return 60
+    if value > 3600:
+        return 3600
+    return value
 
 
 def _has_binary(page):
