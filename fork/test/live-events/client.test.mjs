@@ -537,3 +537,164 @@ test("client: a hub resync frame right after the reopen resync is not a second r
   FakeWS.all[1].fire("message", { data: JSON.stringify({ type: "resync" }) });
   assert.deepEqual(got, ["resync", "resync"], "a later hub resync still refetches");
 });
+
+test("client: visible, close with rate-limited: visibility reconnects immediately before timer fires (proves feature works)", (t) => {
+  const { doc } = env(t);
+  t.mock.method(Math, "random", () => 1); // max backoff
+  const client = new C.LiveEventsClient();
+  const got = [];
+  client.subscribe("w", "p", (e) => got.push(e.type));
+  const ws1 = FakeWS.all[0];
+  ws1.open();
+  got.length = 0;
+  // close with rate-limited (4429) to get 30 second backoff: this proves the immediate reconnect actually skips waiting
+  ws1.fire("close", { code: 4429 });
+  assert.equal(FakeWS.all.length, 1, "no reconnect yet, max backoff timer scheduled");
+  // hide then become visible: visibility change reconnects immediately, NOT after 30 second backoff
+  doc.visibilityState = "hidden";
+  doc.m.get("visibilitychange")();
+  doc.visibilityState = "visible";
+  doc.m.get("visibilitychange")();
+  assert.equal(FakeWS.all.length, 2, "visible triggered immediate reconnect without waiting 30 s");
+  // tick time to prove the OLD timer never fires (it was cancelled)
+  t.mock.timers.tick(30_000);
+  assert.equal(FakeWS.all.length, 2, "old backoff timer was cancelled and did not fire");
+  // open the new socket and verify resync (gap > 5s)
+  t.mock.timers.tick(6000); // gap now > 5s
+  FakeWS.all[1].open();
+  assert.deepEqual(got, ["resync"], "exactly one resync after gap");
+});
+
+test("client: visible reconnect cancels the old timer: a stale timer must not bypass the backoff of a failed new socket", (t) => {
+  const { doc } = env(t);
+  t.mock.method(Math, "random", () => 1);
+  const client = new C.LiveEventsClient();
+  client.subscribe("w", "p", () => {});
+  FakeWS.all[0].open();
+  // 4429: forced max backoff, the original timer T1 is due 30 s after the close
+  FakeWS.all[0].fire("close", { code: 4429 });
+  t.mock.timers.tick(1000);
+  doc.visibilityState = "hidden";
+  doc.m.get("visibilitychange")();
+  doc.visibilityState = "visible";
+  doc.m.get("visibilitychange")();
+  assert.equal(FakeWS.all.length, 2, "visibility connected at once");
+  // the new socket fails right away (never opened): its own backoff timer T2 is due 30 s from now (31 s)
+  FakeWS.all[1].fire("close", { code: 1006 });
+  // tick past the ORIGINAL deadline (30 s) but short of T2 (31 s)
+  t.mock.timers.tick(29_500);
+  assert.equal(FakeWS.all.length, 2, "the cancelled original timer did not fire early and skip the new backoff");
+  t.mock.timers.tick(1000);
+  assert.equal(FakeWS.all.length, 3, "the new backoff timer fires on schedule: exactly one more socket");
+  t.mock.timers.tick(100);
+  assert.equal(FakeWS.all.length, 3, "no further sockets");
+});
+
+test("client: hidden tab becomes visible after socket closed: reconnect immediately", (t) => {
+  const { doc } = env(t);
+  t.mock.method(Math, "random", () => 0);
+  const client = new C.LiveEventsClient();
+  const got = [];
+  client.subscribe("w", "p", (e) => got.push(e.type));
+  const ws1 = FakeWS.all[0];
+  ws1.open();
+  got.length = 0;
+  // hide the tab for long enough to close the socket
+  doc.visibilityState = "hidden";
+  doc.m.get("visibilitychange")();
+  t.mock.timers.tick(C.HIDDEN_CLOSE_MS);
+  assert.equal(ws1.closed, true, "socket closed after hidden timeout");
+  assert.equal(FakeWS.all.length, 1, "no reconnect yet, waiting for backoff");
+  // become visible: should cancel backoff and reconnect immediately
+  doc.visibilityState = "visible";
+  doc.m.get("visibilitychange")();
+  assert.equal(FakeWS.all.length, 2, "reconnected immediately on visibility change");
+  FakeWS.all[1].open();
+  // the gap was long enough that resync fires
+  assert.deepEqual(got, ["resync"], "exactly one resync after the gap");
+});
+
+test("client: open socket: visibility change flushes hidden buffer but does not create new socket", (t) => {
+  const { doc } = env(t);
+  const client = new C.LiveEventsClient();
+  const got = [];
+  client.subscribe("w", "p", (e) => got.push(e));
+  const ws1 = FakeWS.all[0];
+  ws1.open();
+  // hide the tab
+  doc.visibilityState = "hidden";
+  doc.m.get("visibilitychange")();
+  // send event while hidden (should be buffered)
+  ws1.msg(EV);
+  assert.equal(got.length, 0, "event buffered while hidden");
+  // become visible
+  doc.visibilityState = "visible";
+  doc.m.get("visibilitychange")();
+  // buffer should be flushed but no new socket created
+  assert.equal(FakeWS.all.length, 1, "no new socket when visible with open socket");
+  assert.equal(got.length, 1, "buffered event flushed");
+  assert.equal(got[0].type, "events", "flushed correct event type");
+});
+
+test("client: a tab becoming visible is activity: it lifts a 4401 pause and reconnects", (t) => {
+  const { doc } = env(t);
+  const client = new C.LiveEventsClient();
+  client.subscribe("w", "p", () => {});
+  const ws1 = FakeWS.all[0];
+  ws1.open();
+  ws1.fire("close", { code: 4401 });
+  assert.equal(FakeWS.all.length, 1, "no reconnect scheduled on pause");
+  doc.visibilityState = "hidden";
+  doc.m.get("visibilitychange")();
+  assert.equal(FakeWS.all.length, 1, "still paused while hidden");
+  doc.visibilityState = "visible";
+  doc.m.get("visibilitychange")();
+  assert.equal(FakeWS.all.length, 2, "visibility lifted the pause and connected");
+  doc.m.get("visibilitychange")();
+  assert.equal(FakeWS.all.length, 2, "a second visible event with a socket does not connect again");
+});
+
+test("client: when stopped, visibility change does not attempt onActivity (no reconnect)", (t) => {
+  const { doc, win } = env(t);
+  for (const code of [4400, 4403, 4404, 4413]) {
+    FakeWS.all = [];
+    const client = new C.LiveEventsClient();
+    const original = console.error;
+    console.error = () => {};
+    client.subscribe("w", "p", () => {});
+    const ws1 = FakeWS.all[0];
+    ws1.open();
+    // close with stop code
+    ws1.fire("close", { code });
+    const countAfterStop = FakeWS.all.length;
+    assert.equal(countAfterStop, 1, `no reconnect scheduled on stop code ${code}`);
+    // try visibility change while stopped
+    doc.visibilityState = "hidden";
+    doc.m.get("visibilitychange")();
+    doc.visibilityState = "visible";
+    doc.m.get("visibilitychange")();
+    // visibility change should not attempt to reconnect when stopped
+    assert.equal(FakeWS.all.length, countAfterStop, `visibility does not reconnect when stopped (${code})`);
+    // verify focus also cannot lift the stop state
+    win.m.get("focus")();
+    assert.equal(FakeWS.all.length, countAfterStop, `focus cannot lift stopped state (${code})`);
+    console.error = original;
+  }
+});
+
+test("client: visibility change does nothing after unsubscribe (dispose)", (t) => {
+  const { doc } = env(t);
+  t.mock.method(Math, "random", () => 0);
+  const client = new C.LiveEventsClient();
+  const unsub = client.subscribe("w", "p", () => {});
+  const ws1 = FakeWS.all[0];
+  ws1.open();
+  // close the socket: backoff timer is scheduled
+  ws1.fire("close", { code: 1006 });
+  // unsubscribe (dispose) - this detaches global listeners
+  unsub();
+  // the listener should be removed on dispose
+  assert.strictEqual(doc.m.get("visibilitychange"), undefined, "visibility listener removed on dispose");
+  // verify no socket is created after unsubscribe
+  assert.equal(FakeWS.all.length, 1, "no reconnect after unsubscribe");
+});
