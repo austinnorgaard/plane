@@ -113,12 +113,13 @@ export const flushPromises = async () => {
 export const makeHub = (
   env: Record<string, string> = {},
   state: AuthState = defaultState(),
-  log?: { warn: (message: string) => unknown }
+  log?: { warn: (message: string) => unknown },
+  random?: () => number
 ) => {
   const config = parseEventsConfig({ LIVE_EVENTS_ENABLED: "1", WEB_URL: WEB, ...env });
   const sub = new FakeSubscriber();
   const auth = fakeAuth(state);
-  const hub = new EventsHub({ config, auth, createSubscriber: () => sub, log });
+  const hub = new EventsHub({ config, auth, createSubscriber: () => sub, log, random });
   return { hub, sub, auth, config };
 };
 
