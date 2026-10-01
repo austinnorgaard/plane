@@ -98,7 +98,20 @@ C_DB=plane-cloudtest-db C_REDIS=plane-cloudtest-redis C_MQ=plane-cloudtest-mq
 [ -d "$SRC/apps/api/plane" ] || { echo "no apps/api under PLANE_SRC=$SRC" >&2; exit 2; }
 mkdir -p "$OUT_DIR"
 
-is_loopback() { case "$1" in 127.*|localhost|::1) return 0 ;; *) return 1 ;; esac; }
+is_loopback() {
+  case "$1" in
+    localhost|::1) return 0 ;;
+    127.*)
+      # Match exactly 127.N.N.N with numeric octets, not 127.anything
+      if [[ "$1" =~ ^127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        return 0
+      else
+        return 1
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+}
 
 log() { echo "[cloud-api-tests $(date +%H:%M:%S)] $*"; }
 die() { log "ERROR: $*"; exit 2; }
@@ -114,9 +127,11 @@ guard_config() {
   if [ "$SERVICES" = apt ]; then
     for v in DB_USER DB_PASS DB_NAME MQ_USER MQ_PASS MQ_VHOST; do
       case "${!v}" in
-        ''|*[!A-Za-z0-9_.@-]*) die "$v must be non-empty and use only letters, digits and _ . @ - in apt mode" ;;
+        ''|*[!A-Za-z0-9_.-]*) die "$v must be non-empty and use only letters, digits and _ . - in apt mode (no @)" ;;
       esac
     done
+    # DB_NAME must be letters, digits and _ only
+    [[ "$DB_NAME" =~ [^A-Za-z0-9_] ]] && die "DB_NAME contains characters other than letters, digits and _"
   fi
 }
 guard_config
@@ -301,6 +316,7 @@ setup_venv() {
 # Test seam (used by cloud-tests.selftest.sh): skip service start and the venv/pip step and use the
 # venv given in PLANE_VENV as is.
 if [ "${PLANE_TEST_SKIP_SETUP:-0}" = 1 ]; then
+  log "PLANE_TEST_SKIP_SETUP=1: skipping service start and venv setup"
   [ -x "$VENV/bin/python" ] || die "PLANE_TEST_SKIP_SETUP=1 needs an existing venv in PLANE_VENV"
 else
   start_services

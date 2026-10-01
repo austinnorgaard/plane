@@ -28,6 +28,10 @@
 # Each step prints "CLOUDNODE step=<name> rc=<code> wall_s=<n> <result>". After the last step a
 # table of those lines is repeated. The exit code is 0 only if every step passed; otherwise it
 # is the first non-zero step code. Unknown step: exit 2.
+#
+# live-test, live-types and web-types need the built outputs of the workspace packages their app
+# depends on. If one is missing the step is not run: it prints "workspace libraries are not built;
+# run: cloud-node-tests.sh install build-libs" and the exit code is 2 (not 1, which means a test failed).
 set -uo pipefail
 
 SELF_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -73,6 +77,37 @@ result_of() {
   esac
 }
 
+# Built entry points that the workspace dependencies of an app must have (apps/<app>/package.json).
+# For each "@plane/<x>": "workspace:*" dependency (config-only *-config packages are skipped) the
+# package's main file, or else its first ./dist export, must exist, and so must a "./lib" export target.
+missing_libs() { # app -> prints one "<package dir>: <missing file>" line per missing output
+  local app=$1 dep dir rel
+  [ -f "apps/$app/package.json" ] || return 0
+  while IFS= read -r dep; do
+    dir="packages/${dep#@plane/}"
+    [ -f "$dir/package.json" ] || continue
+    rel=$(sed -n 's/^ *"main": *"\([^"]*\)".*/\1/p' "$dir/package.json" | head -1)
+    [ -n "$rel" ] || rel=$(grep -o '"\./dist/[^"]*"' "$dir/package.json" | head -1 | tr -d '"')
+    [ -z "$rel" ] || [ -e "$dir/$rel" ] || echo "$dir: $rel"
+    rel=$(sed -n 's/^ *"\.\/lib": *"\([^"]*\)".*/\1/p' "$dir/package.json" | head -1)
+    [ -z "$rel" ] || [ -e "$dir/$rel" ] || echo "$dir: $rel"
+  done < <(sed -n 's/^ *"\(@plane\/[a-z0-9-]*\)": *"workspace:.*/\1/p' "apps/$app/package.json" | grep -v -- '-config$')
+}
+
+# Refuse to run a step whose workspace libraries are not built (exit code 2, a setup problem).
+need_libs() { # step app
+  local miss
+  miss=$(missing_libs "$2")
+  [ -z "$miss" ] && return 0
+  {
+    echo "workspace libraries are not built; run: cloud-node-tests.sh install build-libs"
+    echo "missing build outputs:"
+    while IFS= read -r line; do echo "  $line"; done <<<"$miss"
+  } >&2
+  SUMMARY+=("CLOUDNODE step=$1 rc=2 wall_s=0 workspace libraries are not built")
+  return 2
+}
+
 run_step() { # name cmd...
   local name=$1 start rc log res
   shift
@@ -91,9 +126,9 @@ step() {
   case "$1" in
     install)     run_step install    pnpm install --frozen-lockfile ;;
     build-libs)  run_step build-libs pnpm turbo run build --filter='live^...' --filter='web^...' ;;
-    live-test)   run_step live-test  pnpm --filter live test ;;
-    live-types)  run_step live-types pnpm --filter live check:types ;;
-    web-types)   run_step web-types  pnpm --filter web check:types ;;
+    live-test)   need_libs live-test live && run_step live-test  pnpm --filter live test ;;
+    live-types)  need_libs live-types live && run_step live-types pnpm --filter live check:types ;;
+    web-types)   need_libs web-types web && run_step web-types  pnpm --filter web check:types ;;
     web-lint)    run_step web-lint   pnpm --filter web check:lint ;;
     live-events) run_step live-events sh fork/test/live-events/run.sh ;;
     sh)          run_step adhoc      bash -c "${2:?usage: cloud-node-tests.sh sh 'command'}" ;;

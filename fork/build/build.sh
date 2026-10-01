@@ -23,14 +23,16 @@
 #              /etc/ssl/certs/ca-certificates.crt and runs with
 #              NODE_EXTRA_CA_CERTS and SSL_CERT_FILE pointing at it (set in
 #              the RUN's own shell, no ENV), and the build gets
-#              --secret id=build_ca,src=FILE. The CA exists only while those
-#              RUN steps execute and is not written to any layer.
+#              --secret id=build_ca,src=FILE. The file must be a full CA bundle
+#              (system roots plus the proxy CA), because it replaces the store
+#              during the build step. The CA exists only while those RUN steps
+#              execute and is not written to any layer.
 #   --build-proxy
 #              for hosts whose build containers can only reach the network
 #              through a proxy on the host's loopback: build web and live with
-#              --network host and pass HTTPS_PROXY/NO_PROXY (and lowercase) (from this shell's
-#              environment) as build args. Those are predefined proxy args, so
-#              they are not stored in the image config.
+#              --network host and pass HTTPS_PROXY/NO_PROXY (and lowercase
+#              variants from this shell's environment) as build args. Those are
+#              predefined proxy args, so they are not stored in the image config.
 #   --dry-run  print the commands instead of running them (nothing is executed,
 #              no fetch, no README change).
 #
@@ -177,7 +179,7 @@ fi
 patch_dockerfile() { # patch_dockerfile FILE (a path in the build tree)
   local f="$1" ca=/etc/ssl/certs/ca-certificates.crt
   # Shell-form, single-line RUN only; anything else cannot be prefixed safely.
-  if grep -Eq '^RUN (\[|.*\\$)' "$f" || grep -Eq '^RUN .*<<' "$f"; then
+  if grep -Eq '^RUN( --[^ ]+)* \[' "$f" || grep -Eq '^RUN .*\\$' "$f" || grep -Eq '^RUN .*<<' "$f"; then
     echo "ERROR: $f has an exec-form, multi-line or heredoc RUN; cannot patch" >&2
     return 1
   fi
