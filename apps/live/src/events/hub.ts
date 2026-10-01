@@ -30,6 +30,8 @@ export const CLOSE_DEADLINE = 4408;
 export const CLOSE_TOO_LARGE = 4413;
 export const CLOSE_LIMIT = 4429;
 export const CLOSE_UNAVAILABLE = 1013;
+/** Grants could not be revalidated for too many consecutive cycles. */
+export const CLOSE_REVALIDATION = CLOSE_UNAVAILABLE;
 
 const OPEN = 1;
 
@@ -56,6 +58,8 @@ export type HubDeps = {
   auth: EventsAuthApi;
   createSubscriber: () => SubscriberLike | null;
   log?: WarnLog;
+  /** Random source in [0, 1) for the revalidation jitter; injectable for tests. */
+  random?: () => number;
 };
 
 export type WarnLog = { warn: (message: string) => unknown };
@@ -133,6 +137,8 @@ type Client = {
   inboundStart: number;
   inboundCount: number;
   deadline: ReturnType<typeof setTimeout> | null;
+  revalTimer: ReturnType<typeof setTimeout> | null;
+  revalFailures: number;
   closed: boolean;
 };
 
@@ -172,8 +178,7 @@ export class EventsHub {
   private subscriber: SubscriberLike | null = null;
   private seenReady = false;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
-  private revalidateTimer: ReturnType<typeof setInterval> | null = null;
-  private revalidating = false;
+  private readonly random: () => number;
   private stopped = false;
   invalidDropped = 0;
   private readonly log: WarnLog;
@@ -184,6 +189,7 @@ export class EventsHub {
     this.config = deps.config;
     this.auth = deps.auth;
     this.createSubscriber = deps.createSubscriber;
+    this.random = deps.random ?? Math.random;
     this.log = deps.log ?? logger;
     this.allowlist = buildAllowlist([...deps.config.allowedOrigins, deps.config.webUrl]);
     const trusted = buildTrustedProxies(deps.config.trustedProxies);
@@ -216,16 +222,13 @@ export class EventsHub {
       logger.error("LIVE_EVENTS: subscriber error", error instanceof Error ? error.message : "unknown");
     });
     this.pingTimer = setInterval(() => this.heartbeat(), this.config.pingIntervalMs);
-    this.revalidateTimer = setInterval(() => void this.revalidateAll(), this.config.revalidateMs);
     this.pingTimer.unref?.();
-    this.revalidateTimer.unref?.();
     await sub.psubscribe(EVENTS_CHANNEL_PATTERN);
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
     if (this.pingTimer) clearInterval(this.pingTimer);
-    if (this.revalidateTimer) clearInterval(this.revalidateTimer);
     this.settleTimers.forEach((t) => clearTimeout(t));
     this.settleTimers.clear();
     this.settleState.clear();
@@ -301,6 +304,8 @@ export class EventsHub {
       inboundStart: Date.now(),
       inboundCount: 0,
       deadline: null,
+      revalTimer: null,
+      revalFailures: 0,
       closed: false,
     };
     this.clients.add(client);
@@ -333,6 +338,7 @@ export class EventsHub {
           return false;
         }
         this.markAuthenticated(client);
+        this.scheduleRevalidation(client);
         return true;
       })
       .catch((error) => {
@@ -479,10 +485,11 @@ export class EventsHub {
     client.closed = true;
     if (client.deadline) clearTimeout(client.deadline);
     if (client.authTimer) clearTimeout(client.authTimer);
+    if (client.revalTimer) clearTimeout(client.revalTimer);
     if (client.pending) {
       this.pendingCount--;
-      client.abort.abort(); // stop an unfinished session lookup
     }
+    client.abort.abort(); // stop an unfinished session lookup or revalidation call
     client.pending = false;
     if (client.address) {
       const left = (this.perAddress.get(client.address) ?? 1) - 1;
@@ -549,44 +556,73 @@ export class EventsHub {
 
   // ------------------------------------------------------------ revalidation
 
-  async revalidateAll(): Promise<void> {
-    if (this.revalidating) return;
-    this.revalidating = true;
-    try {
-      const all = [...this.clients];
-      for (let i = 0; i < all.length; i += 10) {
-        // oxlint-disable-next-line no-await-in-loop
-        await Promise.all(all.slice(i, i + 10).map((c) => this.revalidate(c).catch(() => undefined)));
-      }
-    } finally {
-      this.revalidating = false;
-    }
+  /** Next revalidation delay: the configured interval, spread by +/- revalidateJitter. */
+  nextRevalidateDelay(): number {
+    const { revalidateMs, revalidateJitter } = this.config;
+    return Math.round(revalidateMs * (1 + (this.random() * 2 - 1) * revalidateJitter));
   }
 
-  private async revalidate(client: Client) {
-    if (client.closed || !client.userId) return;
+  // Each socket revalidates on its own jittered timer so the upstream calls are spread out.
+  private scheduleRevalidation(client: Client) {
+    if (client.closed || this.stopped) return;
+    client.revalTimer = setTimeout(() => {
+      client.revalTimer = null;
+      void this.runRevalidation(client);
+    }, this.nextRevalidateDelay());
+    client.revalTimer.unref?.();
+  }
+
+  private async runRevalidation(client: Client) {
+    let outcome: "ok" | "transient";
     try {
-      const user = await this.auth.currentUser(client.cookie);
-      if (user.id !== client.userId) return this.close(client, CLOSE_AUTH, "session changed");
-    } catch (error) {
-      // a transient failure keeps the socket; the next cycle retries
-      if (isSessionGone(error)) this.close(client, CLOSE_AUTH, "session ended");
+      outcome = await this.revalidate(client);
+    } catch {
+      outcome = "transient";
+    }
+    if (client.closed) return;
+    if (outcome === "ok") {
+      client.revalFailures = 0;
+    } else if (++client.revalFailures >= this.config.revalidateMaxFailures) {
+      this.close(client, CLOSE_REVALIDATION, "revalidation unavailable");
       return;
     }
+    this.scheduleRevalidation(client);
+  }
+
+  private async revalidate(client: Client): Promise<"ok" | "transient"> {
+    if (client.closed || !client.userId) return "ok";
+    try {
+      const user = await this.auth.currentUser(client.cookie, client.abort.signal);
+      if (user.id !== client.userId) {
+        this.close(client, CLOSE_AUTH, "session changed");
+        return "ok";
+      }
+    } catch (error) {
+      // a transient failure is counted by the caller; the socket closes after repeated ones
+      if (isSessionGone(error)) this.close(client, CLOSE_AUTH, "session ended");
+      return isSessionGone(error) ? "ok" : "transient";
+    }
+    let outcome: "ok" | "transient" = "ok";
     const slugs = new Set([...client.projects.values(), ...client.retry.values()]);
     for (const slug of slugs) {
-      if (client.closed) return;
+      if (client.closed) return "ok";
       let roles: Record<string, number>;
       try {
         // oxlint-disable-next-line no-await-in-loop
         roles = await this.auth.projectRoles(client.cookie, slug);
       } catch (error) {
         const failure = classifyRolesError(error);
-        if (failure === "session") return this.close(client, CLOSE_AUTH, "session ended");
-        if (failure === "transient") continue;
+        if (failure === "session") {
+          this.close(client, CLOSE_AUTH, "session ended");
+          return "ok";
+        }
+        if (failure === "transient") {
+          outcome = "transient";
+          continue;
+        }
         roles = {}; // no access to this workspace
       }
-      if (client.closed) return;
+      if (client.closed) return "ok";
       const mine = [...client.projects].filter(([, s]) => s === slug).map(([id]) => id);
       const { denied } = partitionProjects(mine, roles);
       if (denied.length > 0) {
@@ -602,6 +638,7 @@ export class EventsHub {
         this.send(client, { type: "subscribed", project_ids: result.granted, denied: result.denied });
       }
     }
+    return outcome;
   }
 
   // ------------------------------------------------------------------ redis

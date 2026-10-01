@@ -33,6 +33,8 @@ const eventsEnvSchema = z.object({
   LIVE_EVENTS_AUTH_TIMEOUT_MS: intFrom(8000),
   LIVE_EVENTS_AUTH_FAIL_CACHE_MS: intFrom(30_000, 0),
   LIVE_EVENTS_TRUSTED_PROXIES: z.string().default(""),
+  LIVE_EVENTS_REVALIDATE_MS: intFrom(60_000, 1000),
+  LIVE_EVENTS_REVALIDATE_MAX_FAILURES: intFrom(3),
 });
 
 // The upstream session lookup is aborted after this long (APIService). The hub's own auth
@@ -62,6 +64,8 @@ export type EventsConfig = {
   pingIntervalMs: number;
   maxMissedPongs: number;
   revalidateMs: number;
+  revalidateJitter: number;
+  revalidateMaxFailures: number;
 };
 
 export const EVENTS_CHANNEL_PREFIX = "plane:live-events:";
@@ -93,6 +97,8 @@ export const parseEventsConfig = (source: Record<string, string | undefined> = p
     firstMessageMs: 10_000,
     pingIntervalMs: 25_000,
     maxMissedPongs: 2,
-    revalidateMs: 5 * 60_000,
+    revalidateMs: parsed.LIVE_EVENTS_REVALIDATE_MS,
+    revalidateJitter: 0.2,
+    revalidateMaxFailures: parsed.LIVE_EVENTS_REVALIDATE_MAX_FAILURES,
   };
 };

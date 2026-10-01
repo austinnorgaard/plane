@@ -46,6 +46,9 @@ const started = async (env: Record<string, string> = {}, state = defaultState(),
   return ctx;
 };
 
+// The default revalidation interval is 60 s with up to +20% jitter.
+const REVALIDATE_MAX_MS = 72_000;
+
 // Advance time in 25 s steps, answering pings so the heartbeat keeps the sockets alive.
 const advanceAlive = async (sockets: FakeSocket[], ms: number) => {
   for (let t = 0; t < ms; t += 25_000) {
@@ -62,6 +65,8 @@ describe("config and flag", () => {
     expect(c.settleMs).toBe(2000);
     expect(c.projectRatePerSec).toBe(50);
     expect(c.maxSockets).toBe(500);
+    expect(c.revalidateMs).toBe(60_000);
+    expect(c.revalidateMaxFailures).toBe(3);
   });
 
   it("flag off: 4404 and no subscriber is created", async () => {
@@ -200,7 +205,7 @@ describe("membership", () => {
     const ws = await connect(hub);
     await subscribe(ws, "acme", [P1, P2]);
     state.rolesError = { acme: 403 };
-    await advanceAlive([ws], 5 * 60_000);
+    await advanceAlive([ws], REVALIDATE_MAX_MS);
     expect(ws.closeCode).toBeNull();
     expect(ws.of("revoked")[0].project_ids.toSorted()).toEqual([P1, P2].toSorted());
   });
@@ -211,7 +216,7 @@ describe("membership", () => {
     const ws = await connect(hub);
     await subscribe(ws, "acme", [P1]);
     state.rolesError = { acme: 401 };
-    await advanceAlive([ws], 5 * 60_000);
+    await advanceAlive([ws], REVALIDATE_MAX_MS);
     expect(ws.closeCode).toBe(4401);
   });
 
@@ -226,7 +231,7 @@ describe("membership", () => {
     vi.advanceTimersByTime(300);
     expect(ws.of("events")).toEqual([]);
     delete state.rolesError;
-    await advanceAlive([ws], 5 * 60_000);
+    await advanceAlive([ws], REVALIDATE_MAX_MS);
     expect(ws.of("subscribed")[1]).toEqual({ type: "subscribed", project_ids: [P1, P2], denied: [] });
     sub.publish(P1, evt(P1, [I1]));
     vi.advanceTimersByTime(300);
@@ -240,7 +245,7 @@ describe("membership", () => {
     const ws = await connect(hub);
     await subscribe(ws, "acme", [P1, P3]);
     delete state.rolesError;
-    await advanceAlive([ws], 5 * 60_000);
+    await advanceAlive([ws], REVALIDATE_MAX_MS);
     expect(ws.of("subscribed")[1]).toEqual({ type: "subscribed", project_ids: [P1], denied: [P3] });
   });
 
@@ -250,7 +255,7 @@ describe("membership", () => {
     const { hub } = await started({}, state);
     const ws = await connect(hub);
     await subscribe(ws, "acme", [P1]);
-    await advanceAlive([ws], 5 * 60_000);
+    await advanceAlive([ws], REVALIDATE_MAX_MS);
     expect(ws.of("subscribed")).toHaveLength(1);
     delete state.rolesError;
     await subscribe(ws, "acme", [P1]);
@@ -264,13 +269,13 @@ describe("membership", () => {
     const ws = await connect(hub);
     await subscribe(ws, "acme", [P1, P2, P3]); // P3 is not an ALICE project in acme
     // still failing at the retry: everything stays pending and nothing is delivered
-    await advanceAlive([ws], 5 * 60_000);
+    await advanceAlive([ws], REVALIDATE_MAX_MS);
     for (const p of [P1, P2, P3]) sub.publish(p, evt(p, [I1]));
     vi.advanceTimersByTime(300);
     expect(ws.of("events")).toEqual([]);
     // the retry succeeds: P1 and P2 are granted, P3 is denied
     delete state.rolesError;
-    await advanceAlive([ws], 5 * 60_000);
+    await advanceAlive([ws], REVALIDATE_MAX_MS);
     expect(ws.of("subscribed").at(-1)).toEqual({ type: "subscribed", project_ids: [P1, P2], denied: [P3] });
     for (const p of [P1, P2, P3]) sub.publish(p, evt(p, [I1]));
     vi.advanceTimersByTime(300);
@@ -291,7 +296,7 @@ describe("membership", () => {
     ws.say({ type: "unsubscribe", project_ids: [P1] });
     await flushPromises();
     delete state.rolesError;
-    await advanceAlive([ws], 5 * 60_000);
+    await advanceAlive([ws], REVALIDATE_MAX_MS);
     expect(ws.of("subscribed")).toHaveLength(1);
   });
 
@@ -322,13 +327,13 @@ describe("membership", () => {
     await subscribe(ws, "acme", [P1, P2]);
     delete state.roles.acme[ALICE][P2];
     state.roles.acme[ALICE][P1] = 5; // demoted to guest
-    await advanceAlive([ws], 5 * 60_000);
+    await advanceAlive([ws], REVALIDATE_MAX_MS);
     expect(ws.of("revoked")[0].project_ids.toSorted()).toEqual([P1, P2].toSorted());
     sub.publish(P1, evt(P1, [I1]));
     vi.advanceTimersByTime(300);
     expect(ws.of("events")).toEqual([]);
     delete auth.state.users[ALICE];
-    await advanceAlive([ws], 5 * 60_000);
+    await advanceAlive([ws], REVALIDATE_MAX_MS);
     expect(ws.closeCode).toBe(4401);
   });
 
@@ -338,7 +343,7 @@ describe("membership", () => {
     const ws = await connect(hub);
     await subscribe(ws, "acme", [P1]);
     state.users[ALICE] = { status: 502 } as any;
-    await advanceAlive([ws], 5 * 60_000);
+    await advanceAlive([ws], REVALIDATE_MAX_MS);
     expect(ws.closeCode).toBeNull();
   });
 });
