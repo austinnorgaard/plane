@@ -15,7 +15,8 @@ from unittest import mock
 import pytest
 from rest_framework import status
 
-from plane.db.models import Issue, Module, Project, ProjectMember, State
+from plane.bgtasks import issue_activities_task as task
+from plane.db.models import Issue, IssueActivity, Module, Project, ProjectMember, State
 from plane.utils.live_events import extract_issue_ids
 
 
@@ -197,3 +198,83 @@ class TestSubIssueReparentPublishes:
             for c in activity.delay.call_args_list
         }
         assert seen == {str(sub_a.id): str(old_a.id), str(sub_b.id): str(old_b.id)}
+
+
+def run_real_task(kwargs):
+    """Run the real issue_activity task body (no mock of the handlers) with only the publish and notifications mocked."""
+    with (
+        mock.patch.object(task, "publish_work_item_event") as publish,
+        mock.patch.object(task, "notifications"),
+    ):
+        task.issue_activity(**kwargs)
+    return publish
+
+
+@pytest.mark.contract
+class TestSubIssueAssignRealTask:
+    def _post(self, session_client, workspace, project, new_parent, sub_ids):
+        url = f"/api/workspaces/{workspace.slug}/projects/{project.id}/issues/{new_parent.id}/sub-issues/"
+        with mock.patch("plane.app.views.issue.sub_issue.issue_activity") as activity:
+            response = session_client.post(url, {"sub_issue_ids": sub_ids}, format="json")
+        assert response.status_code == status.HTTP_200_OK
+        return activity
+
+    def test_reassign_to_same_parent_publishes_parent_once_and_writes_no_parent_row(
+        self, session_client, workspace, project, make_issues
+    ):
+        parent, sub = make_issues(2)
+        Issue.objects.filter(pk=sub.pk).update(parent=parent)
+        activity = self._post(session_client, workspace, project, parent, [str(sub.id)])
+        kwargs = activity.delay.call_args.kwargs
+        assert json.loads(kwargs["current_instance"]) == {"parent": str(parent.id)}
+        publish = run_real_task(kwargs)
+        publish.assert_called_once()
+        assert sorted(publish.call_args.args[1]) == sorted([str(sub.id), str(parent.id)])
+        assert IssueActivity.objects.filter(issue=sub, field="parent").count() == 0
+
+    def test_real_task_stores_parent_activity_with_old_and_new_values(
+        self, session_client, workspace, project, make_issues
+    ):
+        old, new, sub = make_issues(3)
+        Issue.objects.filter(pk=sub.pk).update(parent=old)
+        activity = self._post(session_client, workspace, project, new, [str(sub.id)])
+        publish = run_real_task(activity.delay.call_args.kwargs)
+        row = IssueActivity.objects.get(issue=sub, field="parent")
+        assert row.verb == "updated"
+        assert row.old_value == f"{project.identifier}-{old.sequence_id}"
+        assert row.new_value == f"{project.identifier}-{new.sequence_id}"
+        assert row.old_identifier == old.id
+        assert row.new_identifier == new.id
+        assert sorted(publish.call_args.args[1]) == sorted([str(sub.id), str(old.id), str(new.id)])
+
+
+@pytest.mark.contract
+class TestSubIssueDeletePublishesParent:
+    def _delete(self, session_client, workspace, project, issue):
+        url = f"/api/workspaces/{workspace.slug}/projects/{project.id}/issues/{issue.id}/"
+        with mock.patch("plane.app.views.issue.base.issue_activity") as activity:
+            response = session_client.delete(url)
+        assert response.status_code == status.HTTP_204_NO_CONTENT
+        return activity
+
+    def test_sub_issue_delete_passes_parent_and_publishes_it(self, session_client, workspace, project, make_issues):
+        parent, sub = make_issues(2)
+        Issue.objects.filter(pk=sub.pk).update(parent=parent)
+        activity = self._delete(session_client, workspace, project, sub)
+        kwargs = activity.delay.call_args.kwargs
+        assert kwargs["current_instance"] == {"parent": str(parent.id)}
+        assert json.loads(kwargs["requested_data"]) == {"issue_id": str(sub.id)}
+        publish = run_real_task(kwargs)
+        assert (publish.call_args.args[2], publish.call_args.args[3]) == ("issue", "deleted")
+        assert sorted(publish.call_args.args[1]) == sorted([str(sub.id), str(parent.id)])
+        # The feed text for a delete is unchanged and no parent row is written
+        rows = IssueActivity.objects.filter(issue_id=sub.id)
+        assert [(r.verb, r.field, r.comment) for r in rows] == [("deleted", "issue", "deleted the issue")]
+
+    def test_top_level_issue_delete_still_sends_empty_instance(self, session_client, workspace, project, make_issues):
+        (issue,) = make_issues(1)
+        activity = self._delete(session_client, workspace, project, issue)
+        kwargs = activity.delay.call_args.kwargs
+        assert kwargs["current_instance"] == {}
+        publish = run_real_task(kwargs)
+        assert publish.call_args.args[1] == [str(issue.id)]

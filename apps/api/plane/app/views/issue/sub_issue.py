@@ -258,7 +258,7 @@ class SubIssuesEndpoint(BaseAPIView):
                 actor_id=str(request.user.id),
                 issue_id=sub_issue_id,
                 project_id=str(project_id),
-                current_instance=json.dumps({"parent": old_parent_ids.get(str(sub_issue_id))}),
+                current_instance=json.dumps({"parent": old_parent_ids.get(sub_issue_id)}),
                 epoch=int(timezone.now().timestamp()),
                 notification=True,
                 origin=base_host(request=request, is_app=True),

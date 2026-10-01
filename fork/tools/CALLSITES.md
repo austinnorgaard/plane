@@ -10,7 +10,7 @@ Upkeep on each upstream rebase:
     python3 fork/tools/callsites.py --check fork/tools/callsites.v1.4.2.txt --ignore-lines
 
 `--ignore-lines` tolerates line shifts in files the fork patches; without it the check is exact.
-The snapshot keeps upstream line numbers; one row (sub_issue.py, PLN-28) was edited by hand to the fork's `current_instance` text.
+The snapshot keeps upstream line numbers; two rows (sub_issue.py PLN-28, issue/base.py destroy PLN-29) were edited by hand to the fork's `current_instance` text.
 Any diff means a call site was added, removed or changed: give it a row below and a test, then
 regenerate the snapshot (`python3 fork/tools/callsites.py --header "<source ref>" > <snapshot>`).
 Tool tests: `python3 fork/tools/test_callsites.py` (or pytest).
@@ -19,7 +19,7 @@ Extractor sources (`extract_issue_ids` in `apps/api/plane/utils/live_events.py`)
 (a) `issue_id` unless it equals `cycle_id` / `module_id`; (b) `requested_data.issues`;
 (c) `cycles_list`; (d) `modules_list`; (e) `updated_cycle_issues` / `updated_module_issues`;
 (f) `created_cycle_issues` / `created_module_issues`; (g) in-memory IssueActivity `issue_id`s;
-(h) `issue.` types only: `parent` in `requested_data` and `current_instance` (id, UUID object or dict with `id`);
+(h) `issue.` types only: `parent` in `requested_data` and `current_instance` (id, UUID object or dict with `id`; includes the sub-issue delete);
 (i) `issue_relation` types only: `requested_data.related_issue` (relation delete).
 
 Tests live in `apps/api/plane/tests/unit/live_events/`. Abbreviations: `EX` =
@@ -31,10 +31,10 @@ Paths below are relative to `apps/api/plane/`; line numbers are upstream v1.4.2 
 
 | Group | Rows (path:line) | Extractor | Covering test | Status |
 |---|---|---|---|---|
-| Issue create/update/delete, string id | api/views/intake.py:212,404; api/views/issue.py:499,660,720,807,866; app/views/intake/base.py:280,441; app/views/issue/archive.py:264,288; app/views/issue/base.py:421,687,728; app/views/workspace/draft.py:227; space/views/intake.py:161,229 | (a) | EX `test_single_issue_call_sites`; AT `test_published_prefixes[issue.*]`; EX `test_create_with_parent_and_sub_issue_delete_real_shape` | covered; a sub-issue delete does not carry the parent (accepted limit) |
+| Issue create/update/delete, string id | api/views/intake.py:212,404; api/views/issue.py:499,660,720,807,866; app/views/intake/base.py:280,441; app/views/issue/archive.py:264,288; app/views/issue/base.py:421,687,728; app/views/workspace/draft.py:227; space/views/intake.py:161,229 | (a) | EX `test_single_issue_call_sites`; AT `test_published_prefixes[issue.*]`; EX `test_create_with_parent_and_sub_issue_delete_real_shape`; BE `TestSubIssueDeletePublishesParent` (real destroy shape, real task) | covered; a sub-issue delete carries its parent (`current_instance.parent`, PLN-29) |
 | Issue update, UUID object id | app/views/estimate/base.py:210,229; bgtasks/issue_automation_task.py:70,133 | (a) | EX `test_uuid_object_inputs`; AT `test_uuid_object_issue_id_from_automation` | covered |
 | Bulk archive / bulk dates (per-issue call, plus direct fork publish in the view) | app/views/issue/archive.py:328; app/views/issue/base.py:1155,1168 | (a); view publishes its own ids | BE `test_bulk_archive_publishes_after_bulk_update`, `test_bulk_update_dates_publishes_updated_issues` (both mock `issue_activity`, so they cover the view publish, not this call's extraction) | covered (extraction via EX `test_single_issue_call_sites`) |
-| Sub-issue assign | app/views/issue/sub_issue.py:226 | (a) sub-issue id; (h) new parent from `requested_data.parent` and old parent from `current_instance.parent` (the fork view captures the old parent before the update; upstream put the sub-issue id there) | EX `test_sub_issue_assign_publishes_sub_issue_and_parent`, `test_reparent_publishes_sub_issue_old_and_new_parent`, `test_parent_shapes_uuid_object_dict_and_none`, `test_create_with_parent_and_sub_issue_delete_real_shape`, `test_parent_key_ignored_for_non_issue_prefix`; BE `TestSubIssueReparentPublishes` (view captures the old parent) | covered for (a) and both parents (h) |
+| Sub-issue assign | app/views/issue/sub_issue.py:226 | (a) sub-issue id; (h) new parent from `requested_data.parent` and old parent from `current_instance.parent` (the fork view captures the old parent before the update; upstream put the sub-issue id there) | EX `test_sub_issue_assign_publishes_sub_issue_and_parent`, `test_reparent_publishes_sub_issue_old_and_new_parent`, `test_parent_shapes_uuid_object_dict_and_none`, `test_create_with_parent_and_sub_issue_delete_real_shape`, `test_parent_key_ignored_for_non_issue_prefix`; BE `TestSubIssueReparentPublishes` (view captures the old parent), `TestSubIssueAssignRealTask` (same-parent re-assign publishes the parent once with no parent row; real task stores the parent row's old and new values) | covered for (a) and both parents (h) |
 | Comment create/update/delete | api/views/issue.py:1490,1630,1676; app/views/issue/comment.py:85,120,149; space/views/issue.py:274,308,329 | (a) | AT `test_publishes_after_success`, `test_published_prefixes[comment.activity.updated]`, `test_settle_flag[comment.activity.deleted]`; EX `test_single_issue_call_sites` | covered |
 | Link create/update/delete | api/views/issue.py:1203,1314,1347; app/views/issue/link.py:53,81,101 | (a) | AT `test_published_prefixes[link.activity.updated]`, `test_settle_flag[link.activity.created]`, `test_settle_flag[link.activity.deleted]` | covered |
 | Attachment create/delete | api/views/issue.py:2061,2199; app/views/issue/attachment.py:48,74,158,214 | (a) | AT `test_published_prefixes[attachment.activity.created]`; EX `test_single_issue_call_sites` | covered (no `attachment.activity.deleted` prefix case, same code path) |
@@ -60,4 +60,4 @@ None.
 
 ## Accepted limits
 
-- Sub-issue delete (app/views/issue/base.py destroy) sends `current_instance={}`, so the parent is not published. The parent's sub-issue count stays stale for other viewers until the next refetch. The fix needs the view to pass the parent (an upstream-file change, follow-up ticket).
+- Bulk delete (app/views/issue/base.py bulk delete) publishes only the deleted ids, so the parents of deleted sub-issues are not published and their sub-issue counts stay stale for other viewers until the next refetch. The single sub-issue delete (destroy, PLN-29) is covered.
