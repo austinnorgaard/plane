@@ -72,6 +72,26 @@ Optional live events tuning (defaults shown; leave unset to use them)
   LIVE_EVENTS_REVALIDATE_MAX_FAILURES   3       consecutive transient recheck failures before the
                                                 socket is closed with code 1013
 
+Live events counters (numbers since process start; no ids, users or addresses)
+  GET <live origin>/health/stats, through the live path prefix of the reverse proxy
+  (<live path>/health/stats). It needs the header live-server-secret-key set to the
+  value of LIVE_SERVER_SECRET_KEY (supply it from the environment, do not paste it
+  into shell history or tickets). No header or a wrong value answers 401; the
+  public /health stays minimal and shows no counters. Example:
+
+    curl -s -H "live-server-secret-key: $LIVE_SERVER_SECRET_KEY" "$LIVE_ORIGIN/health/stats"
+
+  Fields: startedAt, uptimeSeconds, eventsEnabled and, when the hub runs, events:
+    sockets.open|authenticated|pending   current gauges
+    accepted                             sockets that passed the pre-auth checks
+    authenticated                        sockets that finished authentication
+    rejected.pendingCap|addressCap|authFail|authTimeout|other
+    framesSent                           frames written to sockets
+    invalid.redisDropped|clientMessages  malformed Redis messages dropped, bad client frames closed
+    rateLimitOverflows.inboundMessages   4429 closes for message rate
+    rateLimitOverflows.projectEvents     per-project overflows answered with a full refresh
+    revalidationCloses.auth4401|unavailable1013
+
 Optional pages API size and time limits (defaults shown; leave unset to use them)
   api service:
   PAGES_API_MAX_HTML_BYTES              262144  largest description_html (decoded bytes) accepted by the
