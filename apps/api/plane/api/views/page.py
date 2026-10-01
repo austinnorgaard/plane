@@ -60,6 +60,16 @@ def _max_html_bytes():
     return value if value > 0 else DEFAULT_MAX_HTML_BYTES
 
 
+def _get_retry_after_seconds():
+    """Get the Retry-After header value in seconds (PAGES_API_RETRY_AFTER_SECONDS), read per call.
+    Defaults to 60 seconds."""
+    try:
+        value = int(os.environ.get("PAGES_API_RETRY_AFTER_SECONDS", ""))
+    except ValueError:
+        return 60
+    return value if value > 0 else 60
+
+
 def _has_binary(page):
     return bool(page.description_binary)
 
@@ -278,7 +288,9 @@ class PageDetailAPIEndpoint(PageBaseAPIEndpoint):
                 # (a) No stored document: live would rebuild it from the html on next open,
                 # so the html can be written directly, but only if nobody has it open.
                 if live_pages.is_page_loaded(page.id) is not False:
-                    return Response(OPEN_IN_EDITOR, status=status.HTTP_409_CONFLICT)
+                    response = Response(OPEN_IN_EDITOR, status=status.HTTP_409_CONFLICT)
+                    response["Retry-After"] = _get_retry_after_seconds()
+                    return response
                 update_fields = []
                 if "name" in data:
                     page.name = data["name"]
@@ -308,7 +320,9 @@ class PageDetailAPIEndpoint(PageBaseAPIEndpoint):
                     return Response(LIVE_UNAVAILABLE, status=status.HTTP_503_SERVICE_UNAVAILABLE)
                 # The presence check comes after the rebase so a page opened meanwhile is caught.
                 if live_pages.is_page_loaded(page.id) is not False:
-                    return Response(OPEN_IN_EDITOR, status=status.HTTP_409_CONFLICT)
+                    response = Response(OPEN_IN_EDITOR, status=status.HTTP_409_CONFLICT)
+                    response["Retry-After"] = _get_retry_after_seconds()
+                    return response
                 validated = rebased.validated_data
                 update_fields = ["description_binary"]
                 page.description_binary = validated["description_binary"]

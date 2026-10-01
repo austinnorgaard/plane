@@ -492,6 +492,74 @@ class TestPatchNoBinary:
 
 
 @pytest.mark.contract
+class TestRetryAfterHeader:
+    def test_409_has_retry_after_default_60(self, session_client, project, create_user, mocker):
+        live = mocker.patch(LIVE)
+        live.is_page_loaded.return_value = True
+        page = make_page(project, create_user)
+        response = session_client.patch(detail(project, page), {"name": "x"}, format="json")
+        assert response.status_code == 409
+        assert response.data == OPEN_MSG
+        assert response.get("Retry-After") == "60"
+
+    def test_409_has_retry_after_configured_value(self, session_client, project, create_user, mocker, monkeypatch):
+        monkeypatch.setenv("PAGES_API_RETRY_AFTER_SECONDS", "120")
+        live = mocker.patch(LIVE)
+        live.is_page_loaded.return_value = True
+        page = make_page(project, create_user)
+        response = session_client.patch(detail(project, page), {"name": "x"}, format="json")
+        assert response.status_code == 409
+        assert response.data == OPEN_MSG
+        assert response.get("Retry-After") == "120"
+
+    def test_409_has_retry_after_invalid_value_falls_back_to_60(
+        self, session_client, project, create_user, mocker, monkeypatch
+    ):
+        monkeypatch.setenv("PAGES_API_RETRY_AFTER_SECONDS", "not_a_number")
+        live = mocker.patch(LIVE)
+        live.is_page_loaded.return_value = True
+        page = make_page(project, create_user)
+        response = session_client.patch(detail(project, page), {"name": "x"}, format="json")
+        assert response.status_code == 409
+        assert response.data == OPEN_MSG
+        assert response.get("Retry-After") == "60"
+
+    def test_409_has_retry_after_negative_value_falls_back_to_60(
+        self, session_client, project, create_user, mocker, monkeypatch
+    ):
+        monkeypatch.setenv("PAGES_API_RETRY_AFTER_SECONDS", "-10")
+        live = mocker.patch(LIVE)
+        live.is_page_loaded.return_value = True
+        page = make_page(project, create_user)
+        response = session_client.patch(detail(project, page), {"name": "x"}, format="json")
+        assert response.status_code == 409
+        assert response.data == OPEN_MSG
+        assert response.get("Retry-After") == "60"
+
+    def test_409_retry_after_on_binary_page(
+        self, session_client, project, create_user, mocker, monkeypatch
+    ):
+        monkeypatch.setenv("PAGES_API_RETRY_AFTER_SECONDS", "90")
+        live = mocker.patch(LIVE)
+        live.LiveServiceError = live_pages.LiveServiceError
+        live.rebase_page.return_value = rebase_answer()
+        live.is_page_loaded.return_value = True
+        page = binary_page(project, create_user)
+        response = session_client.patch(detail(project, page), {"name": "x"}, format="json")
+        assert response.status_code == 409
+        assert response.data == OPEN_MSG
+        assert response.get("Retry-After") == "90"
+
+    def test_200_has_no_retry_after(self, session_client, project, create_user, mocker):
+        live = mocker.patch(LIVE)
+        live.is_page_loaded.return_value = False
+        page = make_page(project, create_user)
+        response = session_client.patch(detail(project, page), {"name": "x"}, format="json")
+        assert response.status_code == 200
+        assert response.get("Retry-After") is None
+
+
+@pytest.mark.contract
 class TestPatchWithBinary:
     def test_rebase_then_presence_then_save(
         self, session_client, project, create_user, mocker, celery_mocks, django_capture_on_commit_callbacks
