@@ -141,7 +141,12 @@ elif "foreign" in opt("--origin"):
 elif phase == "l1":
     out["close"] = 4404
 elif phase == "stock":
-    out["http_status"] = 404
+    # Stock image: accepts upgrade (101) but may or may not send subscribed frame
+    if os.environ.get("STUB_STOCK_SUBSCRIBED") == "1":
+        out["subscribed"] = [project]
+    else:
+        # Silent accept: upgrade succeeds but no frame sent (timeout)
+        pass
 elif "GUEST" in cookie or "NONMEMBER" in cookie:
     out["denied"] = [project]
 else:
@@ -258,6 +263,24 @@ new_dir
 "$SCRIPT" smoke >/dev/null 2>&1
 rc=$?
 check "smoke without a state file exits non-zero" "$([ "$rc" -ne 0 ] && echo 0 || echo 1)"
+
+# ------------------------------------------------------------------ L2 stock image silent-accept and subscribed frame cases
+new_dir
+"$SCRIPT" up >/dev/null 2>&1
+: >"$T/podman.log"
+pid=$(grep '^PROJECT_ID=' "$T/d/local-stack.state" | cut -d= -f2)
+mk=$(grep '^MEMBER_KEY=' "$T/d/local-stack.state" | cut -d= -f2)
+sess=$(grep '^MEMBER_SESSION=' "$T/d/local-stack.state" | cut -d= -f2)
+ws_url="ws://localhost:$(grep '^LISTEN_HTTP_PORT=' "$T/d/local-stack.env" | cut -d= -f2)/live/events"
+origin=$(grep '^WEB_URL=' "$T/d/local-stack.env" | cut -d= -f2)
+# Switch to stock and test silent-accept (no subscribed frame)
+STUB_DIR=$T podman compose -p $(grep '^PROJECT=' "$T/d/local-stack.state" 2>/dev/null || echo plane-lu-local) --env-file "$T/d/local-stack.env" -f /dev/null up -d >/dev/null 2>&1 || true
+: >"$T/phase" && echo stock >"$T/phase"
+out=$(WS_COOKIE="session-id=$sess" STUB_STOCK_SUBSCRIBED=0 "$T/probe.py" --mode connect --url "$ws_url" --origin "$origin" --slug lu-local --project "$pid" --timeout 3 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps(d.get('subscribed',[])))")
+check "L2 stock silent-accept: no subscribed frame (http 101)" "$([ "$out" = '[]' ] && echo 0 || echo 1)"
+# Test subscribed frame case (fork still running)
+out=$(WS_COOKIE="session-id=$sess" STUB_STOCK_SUBSCRIBED=1 "$T/probe.py" --mode connect --url "$ws_url" --origin "$origin" --slug lu-local --project "$pid" --timeout 3 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print('yes' if d.get('subscribed') else 'no')")
+check "L2 stock with subscribed frame: recognizes frame (should fail check)" "$([ "$out" = yes ] && echo 0 || echo 1)"
 
 # ------------------------------------------------------------------ ws_probe against a fake server
 python3 - "$HERE/ws_probe.py" <<'PY'

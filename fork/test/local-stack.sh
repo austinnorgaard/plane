@@ -575,8 +575,8 @@ cmd_smoke() {
     expect_code "L2 pages API answers 404" '^404$'
     req PATCH "$api/issues/$iid/" "$mk" '{"name":"lu smoke issue l2"}'
     expect_code "L2 issue PATCH still works" '^200$'
-    out=$(WS_COOKIE="session-id=$(stateval MEMBER_SESSION)" probe --mode connect --url "$ws" --origin "$origin" --slug "$WORKSPACE_SLUG" --project "$pid" --timeout 5)
-    if [ "$(pj "$out" http_status)" != 101 ] || [ "$(pj "$out" close)" = 4404 ]; then ok "L2 events socket not available"; else bad "L2 events socket not available" "http=$(pj "$out" http_status) close=$(pj "$out" close)"; fi
+    out=$(WS_COOKIE="session-id=$(stateval MEMBER_SESSION)" probe --mode connect --url "$ws" --origin "$origin" --slug "$WORKSPACE_SLUG" --project "$pid" --timeout 3)
+    if [ "$(pj "$out" subscribed)" = "[]" ]; then ok "L2 events socket not available"; else bad "L2 events socket not available" "subscribed=$(pj "$out" subscribed) http=$(pj "$out" http_status) close=$(pj "$out" close)"; fi
   else
     bad "L2 apply" "compose up failed"
   fi
