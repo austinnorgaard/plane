@@ -8,7 +8,7 @@ Every host-specific value is a variable supplied by the operator at run time. No
 | ------------------- | -------------------------------------------------------------------------------------------- |
 | `PVE_HOST`          | ssh target of the hypervisor                                                                 |
 | `PLANE_CTID`        | container id of the Plane container on the hypervisor                                        |
-| `PLANE_APP_DIR`     | directory in the container holding `docker-compose.yaml` and `plane.env`                     |
+| `PLANE_APP_DIR`     | path in the container to the plane-app directory, which holds `docker-compose.yaml` and `plane.env` |
 | `PAUSE_FLAG_PATH`   | path of the flag file that pauses automated changes (operator supplied)                      |
 | `PVE_STAGING_DIR`   | scratch directory on the hypervisor for the image archive                                    |
 | `CT_STAGING_DIR`    | scratch directory in the container for the image archive                                     |
