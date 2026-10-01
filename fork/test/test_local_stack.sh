@@ -291,6 +291,52 @@ new_dir
 rc=$?
 check "smoke without a state file exits non-zero" "$([ "$rc" -ne 0 ] && echo 0 || echo 1)"
 
+# ------------------------------------------------------------------ browser checks, through smoke --browser
+# a stub stands in for browser/pages-browser.mjs: it records which variables it got (names only)
+cat >"$T/bstub.mjs" <<'JS'
+import { writeFileSync } from "node:fs";
+const e = process.env;
+writeFileSync(e.STUB_BROWSER_LOG, [e.PAGES_BROWSER_MEMBER_KEY ? "key" : "", e.PAGES_BROWSER_MEMBER_SESSION ? "session" : "", e.PAGES_BROWSER_BREAK || "nobreak", e.PAGES_BROWSER_ARTIFACTS].join(" ") + "\n", { flag: "a" });
+const broken = e.PAGES_BROWSER_BREAK === "presence";
+if (e.STUB_BROWSER_MODE === "crash") { console.error("boom"); process.exit(2); }
+const bad = e.STUB_BROWSER_MODE === "fail" || (broken && e.STUB_BROWSER_MODE !== "blind");
+console.log("PASS P3 reopen 1: the change shows exactly once");
+if (bad) { console.log("FAIL P4 PATCH while the page is open: exact 409 (http 200)"); process.exit(1); }
+console.log("PASS P4 PATCH while the page is open: exact 409");
+JS
+browser_smoke() { # browser_smoke OUTFILE ARGS... ; env STUB_BROWSER_MODE selects the stub behaviour
+  local o=$1
+  shift
+  new_dir
+  "$SCRIPT" up >/dev/null 2>&1
+  : >"$T/browser.log"
+  LOCAL_STACK_BROWSER_SCRIPT=$T/bstub.mjs LOCAL_STACK_ARTIFACTS=$T/art STUB_BROWSER_LOG=$T/browser.log "$SCRIPT" smoke "$@" >"$o" 2>&1
+}
+STUB_BROWSER_MODE=ok browser_smoke "$T/b-ok.out" --browser
+rc=$?
+check "smoke --browser exits 0 when the browser checks pass" "$rc"
+check "smoke --browser folds the browser PASS lines into the report" "$(has "$T/b-ok.out" '^PASS browser: P3 reopen 1' && has "$T/d/local-stack.report" '^PASS browser: P4 PATCH' && echo 0 || echo 1)"
+check "smoke --browser does not print the manual steps" "$(has "$T/b-ok.out" 'MANUAL STEPS' && echo 1 || echo 0)"
+check "browser script got key, session and the artifacts dir through its environment" "$([ "$(cat "$T/browser.log")" = "key session nobreak $T/art" ] && echo 0 || echo 1)"
+check "browser keys are not printed" "$(grep -qE 'key-|sess-' "$T/b-ok.out" "$T/d/local-stack.report" && echo 1 || echo 0)"
+STUB_BROWSER_MODE=fail browser_smoke "$T/b-fail.out" --browser
+rc=$?
+check "a failing browser check makes smoke --browser exit non-zero" "$([ "$rc" -ne 0 ] && has "$T/b-fail.out" '^FAIL browser: P4 PATCH' && echo 0 || echo 1)"
+STUB_BROWSER_MODE=crash browser_smoke "$T/b-crash.out" --browser
+rc=$?
+check "a crashing browser script (no FAIL line) makes smoke --browser exit non-zero" "$([ "$rc" -ne 0 ] && has "$T/b-crash.out" '^FAIL browser checks' && echo 0 || echo 1)"
+STUB_BROWSER_MODE=ok browser_smoke "$T/b-neg.out" --browser --negative
+rc=$?
+check "--negative passes when the broken run fails the 409 check" "$rc"
+check "--negative ran the script twice, the second time with presence broken" "$([ "$(wc -l <"$T/browser.log")" = 2 ] && grep -q ' presence ' "$T/browser.log" && echo 0 || echo 1)"
+STUB_BROWSER_MODE=blind browser_smoke "$T/b-blind.out" --browser --negative
+rc=$?
+check "--negative fails when the broken run does not fail the 409 check" "$([ "$rc" -ne 0 ] && has "$T/b-blind.out" '^FAIL browser negative' && echo 0 || echo 1)"
+STUB_BROWSER_MODE=ok browser_smoke "$T/b-noflag.out" --negative
+rc=$?
+check "--negative without --browser is refused" "$([ "$rc" -ne 0 ] && echo 0 || echo 1)"
+check "browser mode is gitignored for its artifacts" "$(git -C "$HERE" check-ignore -q artifacts/x.png && echo 0 || echo 1)"
+
 # ------------------------------------------------------------------ L2 events socket check, through smoke
 l2_smoke() { # l2_smoke OUTFILE [ENV=VALUE...]; runs the real smoke with the stubbed probe
   local o=$1

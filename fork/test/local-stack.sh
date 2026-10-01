@@ -7,8 +7,15 @@
 #   local-stack.sh up       generate fork/test/local-stack.env (if missing), start the
 #                           stack, wait for it, create local-only test users, API keys,
 #                           a project and one work item
-#   local-stack.sh smoke    run the checks, print PASS/FAIL per check, exit non-zero on
-#                           any FAIL; prints the browser steps that need a real browser
+#   local-stack.sh smoke [--browser [--negative]]
+#                           run the checks, print PASS/FAIL per check, exit non-zero on
+#                           any FAIL. --browser then runs the headless browser checks
+#                           (browser/pages-browser.mjs: pages open/close/reopen, needs
+#                           node and playwright, see that file); --negative also runs them
+#                           with the presence path broken and requires them to FAIL.
+#                           Without --browser the manual browser steps are printed.
+#   local-stack.sh browser [--negative]
+#                           only the browser checks (no API smoke, no rollbacks)
 #   local-stack.sh down     stop the stack and remove its volumes
 #   local-stack.sh patch-page <page_id> [html]
 #                           PATCH a page with the member key (used by the manual steps)
@@ -30,6 +37,9 @@
 #   LOCAL_STACK_TLS_PORT       published https port (unused by the stack), default 18443
 #   LOCAL_STACK_MINIO_IMAGE    replace the upstream minio image (it may be unpullable)
 #   COMPOSE_CMD                compose command, for example "podman-compose"
+#   LOCAL_STACK_ARTIFACTS      screenshot directory of the browser checks
+#                              (default: fork/test/artifacts, gitignored)
+#   PLAYWRIGHT_MODULE_DIR, PLAYWRIGHT_CHROMIUM_PATH  see browser/pages-browser.mjs
 #   LOCAL_STACK_DIR            where env, state, report and generated files live
 #                              (default: this directory)
 #
@@ -38,6 +48,7 @@
 #   local-stack.state    ids, API keys and session ids of the test users
 #   local-stack.report   the last smoke report (PASS/FAIL lines only, no URLs)
 #   local-stack.l1.yaml, local-stack.extra.yaml   generated compose overrides
+#   artifacts/           screenshots of the browser checks (the directory is gitignored)
 # Secrets are never printed: only key names and PASS/FAIL.
 # shellcheck disable=SC2015 # "cond && ok || bad": ok never fails
 set -uo pipefail
@@ -254,6 +265,10 @@ try:
         InstanceAdmin.objects.get_or_create(user=users["admin"], instance=instance, defaults={"role": 20})
 except Exception as exc:
     print("NOTE instance flags not set: %s" % type(exc).__name__)
+# the instance endpoint is cached; without this the web app keeps showing the setup screen
+from django.core.cache import cache
+
+cache.clear()
 for key, value in out.items():
     print("STATE %s=%s" % (key, value))
 PY
@@ -460,6 +475,15 @@ image_check() {
 }
 
 cmd_smoke() {
+  local browser=0 negative=0 arg
+  for arg in "$@"; do
+    case "$arg" in
+      --browser) browser=1 ;;
+      --negative) negative=1 ;;
+      *) die "smoke: unknown option $arg (use --browser [--negative])" ;;
+    esac
+  done
+  [ "$negative" -eq 0 ] || [ "$browser" -eq 1 ] || die "smoke: --negative needs --browser"
   [ -f "$STATE_FILE" ] || die "no $(basename "$STATE_FILE"); run '$0 up' first"
   detect_compose
   MODE=fork
@@ -602,9 +626,69 @@ cmd_smoke() {
   req POST "$api/pages/" "$mk" '{"name":"lu manual page","description_html":"<p>lu-manual-original</p>"}'
   [ "$CODE" = 201 ] && mpage=$(jfield id)
 
+  if [ "$browser" -eq 1 ]; then
+    run_browser "$negative"
+  fi
+
   report ""
   report "SUMMARY: $PASS_N passed, $FAIL_N failed"
-  print_manual "$mpage" "$pid"
+  [ "$browser" -eq 1 ] || print_manual "$mpage" "$pid"
+  [ "$FAIL_N" -eq 0 ]
+}
+
+# run_browser NEGATIVE: run browser/pages-browser.mjs against the stack and fold its PASS/FAIL
+# lines into this report. With NEGATIVE=1 it runs a second time with the presence path broken
+# and requires that run to fail on the 409 check. The member key and session reach the script
+# through its environment only.
+BROWSER_SCRIPT=${LOCAL_STACK_BROWSER_SCRIPT:-$HERE/browser/pages-browser.mjs}
+BROWSER_OUT=$TMP/browser.out
+browser_env() { # browser_env [KEY=VALUE...] -> runs the script, output in $BROWSER_OUT, status in BROWSER_RC
+  PAGES_BROWSER_BASE_URL=http://localhost:$(envval LISTEN_HTTP_PORT) \
+    PAGES_BROWSER_WORKSPACE=$WORKSPACE_SLUG \
+    PAGES_BROWSER_PROJECT_ID=$(stateval PROJECT_ID) \
+    PAGES_BROWSER_MEMBER_KEY=$(stateval MEMBER_KEY) \
+    PAGES_BROWSER_MEMBER_SESSION=$(stateval MEMBER_SESSION) \
+    PAGES_BROWSER_ARTIFACTS=${LOCAL_STACK_ARTIFACTS:-$HERE/artifacts} \
+    env "$@" node "$BROWSER_SCRIPT" >"$BROWSER_OUT" 2>&1
+  BROWSER_RC=$?
+}
+run_browser() {
+  local negative=$1 line
+  report "-- browser checks (headless, screenshots in ${LOCAL_STACK_ARTIFACTS:-$HERE/artifacts})"
+  if ! command -v node >/dev/null 2>&1 || [ ! -f "$BROWSER_SCRIPT" ]; then
+    bad "browser checks" "node or $(basename "$BROWSER_SCRIPT") missing"
+    return 0
+  fi
+  browser_env
+  while IFS= read -r line; do
+    case "$line" in
+      "PASS "*) ok "browser: ${line#PASS }" ;;
+      "FAIL "*) FAIL_N=$((FAIL_N + 1)); report "FAIL browser: ${line#FAIL }" ;;
+      "NOTE "*) report "   $line" ;;
+    esac
+  done <"$BROWSER_OUT"
+  if [ "$BROWSER_RC" -ne 0 ] && ! grep -q '^FAIL ' "$BROWSER_OUT"; then
+    bad "browser checks" "exit $BROWSER_RC: $(grep -v '^PASS ' "$BROWSER_OUT" | tail -n 1 | cut -c1-160)"
+  fi
+  [ "$negative" -eq 1 ] || return 0
+  report "-- browser negative check (presence path broken, the 409 check must fail)"
+  browser_env PAGES_BROWSER_BREAK=presence
+  if [ "$BROWSER_RC" -eq 1 ] && grep -q '^FAIL P4 PATCH while the page is open: exact 409' "$BROWSER_OUT"; then
+    ok "browser negative: script exits 1 and fails the P4 409 check when presence is broken"
+  else
+    bad "browser negative: script must fail the P4 409 check when presence is broken" "exit $BROWSER_RC"
+  fi
+}
+
+cmd_browser() {
+  [ -f "$STATE_FILE" ] || die "no $(basename "$STATE_FILE"); run '$0 up' first"
+  : >"$REPORT_FILE"
+  local negative=0
+  [ "${1:-}" = "--negative" ] && negative=1
+  [ -z "${1:-}" ] || [ "$negative" -eq 1 ] || die "browser: unknown option $1 (use --negative)"
+  run_browser "$negative"
+  report ""
+  report "SUMMARY: $PASS_N passed, $FAIL_N failed"
   [ "$FAIL_N" -eq 0 ]
 }
 
@@ -656,7 +740,7 @@ cmd_down() {
 
 # ------------------------------------------------------------------ main
 
-usage() { sed -n '3,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 main() {
   local sub=${1:-help}
@@ -664,6 +748,7 @@ main() {
   case "$sub" in
     up) cmd_up "$@" ;;
     smoke) cmd_smoke "$@" ;;
+    browser) cmd_browser "$@" ;;
     down) cmd_down "$@" ;;
     patch-page) cmd_patch_page "$@" ;;
     help | -h | --help) usage ;;
