@@ -18,6 +18,8 @@
 #   QA_RECORD         file holding the QA verdict text; needs a line "QA: PASS @ <sha>"
 #                     naming RELEASE_SHA (the full sha is preferred; 7 or more digits are accepted) and no "QA: FAIL @ <sha>" line for it
 #   IMAGE_TAR         the image archive plane-fork-live.<N>.tar
+#   (Known limitation: the IPv6 floor is /16, so ::/16 passes although it covers the
+#    IPv4-mapped range; the IPv4 floor is /8.)
 #   IMAGE_SHA256      sha256 from the build output; or BUILD_NOTES, the saved build output
 #                     with its "Tar sha256: <hex>" line. The archive must also be bound to
 #                     RELEASE_SHA: every image in it carries the label plane-fork-build=<sha>
@@ -45,7 +47,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 env_file=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    -h|--help) sed -n "2,38p" "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n "2,40p" "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -e) [ $# -ge 2 ] || { echo "usage: gate.sh [-e ENV_FILE] RELEASE_SHA" >&2; exit 2; }
         env_file="$2"; shift 2 ;;
     -*) echo "usage: gate.sh [-e ENV_FILE] RELEASE_SHA" >&2; exit 2 ;;
@@ -121,7 +123,12 @@ is_ipv6() {
 
 # run_limited CMD...: run with an overall time limit (GATE_INSPECT_TIMEOUT seconds, default 300)
 run_limited() {
-  if command -v timeout >/dev/null 2>&1; then timeout "${GATE_INSPECT_TIMEOUT:-300}" "$@"; else "$@"; fi
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${GATE_INSPECT_TIMEOUT:-300}" "$@"
+  else
+    echo "error: no timeout command found; inspect.sh cannot be time-limited, so it is not run"
+    return 127
+  fi
 }
 
 echo "== gate.sh: go/no-go before deploy =="
@@ -209,12 +216,14 @@ if [ -n "${BUILD_NOTES:-}" ]; then
     nv="$(sed -n 's/^SHA verified:[[:space:]]*\([0-9a-fA-F]\{40\}\)[[:space:]].*$/\1/p' "$BUILD_NOTES" | tr 'A-F' 'a-f')"
     if [ -z "$nv" ]; then notes_state=mismatch; detail="$detail BUILD_NOTES has no 'SHA verified: <sha>' line;"
     elif [ "$(printf '%s\n' "$nv" | grep -vc "^$sha$")" -gt 0 ]; then notes_state=mismatch; detail="$detail BUILD_NOTES names another sha;"
+    elif [ -z "$notes_tar" ]; then notes_state=weak; detail="$detail BUILD_NOTES has no 'Tar sha256:' line, so it cannot bind the archive alone;"
+    elif [ "$notes_tar" != "$want" ]; then notes_state=weak; detail="$detail BUILD_NOTES Tar sha256 line differs from the archive sha256;"
     else notes_state=ok; fi
   fi
 fi
 if [ "$label_state" = mismatch ] || [ "$notes_state" = mismatch ]; then fail "$name" "$detail"
 elif [ "$label_state" = ok ] || [ "$notes_state" = ok ]; then pass "$name (label=$label_state notes=$notes_state)"
-else fail "$name" "archive not bound to the release sha: no plane-fork-build label found in the archive and no BUILD_NOTES"
+else fail "$name" "archive not bound to the release sha: no plane-fork-build label found in the archive and no usable BUILD_NOTES;$detail"
 fi
 
 # 4. RUNBOOK inspection table filled

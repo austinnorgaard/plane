@@ -148,9 +148,15 @@ IMAGE_TAR="$T/b/plane-fork-live.1.tar" IMAGE_SHA256=$(sha256sum "$T/b/plane-fork
 rm -rf "$T/b/x"; mkdir "$T/b/x"; ( cd "$T/b/x" && printf '[{"Config":"../../etc/passwd"},{"Config":"/etc/passwd"},{"Config":"a b"}]' >manifest.json && tar -cf ../plane-fork-live.1.tar manifest.json )
 IMAGE_TAR="$T/b/plane-fork-live.1.tar" IMAGE_SHA256=$(sha256sum "$T/b/plane-fork-live.1.tar" | awk '{print $1}') run -e "$T/env" "$SHA"; expect_fail "hostile Config paths -> FAIL" "bound to the release sha"
 # notes as the binding source (archive without labels)
-printf 'SHA verified: %s is in origin/live-updates/v1.4.2\n' "$SHA" >"$T/notes2"
 mktar "$T/b/plane-fork-live.1.tar" NONE; H2=$(sha256sum "$T/b/plane-fork-live.1.tar" | awk '{print $1}')
+printf 'SHA verified: %s is in origin/live-updates/v1.4.2\nTar sha256: %s\n' "$SHA" "$H2" >"$T/notes2"
 BUILD_NOTES="$T/notes2" IMAGE_TAR="$T/b/plane-fork-live.1.tar" IMAGE_SHA256=$H2 run -e "$T/env" "$SHA"; [ "$RC" = 0 ] && ok "SHA verified line naming the sha binds an unlabelled archive" || bad "notes binding rc=$RC"
+# notes-only binding needs BOTH the SHA verified line and a matching Tar sha256 line
+printf 'SHA verified: %s is in origin/live-updates/v1.4.2\n' "$SHA" >"$T/notes2"
+BUILD_NOTES="$T/notes2" IMAGE_TAR="$T/b/plane-fork-live.1.tar" IMAGE_SHA256=$H2 run -e "$T/env" "$SHA"; expect_fail "notes-only binding without a Tar sha256 line -> FAIL" "bound to the release sha"
+echo "$OUT" | grep -q "no 'Tar sha256:' line" && ok "missing Tar line is named" || bad "missing Tar line message"
+printf 'SHA verified: %s is in origin/live-updates/v1.4.2\nTar sha256: %s\n' "$SHA" "$(printf '3%.0s' $(seq 64))" >"$T/notes2"
+BUILD_NOTES="$T/notes2" IMAGE_TAR="$T/b/plane-fork-live.1.tar" IMAGE_SHA256=$H2 run -e "$T/env" "$SHA"; expect_fail "notes-only binding with a different Tar sha256 -> FAIL" "bound to the release sha"
 printf 'SHA verified: %s is in origin/live-updates/v1.4.2\n' "$OTHER" >"$T/notes2"
 BUILD_NOTES="$T/notes2" IMAGE_TAR="$T/b/plane-fork-live.1.tar" IMAGE_SHA256=$H2 run -e "$T/env" "$SHA"; expect_fail "notes naming a different sha -> FAIL" "bound to the release sha"
 printf 'Build ok\n' >"$T/notes2"
@@ -241,6 +247,16 @@ start=$SECONDS
 STUB_SLEEP=30 GATE_INSPECT_TIMEOUT=2 run -e "$T/env" "$SHA"
 [ "$((SECONDS - start))" -lt 20 ] && ok "a hanging ssh is cut off" || bad "gate hung"
 expect_fail "hanging ssh -> FAIL, not a hang" "inspect.sh preflight"
+
+# no timeout command: a visible FAIL, inspect.sh is not run unlimited
+mkdir -p "$T/nt"
+for f in /usr/bin/* /bin/*; do b=${f##*/}; [ "$b" = timeout ] || [ -e "$T/nt/$b" ] || ln -s "$f" "$T/nt/$b" 2>/dev/null; done
+PATH="$T/nt:$T/bin" run -e "$T/env" "$SHA"
+if PATH="$T/nt" command -v timeout >/dev/null 2>&1; then bad "test setup: timeout still on PATH"; else
+  expect_fail "no timeout command -> FAIL" "inspect.sh preflight"
+  echo "$OUT" | grep -q 'no timeout command found' && ok "missing timeout is named" || bad "timeout message"
+  [ ! -s "$STUB_LOG" ] && ok "  and ssh was not run" || bad "ssh ran without a time limit"
+fi
 
 # env-file values as compose reads them (trailing space and comments)
 setting PAGES_API_MAX_HTML_BYTES "262144 # api cap"; good; [ "$RC" = 0 ] && ok "numeric value with a trailing comment is read" || bad "numeric comment rc=$RC"
