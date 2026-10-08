@@ -4,9 +4,12 @@
 # local-stack.sh - throwaway integration stack for the fork images, run headless
 # on the machine that builds them (as root, in the podman host).
 #
-#   local-stack.sh up       generate fork/test/local-stack.env (if missing), start the
+#   local-stack.sh up [--stock] [--regenerate-env]
+#                           generate fork/test/local-stack.env (if missing), start the
 #                           stack, wait for it, create local-only test users, API keys,
-#                           a project and one work item
+#                           a project and one work item. --stock starts the unmodified
+#                           upstream images instead of the fork images (used by
+#                           upgrade-rollback.sh, which then upgrades to the fork)
 #   local-stack.sh smoke [--browser [--negative]]
 #                           run the checks, print PASS/FAIL per check, exit non-zero on
 #                           any FAIL. --browser then runs the headless browser checks
@@ -315,7 +318,14 @@ run_seed() { # run_seed SCRIPT -> appends STATE lines to the state file
 }
 
 cmd_up() {
-  [ "${1:-}" = "--regenerate-env" ] && REGEN=1
+  local arg stock=0
+  for arg in "$@"; do
+    case "$arg" in
+      --regenerate-env) REGEN=1 ;;
+      --stock) stock=1 ;;
+      *) die "up: unknown option $arg (use --stock, --regenerate-env)" ;;
+    esac
+  done
   [ -f "$BASE_FILE" ] || die "missing $BASE_FILE"
   [ -f "$OVERRIDE" ] || die "missing $OVERRIDE (this script needs the deploy override from the deploy runbook change)"
   detect_compose
@@ -326,10 +336,12 @@ cmd_up() {
   local url
   url=http://localhost:$(envval LISTEN_HTTP_PORT)
   MODE=fork
+  [ "$stock" -eq 0 ] || MODE=stock
   dc config -q >/dev/null 2>"$TMP/cfg.err" || { log "compose config failed:"; head -n 5 "$TMP/cfg.err" >&2; return 1; }
-  log "compose config: ok"
+  log "compose config: ok (mode $MODE)"
   local svc missing=0
   for svc in web live api; do
+    [ "$stock" -eq 0 ] || break
     image_exists "localhost/plane-fork-$svc:v1.4.2-live.$(envval FORK_N)" || { log "missing image localhost/plane-fork-$svc:v1.4.2-live.$(envval FORK_N); build or load it first"; missing=1; }
   done
   [ "$missing" -eq 0 ] || return 1
@@ -756,4 +768,7 @@ main() {
   esac
 }
 
-main "$@"
+# run main only when executed, so other scripts (upgrade-rollback.sh) can source the helpers
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi
