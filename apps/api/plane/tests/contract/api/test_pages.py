@@ -2,6 +2,7 @@
 
 import base64
 import json
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -1046,6 +1047,140 @@ class TestListFiltersAndOrdering:
         response = session_client.get(base(project) + f"?order_by={bad}")
         assert response.status_code == 200
         assert [r["id"] for r in response.data["results"]] == [str(second.id), str(first.id)]
+
+
+T0 = datetime(2026, 3, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def stamp(page, when):
+    """Set updated_at directly (queryset update bypasses auto_now)."""
+    Page.objects.filter(pk=page.pk).update(updated_at=when)
+
+
+def walk(client, url, per_page):
+    """Follow next_cursor to the end; return the ids in the order served and the page count."""
+    ids, pages, cursor = [], 0, None
+    while True:
+        query = f"{url}{'&' if '?' in url else '?'}per_page={per_page}" + (f"&cursor={cursor}" if cursor else "")
+        response = client.get(query)
+        assert response.status_code == 200
+        pages += 1
+        ids += [r["id"] for r in response.data["results"]]
+        if not response.data["next_page_results"]:
+            return ids, pages
+        cursor = response.data["next_cursor"]
+        assert pages < 50
+
+
+@pytest.mark.contract
+class TestListPaginationAndUpdatedAfter:
+    def test_walk_spans_pages_without_gaps_or_duplicates(self, session_client, project, create_user):
+        pages = [make_page(project, create_user, name=f"p{i}") for i in range(7)]
+        ids, count = walk(session_client, base(project), 3)
+        assert count == 3
+        assert len(ids) == len(set(ids))
+        assert set(ids) == {str(p.id) for p in pages}
+
+    def test_ties_on_updated_at_across_a_page_boundary(self, session_client, project, create_user):
+        pages = [make_page(project, create_user, name=f"p{i}") for i in range(7)]
+        for page in pages:
+            stamp(page, T0)
+        ids, count = walk(session_client, base(project) + "?updated_after=2026-03-01T00:00:00Z", 3)
+        assert count == 3
+        assert ids == sorted(str(p.id) for p in pages)
+
+    def test_ties_on_other_order_fields_are_broken_by_id(self, session_client, project, create_user):
+        pages = [make_page(project, create_user, name="same") for _ in range(5)]
+        created = T0 - timedelta(days=1)
+        Page.objects.filter(pk__in=[p.pk for p in pages]).update(created_at=created, updated_at=T0)
+        for query, descending in (("?order_by=name", False), ("?order_by=-updated_at", True), ("?order_by=created_at", False)):
+            ids, _ = walk(session_client, base(project) + query, 2)
+            assert ids == sorted((str(p.id) for p in pages), reverse=descending), query
+
+    def test_updated_after_orders_by_updated_at_then_id(self, session_client, project, create_user):
+        late = make_page(project, create_user, name="late")
+        tied = [make_page(project, create_user, name=f"t{i}") for i in range(3)]
+        early = make_page(project, create_user, name="early")
+        stamp(late, T0 + timedelta(hours=2))
+        for page in tied:
+            stamp(page, T0 + timedelta(hours=1))
+        stamp(early, T0)
+        ids, _ = walk(session_client, base(project) + "?updated_after=2026-01-01T00:00:00Z", 2)
+        assert ids == [str(early.id), *sorted(str(p.id) for p in tied), str(late.id)]
+
+    def test_updated_after_is_inclusive(self, session_client, project, create_user):
+        before = make_page(project, create_user, name="before")
+        at = make_page(project, create_user, name="at")
+        after = make_page(project, create_user, name="after")
+        stamp(before, T0 - timedelta(microseconds=1))
+        stamp(at, T0)
+        stamp(after, T0 + timedelta(microseconds=1))
+        response = session_client.get(base(project) + "?updated_after=2026-03-01T12:00:00Z")
+        assert [r["id"] for r in response.data["results"]] == [str(at.id), str(after.id)]
+
+    @pytest.mark.parametrize(
+        "value",
+        ["2026-03-01T12:00:00Z", "2026-03-01T12:00:00", "2026-03-01T12:00:00.000000%2B00:00", "2026-03-01T14:00:00%2B02:00"],
+    )
+    def test_updated_after_accepts_iso_8601_forms(self, session_client, project, create_user, value):
+        page = make_page(project, create_user)
+        stamp(page, T0)
+        response = session_client.get(base(project) + f"?updated_after={value}")
+        assert [r["id"] for r in response.data["results"]] == [str(page.id)]
+
+    def test_updated_after_bare_date_is_midnight_utc(self, session_client, project, create_user):
+        old = make_page(project, create_user)
+        new = make_page(project, create_user)
+        stamp(old, datetime(2026, 2, 28, 23, 59, 59, tzinfo=timezone.utc))
+        stamp(new, datetime(2026, 3, 1, 0, 0, 0, tzinfo=timezone.utc))
+        response = session_client.get(base(project) + "?updated_after=2026-03-01")
+        assert [r["id"] for r in response.data["results"]] == [str(new.id)]
+
+    def test_order_by_overrides_the_updated_after_default_order(self, session_client, project, create_user):
+        first = make_page(project, create_user)
+        second = make_page(project, create_user)
+        stamp(first, T0)
+        stamp(second, T0 + timedelta(hours=1))
+        response = session_client.get(base(project) + "?updated_after=2026-03-01&order_by=-updated_at")
+        assert [r["id"] for r in response.data["results"]] == [str(second.id), str(first.id)]
+
+    def test_updated_after_combines_with_archived_filter(self, session_client, project, create_user):
+        gone = make_page(project, create_user, archived_at="2026-01-01")
+        live = make_page(project, create_user)
+        stamp(gone, T0)
+        stamp(live, T0)
+        url = base(project) + "?updated_after=2026-03-01"
+        assert [r["id"] for r in session_client.get(url).data["results"]] == [str(live.id)]
+        assert [r["id"] for r in session_client.get(url + "&archived=true").data["results"]] == [str(gone.id)]
+
+    @pytest.mark.parametrize(
+        "value",
+        ["", "yesterday", "2026-13-01T00:00:00Z", "2026-03-01T25:00:00Z", "1700000000", "2026-03-01T12:00:00+02:00", "0001-01-01T00:00:00%2B14:00", "2026-03-01;drop"],
+    )
+    def test_invalid_updated_after_is_400_with_detail(self, session_client, project, create_user, value):
+        make_page(project, create_user)
+        response = session_client.get(base(project) + f"?updated_after={value}")
+        assert response.status_code == 400
+        assert set(response.data) == {"detail"}
+        assert "updated_after" in str(response.data["detail"])
+
+    def test_invalid_cursor_and_per_page_still_400_with_detail(self, session_client, project):
+        for query, text in (("?cursor=abc", "cursor"), ("?per_page=abc", "per_page")):
+            response = session_client.get(base(project) + query)
+            assert response.status_code == 400
+            assert text in str(response.data["detail"])
+
+    def test_updated_after_never_lists_private_pages_of_others(self, api_client, project, create_user):
+        member = make_user("m@plane.so")
+        join(project, member, 15)
+        secret = make_page(project, create_user, name="secret", access=Page.PRIVATE_ACCESS)
+        mine = make_page(project, member, name="mine", access=Page.PRIVATE_ACCESS)
+        public = make_page(project, create_user, name="public")
+        for page in (secret, mine, public):
+            stamp(page, T0)
+        ids, _ = walk(client_for(member, api_client), base(project) + "?updated_after=2026-03-01", 1)
+        assert sorted(ids) == sorted([str(mine.id), str(public.id)])
+        assert str(secret.id) not in ids
 
 
 @pytest.mark.contract
