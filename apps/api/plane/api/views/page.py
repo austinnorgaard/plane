@@ -6,18 +6,20 @@ import hashlib
 import json
 import logging
 import os
-from datetime import date
+from datetime import date, timezone as dt_timezone
 
 # Django imports
 from django.conf import settings
 from django.core.exceptions import RequestDataTooBig
 from django.db import connection, transaction
 from django.db.models import Q, UUIDField, Value
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 # Third party imports
 from drf_spectacular.utils import OpenApiResponse
 from rest_framework import status
-from rest_framework.exceptions import NotFound
+from rest_framework.exceptions import NotFound, ParseError
 from rest_framework.response import Response
 
 # Module imports
@@ -60,6 +62,7 @@ from plane.utils.openapi.pages import (
     PAGE_ORDER_BY_PARAMETER,
     PAGE_PARENT_ID_PARAMETER,
     PAGE_TOO_LARGE_RESPONSE,
+    PAGE_UPDATED_AFTER_PARAMETER,
     PAGE_VALIDATION_EXAMPLES,
 )
 from plane.utils.order_queryset import PAGE_ORDER_BY_ALLOWLIST, sanitize_order_by
@@ -101,6 +104,30 @@ def _get_retry_after_seconds():
     if value > 3600:
         return 3600
     return value
+
+
+def parse_updated_after(raw):
+    """Parse the updated_after query value (ISO 8601) into an aware UTC datetime.
+
+    A value without a UTC offset is read as UTC. Anything else that is not a valid date-time,
+    including an empty value, is a 400 with the usual {"detail": ...} body."""
+    invalid = ParseError(detail="Invalid updated_after parameter. Use an ISO 8601 date-time.")
+    # A '+' offset must be url-encoded (%2B); a literal '+' reaches the server as a space and is rejected.
+    value = raw.strip() if raw is not None else ""
+    if not value:
+        raise invalid
+    try:
+        parsed = parse_datetime(value)
+        if parsed is None:
+            # A bare date (2026-01-31) means midnight UTC.
+            parsed = parse_datetime(f"{value}T00:00:00") if len(value) == 10 else None
+        if parsed is None:
+            raise invalid
+        if timezone.is_naive(parsed):
+            parsed = parsed.replace(tzinfo=dt_timezone.utc)
+        return parsed.astimezone(dt_timezone.utc)
+    except (ValueError, OverflowError):
+        raise invalid
 
 
 def _has_binary(page):
@@ -197,13 +224,17 @@ class PageListCreateAPIEndpoint(PageBaseAPIEndpoint):
         summary="List pages",
         description=(
             "List the pages of a project that the caller can see, without the html body. "
-            "Archived pages are returned only with archived=true."
+            "Archived pages are returned only with archived=true. Results are cursor paginated and the order "
+            "is total: ties on the ordering field are broken by id, so paging never skips or repeats a row. "
+            "updated_after keeps pages whose updated_at is greater than or equal to the value (inclusive); "
+            "without order_by it lists them oldest change first, by (updated_at, id)."
         ),
         parameters=[
             PAGE_ARCHIVED_PARAMETER,
             PAGE_PARENT_ID_PARAMETER,
             EXTERNAL_ID_PARAMETER,
             EXTERNAL_SOURCE_PARAMETER,
+            PAGE_UPDATED_AFTER_PARAMETER,
             PAGE_ORDER_BY_PARAMETER,
             CURSOR_PARAMETER,
             PER_PAGE_PARAMETER,
@@ -231,10 +262,23 @@ class PageListCreateAPIEndpoint(PageBaseAPIEndpoint):
             value = request.GET.get(param)
             if value:
                 queryset = queryset.filter(**{field: value})
-        order_by = sanitize_order_by(request.GET.get("order_by"), PAGE_ORDER_BY_ALLOWLIST, default="-created_at")
+        updated_after = request.GET.get("updated_after")
+        default_order = "-created_at"
+        if updated_after is not None:
+            # Inclusive on purpose: a client resuming from the newest updated_at it has seen
+            # cannot miss a page that shares that timestamp.
+            queryset = queryset.filter(updated_at__gte=parse_updated_after(updated_after))
+            default_order = "updated_at"
+        order_by = sanitize_order_by(request.GET.get("order_by"), PAGE_ORDER_BY_ALLOWLIST, default=default_order)
+        # id is the last key, in the direction of the primary key, so the order is total.
+        tie_breaker = "-id" if order_by.startswith("-") else "id"
+        ordering = [order_by]
+        if order_by.lstrip("-") not in ("created_at", "updated_at"):
+            ordering.append("-created_at")
+        ordering.append(tie_breaker)
         return self.paginate(
             request=request,
-            queryset=queryset.order_by(order_by, "-created_at"),
+            queryset=queryset.order_by(*ordering),
             on_results=lambda pages: PageListAPISerializer(pages, many=True).data,
         )
 
