@@ -276,7 +276,7 @@ fork/deploy/rollback.sh --dry-run l1
 fork/deploy/rollback.sh l1
 ```
 
-`l2` also checks first that the stock image tag is in the local store (`docker image ls -q makeplane/plane-backend:$STOCK_RELEASE`) and warns when the up takes longer than 60 s. `forward` checks that the five fork services run `v1.4.2-live.$FORK_N` and deletes the L1 file only if they do. The manual commands below are the fallback and stay the reference.
+`l2` also checks first that every stock image that uses `APP_RELEASE` (backend, frontend, space, admin, live, proxy) is in the local store at `$STOCK_RELEASE`, warns when the up takes longer than 60 s, and exits 2 if any service still shows a `localhost/plane-fork-` image afterwards. The ssh calls use `BatchMode`, `ConnectTimeout=10` and a keepalive, so a dead host fails fast. `forward` checks that the five fork services run `v1.4.2-live.$FORK_N` and deletes the L1 file only if they do. The manual commands below are the fallback and stay the reference.
 
 **L1: both flags off (about 1 to 2 min).** Keeps the fork images, turns the behaviour off. Live events stop (the socket closes with 4404) and the pages API answers 404. The L1 file is generated on the spot and deleted after the roll-forward.
 

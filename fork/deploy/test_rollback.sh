@@ -45,8 +45,12 @@ if [ "${1:-}" = --self-mutate ]; then
   mutate "forward-keeps-l1-file" 's/^rm -f docker-compose.override.l1.yaml$/true/'
   mutate "l2-pulls" 's/ --pull never//'
   mutate "l1-wrong-services" 's/up -d api worker live$/up -d/'
+  mutate "no-connect-timeout" 's/ -o ConnectTimeout=10//'
+  mutate "no-batchmode" 's/(-o BatchMode=yes /(/'
+  mutate "no-stock-charset-check" 's/^  case "\$STOCK_RELEASE" in \*\[!A-Za-z0-9._-\]\*) die.*$/  true/'
+  mutate "l2-no-fork-check" "s/grep -q 'localhost\/plane-fork-'/false/"
   mutate "step-failure-ignored" 's/^    echo "RESULT: \$MODE failed in step.*$/    echo ignored/'
-  mutate "no-stock-image-check" 's/^if \[ -n "\$ids" \]; then$/if true; then/'
+  mutate "no-stock-image-check" 's/^if \[ -z "\$missing" \]; then$/if true; then/'
   mutate "forward-no-image-check" 's/^      if \[ -n "\$bad" \]; then$/      if false; then/'
   exit "$survived"
 fi
@@ -70,11 +74,15 @@ cat >"$T/bin/docker" <<'EOF'
 #!/bin/sh
 echo "DOCKER[$(basename "$PWD")][APP_RELEASE=${APP_RELEASE:-}] $*" >>"$STUB_LOG"
 case "$1" in
-  image) [ -n "${STUB_NO_STOCK:-}" ] || echo "abc123" ;;
+  image) case "$*" in *"${STUB_NO_STOCK:-@none@}"*) ;; *) echo "abc123" ;; esac ;;
   compose)
     case "$*" in
       *" ps "*)
-        if [ -n "${STUB_PS_STOCK:-}" ]; then
+        if [ -n "${STUB_L2_FORK:-}" ]; then
+          printf 'web makeplane/plane-frontend:v1.4.2\nlive localhost/plane-fork-live:v1.4.2-live.7\n'
+        elif case "$*" in *override*) false ;; *) true ;; esac; then
+          printf 'web makeplane/plane-frontend:v1.4.2\nlive makeplane/plane-live:v1.4.2\napi makeplane/plane-backend:v1.4.2\nplane-db postgres:15.7-alpine\n'
+        elif [ -n "${STUB_PS_STOCK:-}" ]; then
           printf 'web makeplane/plane-frontend:v1.4.2\nlive makeplane/plane-live:v1.4.2\n'
         elif [ -n "${STUB_PS_BAD:-}" ]; then
           printf 'web localhost/plane-fork-web:v1.4.2-live.7\nlive makeplane/plane-live:v1.4.2\napi localhost/plane-fork-api:v1.4.2-live.7\nworker localhost/plane-fork-api:v1.4.2-live.7\nbeat-worker localhost/plane-fork-api:v1.4.2-live.7\n'
@@ -123,6 +131,8 @@ done
 (PLANE_APP_DIR=relative/dir; run l1; [ "$RC" = 1 ] && [ ! -s "$STUB_LOG" ]) && ok "relative app dir rejected" || bad "relative dir"
 (PLANE_APP_DIR='/a b;rm'; run l1; [ "$RC" = 1 ] && [ ! -s "$STUB_LOG" ]) && ok "app dir with odd characters rejected" || bad "odd dir"
 (PVE_HOST='-oProxyCommand=x'; run l1; [ "$RC" = 1 ] && [ ! -s "$STUB_LOG" ]) && ok "PVE_HOST starting with - rejected" || bad "host dash"
+(STOCK_RELEASE='v1;id'; run l2; [ "$RC" = 1 ] && [ ! -s "$STUB_LOG" ]) && ok "STOCK_RELEASE with ; rejected, no ssh call" || bad "stock semicolon"
+(STOCK_RELEASE="v1'x"; run l2; [ "$RC" = 1 ] && [ ! -s "$STUB_LOG" ]) && ok "STOCK_RELEASE with a quote rejected, no ssh call" || bad "stock quote"
 (STOCK_RELEASE=; run l2; [ "$RC" = 1 ] && has STOCK_RELEASE && [ ! -s "$STUB_LOG" ]) && ok "l2 needs STOCK_RELEASE" || bad "l2 stock"
 (FORK_N=; run forward; [ "$RC" = 1 ] && has FORK_N && [ ! -s "$STUB_LOG" ]) && ok "forward needs FORK_N" || bad "forward n"
 (FORK_N=7x; run forward; [ "$RC" = 1 ]) && ok "forward rejects non-numeric FORK_N" || bad "forward n numeric"
@@ -141,9 +151,11 @@ for m in l1 l2 forward; do
   [ "$RC" = 0 ] && [ ! -s "$STUB_LOG" ] && ok "$m: flag order free" || bad "$m flag order"
 done
 run --dry-run l1
-{ has "sed -e" && has "up -d api worker live" && has "ssh -o BatchMode=yes pve.example.test"; } && ok "l1 dry-run prints sed, up and the ssh line" || bad "l1 dry-run content"
+{ has "sed -e" && has "up -d api worker live" && has "+ ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 pve.example.test"; } && ok "l1 dry-run prints sed, up and the ssh line" || bad "l1 dry-run content"
 run --dry-run l2
 { has "--pull never --wait --wait-timeout 60" && has "APP_RELEASE=\$STOCK_RELEASE"; } && ok "l2 dry-run prints the up line" || bad "l2 dry-run content"
+run --dry-run l1
+has "sed -e '\\''s/LIVE_EVENTS_ENABLED" && ! has "'\\'''\\''" && ok "dry-run shows the remote command once-quoted, as sent" || bad "dry-run double quoting"
 run --dry-run forward
 { has "rm -f docker-compose.override.l1.yaml" && has "plane-fork-*:v1.4.2-live.7"; } && ok "forward dry-run prints rm and image check" || bad "forward dry-run content"
 
@@ -159,6 +171,13 @@ run l1
 [ "$ov_before" = "$(cksum <"$APP/docker-compose.override.yaml")" ] && ok "override file untouched" || bad "override modified"
 diff <(grep -vE '(LIVE_EVENTS_ENABLED|PAGES_API_ENABLED)' "$APP/docker-compose.override.yaml") <(grep -vE '(LIVE_EVENTS_ENABLED|PAGES_API_ENABLED)' "$APP/docker-compose.override.l1.yaml") >/dev/null && ok "only flag lines differ" || bad "other lines differ"
 [ "$(printf '%s\n' "$OUT" | grep -c '^TIME ')" = 3 ] && has "TIME total:" && ok "l1 times both steps and the total" || bad "l1 timing"
+
+echo "-- ssh options (a dead host must not hang a rollback)"
+for o in BatchMode=yes ConnectTimeout=10 ServerAliveInterval=15 ServerAliveCountMax=3; do
+  fresh_app
+  run l1
+  [ "$(grep -c "^ssh .*-o $o " "$STUB_LOG")" = 2 ] && ok "every live ssh call carries -o $o" || bad "ssh option $o missing"
+done
 
 echo "-- l1 idempotent"
 sum1=$(cksum <"$APP/docker-compose.override.l1.yaml")
@@ -201,6 +220,11 @@ fresh_app
 run l2
 [ "$RC" = 0 ] && ok "l2 rc 0" || bad "l2 rc=$RC: $OUT"
 exp="DOCKER[plane-app][APP_RELEASE=] image ls -q makeplane/plane-backend:v1.4.2
+DOCKER[plane-app][APP_RELEASE=] image ls -q makeplane/plane-frontend:v1.4.2
+DOCKER[plane-app][APP_RELEASE=] image ls -q makeplane/plane-space:v1.4.2
+DOCKER[plane-app][APP_RELEASE=] image ls -q makeplane/plane-admin:v1.4.2
+DOCKER[plane-app][APP_RELEASE=] image ls -q makeplane/plane-live:v1.4.2
+DOCKER[plane-app][APP_RELEASE=] image ls -q makeplane/plane-proxy:v1.4.2
 DOCKER[plane-app][APP_RELEASE=v1.4.2] $C2
 DOCKER[plane-app][APP_RELEASE=v1.4.2] $C2PS"
 got=$(dockerlog)
@@ -208,9 +232,15 @@ got=$(dockerlog)
 [ ! -e "$APP/docker-compose.override.l1.yaml" ] && ok "l2 does not create files" || bad "l2 created a file"
 { has "TIME up -d stock images" && has "hard-reload"; } && ok "l2 times the up and reminds about hard reload" || bad "l2 timing"
 fresh_app
-STUB_NO_STOCK=1 run l2
-{ [ "$RC" = 2 ] && has "STOP: stock image" && ! dockerlog | grep -q ' up '; } && ok "l2 without the stock image: rc 2, no up" || bad "l2 no stock rc=$RC"
-run l2
+has "image check ok: no fork image" && ok "l2 verifies no fork image runs" || bad "l2 result check message"
+for img in plane-backend plane-frontend plane-space plane-admin plane-live plane-proxy; do
+  fresh_app
+  STUB_NO_STOCK="makeplane/$img:" run l2
+  { [ "$RC" = 2 ] && has "STOP: not in the local store: makeplane/$img:v1.4.2" && ! dockerlog | grep -q ' up '; } && ok "l2 without stock $img: rc 2, no up" || bad "l2 no $img rc=$RC"
+done
+fresh_app
+STUB_L2_FORK=1 run l2
+{ [ "$RC" = 2 ] && has "still runs a fork image" && ! has "RESULT: l2 done"; } && ok "l2 with a fork image still running: rc 2, not reported done" || bad "l2 fork image rc=$RC"
 fresh_app
 run l2; run l2
 [ "$RC" = 0 ] && ok "l2 twice is safe" || bad "l2 twice"

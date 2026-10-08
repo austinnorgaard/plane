@@ -14,9 +14,11 @@
 #            docker-compose.override.l1.yaml from the override with sed, checks
 #            that exactly the 5 flag lines changed (the sed check; stops with
 #            exit 2 and starts nothing if not), then `up -d api worker live`.
-#   l2       stock images. Checks that the stock image tag exists locally, then
+#   l2       stock images. Checks that the stock images (backend, frontend, space, admin, live,
+#            proxy: every image that uses APP_RELEASE) exist locally, then
 #            `up -d --pull never --wait --wait-timeout 60` from the upstream
-#            compose file alone, then lists services and images.
+#            compose file alone, lists services and images, and exits 2 if any
+#            still shows a localhost/plane-fork- image.
 #   forward  roll forward: `up -d` with the normal override, check that the five
 #            fork services run the fork tag for FORK_N, then delete the L1 file.
 #
@@ -92,11 +94,15 @@ EOF
 
 read -r -d '' S_L2_CHECK <<'EOF'
 cd "$APP_DIR" || exit 2
-ids=$(docker image ls -q "makeplane/plane-backend:$STOCK_RELEASE")
-if [ -n "$ids" ]; then
-  echo "stock image makeplane/plane-backend:$STOCK_RELEASE present"
+missing=
+for img in plane-backend plane-frontend plane-space plane-admin plane-live plane-proxy; do
+  ids=$(docker image ls -q "makeplane/$img:$STOCK_RELEASE")
+  [ -n "$ids" ] || missing="$missing makeplane/$img:$STOCK_RELEASE"
+done
+if [ -z "$missing" ]; then
+  echo "stock images present at $STOCK_RELEASE: plane-backend plane-frontend plane-space plane-admin plane-live plane-proxy"
 else
-  echo "STOP: stock image makeplane/plane-backend:$STOCK_RELEASE is not in the local store; --pull never would fail. Nothing was changed."
+  echo "STOP: not in the local store:$missing; --pull never would fail halfway. Nothing was changed."
   exit 2
 fi
 EOF
@@ -126,6 +132,8 @@ cd "$APP_DIR" || exit 2
 rm -f docker-compose.override.l1.yaml
 EOF
 
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
+
 # sq <text>: POSIX single-quote text for the remote shell.
 sq() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
 
@@ -147,13 +155,16 @@ step() {
   remote="$remote sh -c $(sq "$script")"
   if [ "$DRY" = 1 ]; then
     echo "[dry-run] $MODE: $label"
-    echo "+ ssh -o BatchMode=yes $PVE_HOST $(sq "$remote")"
+    echo "+ ssh ${SSH_OPTS[*]} $PVE_HOST"
+    echo "  remote command, sent as one argument:"
+    printf '%s\n' "$remote" | sed 's/^/    /'
     OUT=
     return 0
   fi
   echo "== $MODE: $label"
   t0=$(now)
-  ssh -o BatchMode=yes "$PVE_HOST" "$remote" </dev/null 2>&1 | tee "$TMP"
+  # shellcheck disable=SC2029  # expanding the command on the client side is intended
+  ssh "${SSH_OPTS[@]}" "$PVE_HOST" "$remote" </dev/null 2>&1 | tee "$TMP"
   rc=${PIPESTATUS[0]}
   t1=$(now)
   OUT=$(<"$TMP")
@@ -191,6 +202,14 @@ case "$MODE" in
       echo "WARN: L2 up took ${LAST_SECS} s, over the 60 s target; record it and tell the owner"
     fi
     step "list services and images" "$S_L2_PS"
+    if [ "$DRY" = 1 ]; then
+      echo "[dry-run] l2: check that no service shows a localhost/plane-fork- image"
+    elif printf '%s\n' "$OUT" | grep -q 'localhost/plane-fork-'; then
+      echo "STOP: a service still runs a fork image after L2; do not report L2 done, escalate (RUNBOOK L3)" >&2
+      exit 2
+    else
+      echo "image check ok: no fork image is running"
+    fi
     echo "NEXT: ask users to hard-reload (RUNBOOK section 9)"
     ;;
   forward)
