@@ -111,6 +111,19 @@ class TestPagesOpenAPI:
         listing_400 = schema["paths"][PAGES]["get"]["responses"]["400"]
         assert {"detail"} == set(_body_schema(schema, listing_400)["properties"])
 
+    def test_list_documents_updated_after(self, schema):
+        parameters = {p["name"]: p for p in schema["paths"][PAGES]["get"]["parameters"]}
+        assert {"updated_after", "cursor", "per_page", "order_by"} <= set(parameters)
+        updated_after = parameters["updated_after"]
+        assert updated_after["in"] == "query"
+        assert updated_after.get("required", False) is False
+        assert updated_after["schema"] == {"type": "string", "format": "date-time"}
+        assert "inclusive" in updated_after["description"]
+        responses = schema["paths"][PAGES]["get"]["responses"]
+        assert "updated_after" in responses["400"]["description"]
+        examples = responses["400"]["content"]["application/json"]["examples"]
+        assert "InvalidUpdatedAfter" in examples
+
     def test_409_documents_retry_after(self, schema):
         description = schema["paths"][PAGE]["patch"]["responses"]["409"]["description"]
         assert "Retry-After" in description

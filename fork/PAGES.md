@@ -10,7 +10,7 @@ All paths are under `/api/v1/workspaces/<slug>/projects/<project_id>/`.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `pages/` | list (cursor paginated; `?archived=true` lists archived pages; filters `parent_id`, `external_source`, `external_id`; `order_by` limited to created_at, updated_at, name, sort_order, otherwise the default `-created_at`) |
+| GET | `pages/` | list (cursor paginated, see "Listing and incremental sync"; `?archived=true` lists archived pages; filters `parent_id`, `external_source`, `external_id`, `updated_after`; `order_by` limited to created_at, updated_at, name, sort_order, otherwise the default `-created_at`) |
 | POST | `pages/` | create |
 | GET | `pages/<page_id>/` | retrieve (includes `description_html`) |
 | PATCH | `pages/<page_id>/` | update `name` and/or `description_html` |
@@ -18,6 +18,38 @@ All paths are under `/api/v1/workspaces/<slug>/projects/<project_id>/`.
 | DELETE | `pages/<page_id>/archive/` | unarchive |
 
 The URL kwarg is `page_id` because `ProjectPagePermission` reads `view.kwargs["page_id"]`.
+
+## Listing and incremental sync
+
+Pagination uses the same cursor style as the other `/api/v1` lists: `per_page` (default and maximum 1000) and `cursor`; the
+response carries `next_cursor`, `prev_cursor`, `next_page_results`, `prev_page_results`, `count`, `total_results` and `results`.
+Pass the `next_cursor` of one response as `cursor` of the next until `next_page_results` is false. An invalid `cursor` or
+`per_page` is 400 `{"detail": ...}`.
+
+- **Stable order.** Every ordering ends with `id`, so rows that tie on the ordering field (equal `updated_at`, equal `name`, ...)
+  keep one fixed order and a walk across pages never skips or repeats a row (while the data does not change).
+- **`updated_after`** (ISO 8601 date-time). Keeps pages whose `updated_at` is **greater than or equal to** the value
+  (inclusive). Without `order_by` the list is ordered by `(updated_at, id)` ascending, oldest change first. An explicit
+  `order_by` wins. Forms: `2026-03-01T12:00:00Z`, `2026-03-01T12:00:00.123456+00:00` (url-encode `+` as `%2B`, or use `Z`),
+  a value without an offset is UTC, a bare date `2026-03-01` is midnight UTC. Anything else, an empty value included, is
+  400 `{"detail": "Invalid updated_after parameter. Use an ISO 8601 date-time."}`. It combines with `archived`, `parent_id`
+  and the external filters, and permission filtering is unchanged (private pages of other users are never listed).
+- **Why inclusive.** A client that resumes from a stored timestamp must not miss a page that shares that exact timestamp with a
+  row it already saw. The cost is that the boundary row can come back once more; upsert by `id`.
+
+Recommended agent loop (incremental sync, safe while pages are being edited):
+
+1. Keep `cursor_ts`, the newest `updated_at` already synced (omit `updated_after` on the very first run).
+2. `GET pages/?updated_after=<cursor_ts>&per_page=100`, upsert every result by `id`.
+3. Set `cursor_ts` to the largest `updated_at` in the response and repeat from step 2 **without** a cursor, until a response
+   returns only rows you already hold (the boundary rows repeat because the filter is inclusive) and `next_page_results` is false.
+4. If one response is full of rows that all share the same `updated_at` and `next_page_results` is true, more than a page of
+   rows tie on that instant: follow `next_cursor` (same `updated_after`) until the timestamp advances, then go back to step 3.
+
+Why not just follow `next_cursor` for the whole walk: the cursor is an offset into the ordered list. A page you already
+fetched and then edit moves to the end of the list, which shifts the rows behind it up by one, so the first row of the next
+page can be skipped. Restarting from the newest `updated_at` (step 3) makes each request independent of any offset, so
+nothing is skipped; only the tie case in step 4 relies on the offset, and only matters if a page is edited at that moment.
 
 ## MCP client contract (open item)
 

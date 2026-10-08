@@ -36,11 +36,23 @@ PAGE_PARENT_ID_PARAMETER = OpenApiParameter(
     location=OpenApiParameter.QUERY,
 )
 
+PAGE_UPDATED_AFTER_PARAMETER = OpenApiParameter(
+    name="updated_after",
+    description=(
+        "Return only pages whose updated_at is greater than or equal to this ISO 8601 date-time "
+        "(inclusive; a value without an offset is UTC, a bare date is midnight UTC). Without order_by the "
+        "pages come oldest change first, ordered by (updated_at, id). An invalid value is a 400."
+    ),
+    required=False,
+    type=OpenApiTypes.DATETIME,
+    location=OpenApiParameter.QUERY,
+)
+
 PAGE_ORDER_BY_PARAMETER = OpenApiParameter(
     name="order_by",
     description=(
-        "Field to order by; prefix with '-' for descending order. "
-        "Allowed: created_at, updated_at, name, sort_order (default: -created_at)"
+        "Field to order by; prefix with '-' for descending order; id breaks ties. "
+        "Allowed: created_at, updated_at, name, sort_order (default: -created_at, or updated_at with updated_after)"
     ),
     required=False,
     type=OpenApiTypes.STR,
@@ -79,11 +91,12 @@ PAGE_CONFLICT_CREATE_RESPONSE = OpenApiResponse(
     ],
 )
 
-PAGE_LIST_BAD_REQUEST_RESPONSE_DESCRIPTION = "Invalid pagination parameter (cursor or per_page)."
+PAGE_LIST_BAD_REQUEST_RESPONSE_DESCRIPTION = "Invalid cursor, per_page or updated_after parameter."
 
 PAGE_LIST_VALIDATION_EXAMPLES = [
     _example("Invalid cursor", {"detail": "Invalid cursor parameter."}),
     _example("Invalid per_page", {"detail": "Invalid per_page parameter."}),
+    _example("Invalid updated_after", {"detail": "Invalid updated_after parameter. Use an ISO 8601 date-time."}),
 ]
 
 PAGE_CONFLICT_UPDATE_RESPONSE = OpenApiResponse(
