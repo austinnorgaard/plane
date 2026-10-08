@@ -62,22 +62,30 @@ set -u
 die() { echo "error: $*" >&2; exit 2; }
 usage() { echo "usage: postdeploy-logs.sh [--window W] [--top N] [--timeout S] [--max-...] [--dry-run]" >&2; exit 2; }
 
+# GNU sed is required (the I flag, \b, \x1b). Fail clearly rather than print an empty list.
+sed_ok=$(printf 'Ab 1\n' | sed -E -e 's/\bab\b/x/I' -e 's/\x31/y/' 2>/dev/null) || sed_ok=
+[ "$sed_ok" = "x y" ] || die "GNU sed is required (the I flag, \\b and \\x escapes); install GNU sed and retry"
+
 # redact: stdin to stdout. Order matters: whole-line header rules first, then
 # key=value secrets, then shapes (email, jwt, uuid, hex, ipv6, ipv4, tokens).
 # Needs GNU sed (the I flag). One rule per line.
 redact() {
   sed -E \
-    -e "s/(set-cookie|cookies?)[[:space:]]*[:=].*/\\1: [REDACTED]/Ig" \
+    -e "s/(set-cookie|cookies?)[\"']?[[:space:]]*[:=].*/\\1: [REDACTED]/Ig" \
+    -e "s/((proxy-)?authorization[\"']?[[:space:]]*[:=][[:space:]]*[\"']?Digest).*/\\1 [REDACTED]/Ig" \
     -e "s/((proxy-)?authorization)[\"']?[[:space:]]*[:=][[:space:]]*[\"']?[^\"',]*/\\1: [REDACTED]/Ig" \
-    -e "s/(x-api-key|api[_-]?key|x-auth-token|auth[_-]?token|access[_-]?token|refresh[_-]?token|id[_-]?token|token|client[_-]?secret|secret|password|passwd|pwd|signature|session[_-]?id|session|csrf[_-]?token|x-csrftoken|live-server-secret-key|private[_-]?key|credentials?)[\"']?[[:space:]]*[:=][[:space:]]*[\"']?[^[:space:]\"'\&,;}]+/\\1=[REDACTED]/Ig" \
     -e "s/Bearer[[:space:]]+[A-Za-z0-9._~+\\/=-]+/Bearer [REDACTED]/Ig" \
     -e "s/Basic[[:space:]]+[A-Za-z0-9+\\/=]{8,}/Basic [REDACTED]/Ig" \
+    -e "s/([A-Za-z0-9_.-]*(secret|passw(or)?d|pass|pwd|token|key|signature|credentials?|session[_-]?id|session|sid|auth))[\"']?[[:space:]]*[:=][[:space:]]*(\"[^\"]*\"|'[^']*'|\"[^\"]*\$|'[^']*\$|[^[:space:]\"',;\&}]+)/\\1=[REDACTED]/Ig" \
+    -e "s/(^|[^A-Za-z0-9_])((oauth_)?code)=[^\&[:space:]\"']+/\\1\\2=[REDACTED]/Ig" \
+    -e "s/plane_api_[A-Za-z0-9_]+/[APIKEY]/Ig" \
+    -e "s/(xox[abposr]-[A-Za-z0-9-]+|gh[pousr]_[A-Za-z0-9]{8,}|sk-[A-Za-z0-9_-]{8,}|AKIA[A-Z0-9]{12,})/[VENDORTOKEN]/g" \
     -e "s#(://)[^/@[:space:]]+@#\\1[REDACTED]@#g" \
     -e "s/[A-Za-z0-9._%+'-]+(@|%40)[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)+/[EMAIL]/g" \
     -e "s/eyJ[A-Za-z0-9_-]{5,}\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]*/[JWT]/g" \
     -e "s/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/[UUID]/g" \
     -e "s/\\b[0-9a-fA-F]{24,}\\b/[HEX]/g" \
-    -e "s/(^|[^0-9A-Za-z:.])(([0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|([0-9A-Fa-f]{1,4}(:[0-9A-Fa-f]{1,4}){0,6})::(([0-9A-Fa-f]{1,4}(:[0-9A-Fa-f]{1,4}){0,6})?(:[0-9]{1,3}(\\.[0-9]{1,3}){3})?)|::[0-9A-Fa-f]{1,4}(:[0-9A-Fa-f]{1,4}){0,6}(:[0-9]{1,3}(\\.[0-9]{1,3}){3})?)/\\1[IPV6]/g" \
+    -e "s/(^|[^0-9A-Za-z.])(([0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|([0-9A-Fa-f]{1,4}(:[0-9A-Fa-f]{1,4}){0,6})::(([0-9A-Fa-f]{1,4}(:[0-9A-Fa-f]{1,4}){0,6})?(:[0-9]{1,3}(\\.[0-9]{1,3}){3})?)|::[0-9A-Fa-f]{1,4}(:[0-9A-Fa-f]{1,4}){0,6}(:[0-9]{1,3}(\\.[0-9]{1,3}){3})?)/\\1[IPV6]/g" \
     -e "s/[0-9]{1,3}(\\.[0-9]{1,3}){3}/[IPV4]/g" \
     -e "s/[A-Za-z0-9_-]{32,}/[TOKEN]/g" \
     -e "s/\\x1b\\[[0-9;]*[A-Za-z]//g" \
@@ -138,6 +146,7 @@ case "$PLANE_CTID" in *[!0-9]*) die "PLANE_CTID must be numeric" ;; esac
 case "$PLANE_APP_DIR" in /*) ;; *) die "PLANE_APP_DIR must be an absolute path" ;; esac
 case "$PLANE_APP_DIR" in *[!A-Za-z0-9._/-]*) die "PLANE_APP_DIR has unexpected characters" ;; esac
 
+command -v timeout >/dev/null 2>&1 || die "the timeout command (GNU coreutils) is required"
 SERVICES="api worker beat-worker live"
 MARK="@@PDL-$RANDOM$RANDOM$RANDOM@@"
 
@@ -164,7 +173,7 @@ REMOTE="pct exec $PLANE_CTID -- env APP_DIR=$PLANE_APP_DIR WINDOW=$WINDOW MARK=$
 
 if [ "$DRY" = 1 ]; then
   echo "[dry-run] window $WINDOW, services: $SERVICES"
-  echo "+ timeout $TIMEOUT ssh ${SSH_OPTS[*]} $PVE_HOST"
+  echo "+ timeout --foreground $TIMEOUT ssh ${SSH_OPTS[*]} $PVE_HOST"
   echo "  remote command, sent as one argument:"
   printf '%s\n' "$REMOTE" | sed 's/^/    /'
   echo "RESULT: dry-run only, nothing was run"
@@ -177,10 +186,8 @@ RAW=$TMPD/raw
 CAND=$TMPD/cand
 : >"$CAND"
 
-TO=()
-command -v timeout >/dev/null 2>&1 && TO=(timeout "$TIMEOUT")
 # shellcheck disable=SC2029  # expanding the command on the client side is intended
-"${TO[@]}" ssh "${SSH_OPTS[@]}" "$PVE_HOST" "$REMOTE" </dev/null 2>/dev/null | tr -d '\r' | sed -e 's/\x1b\[[0-9;]*[A-Za-z]//g' >"$RAW"
+timeout --foreground "$TIMEOUT" ssh "${SSH_OPTS[@]}" "$PVE_HOST" "$REMOTE" </dev/null 2>/dev/null | tr -d '\r' | sed -e 's/\x1b\[[0-9;]*[A-Za-z]//g' >"$RAW"
 rc=${PIPESTATUS[0]}
 if [ "$rc" != 0 ]; then
   if [ "$rc" = 124 ]; then
@@ -209,6 +216,8 @@ svc == "" || svc == "END" { next }
   lines[svc]++
   line = $0
   low = tolower(line)
+  lz = low
+  gsub(/[a-z0-9_.]*(error|fatal|unhandled|uncaught|exception|overflow|rate.?limit)[a-z0-9_.]*["\x27]?[ ]*[:=][ ]*0+([^0-9.a-z]|$)/, " ", lz)
   isacc = 0
   if (match(line, /"[A-Z]+ [^" ]+ HTTP\/[0-9.]+" [0-9][0-9][0-9]( |$)/)) {
     seg = substr(line, RSTART, RLENGTH)
@@ -231,13 +240,13 @@ svc == "" || svc == "END" { next }
   }
   if (index(line, "live presence check failed")) unk++
   if (index(line, "opened in an editor during an api update")) opened++
-  if (!isacc && low ~ /rate.?limit|overflow/) rl++
+  if (!isacc && lz ~ /rate.?limit|overflow/) rl++
   if (!isacc && svc != "live" && line ~ /(^|[ \[])(ERROR|CRITICAL)([] :\/]|$)/) { errlog++; cand(line) }
   if (svc == "live") {
     if (match(low, /(close|code)[^0-9]*(4401|4403|4429|1013)/)) {
       code = substr(low, RSTART + RLENGTH - 4, 4); cl[code]++
     }
-    if (low ~ /error|fatal|unhandled|uncaught|exception/) { liveerr++; cand(line) }
+    if (lz ~ /error|fatal|unhandled|uncaught|exception/) { liveerr++; cand(line) }
     if (match(line, /authentication failures, running count [0-9]+/)) authf = lastnum(substr(line, RSTART, RLENGTH))
     if (match(line, /dropped invalid Redis messages, running count [0-9]+/)) invr = lastnum(substr(line, RSTART, RLENGTH))
   }

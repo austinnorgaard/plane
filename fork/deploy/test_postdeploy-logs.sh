@@ -37,7 +37,7 @@ if [ "${1:-}" = --self-mutate ]; then
   # redaction rules: delete one rule line (each rule is one line ending in a backslash)
   mutate "redact-no-cookie" '/set-cookie|cookies/d'
   mutate "redact-no-authorization" '/proxy-)?authorization/d'
-  mutate "redact-no-keyvalue" '/x-api-key|api\[_-\]/d'
+  mutate "redact-no-keyvalue" '/passw(or)?d/d'
   mutate "redact-no-bearer" '/Bearer\[\[:space/d'
   mutate "redact-no-basic" '/Basic\[\[:space/d'
   mutate "redact-no-urlcreds" '/(:\/\/)/d'
@@ -75,6 +75,20 @@ if [ "${1:-}" = --self-mutate ]; then
   mutate "opened-text-changed" 's/opened in an editor during an api update")) opened++/opened in an editor during an api updatex")) opened++/'
   mutate "409-not-pages-only" 's/path ~ \/\\\/pages\\\/\//path ~ \/\\\/x\\\/\//'
   mutate "live-errors-not-live-only" 's/^  if (svc == "live") {$/  if (svc != "live") {/'
+  mutate "redact-no-env-prefix" 's#(\[A-Za-z0-9_.-\]\*(secret#((secret#'
+  mutate "redact-no-quoted-values" 's#(\\"\[^\\"\]\*\\"|#(#'
+  mutate "redact-cookie-no-json-quote" 's#(set-cookie|cookies?)\[\\"[^]]*\]?#(set-cookie|cookies?)#'
+  mutate "redact-ipv6-no-colon-before" 's/(^|\[^0-9A-Za-z.\])((\[0-9A-Fa-f\]{1,4}:){7}/(^|[^0-9A-Za-z:.])(([0-9A-Fa-f]{1,4}:){7}/'
+  mutate "redact-no-plane-api" '/\[APIKEY\]/d'
+  mutate "redact-no-vendor-tokens" '/\[VENDORTOKEN\]/d'
+  mutate "redact-no-oauth-code" '/(oauth_)?code)=/d'
+  mutate "redact-no-digest" '/Digest).\*/d'
+  mutate "redact-no-sessionid" 's/session\[_-\]?id|//'
+  mutate "zero-counters-live-errors" 's/if (lz ~ \/error|if (low ~ \/error|'
+  mutate "zero-counters-ratelimit" 's/!isacc \&\& lz ~/!isacc \&\& low ~/'
+  mutate "no-sed-preflight" 's/^\[ "\$sed_ok" = "x y" \] || die.*$/true/'
+  mutate "no-timeout-required" 's/^command -v timeout.*$/true/'
+  mutate "no-foreground" 's/timeout --foreground "\$TIMEOUT" ssh/timeout "$TIMEOUT" ssh/'
   # remote handling
   mutate "ssh-rc-ignored" 's/^if \[ "\$rc" != 0 \]; then$/if false; then/'
   mutate "no-section-check" 's/grep -qxF "\$MARK \$s" "\$RAW" ||/true ||/'
@@ -83,7 +97,6 @@ if [ "${1:-}" = --self-mutate ]; then
   mutate "no-connect-timeout" 's/ -o ConnectTimeout=10//'
   mutate "no-batchmode" 's/(-o BatchMode=yes /(/'
   mutate "no-alive-interval" 's/ -o ServerAliveInterval=15//'
-  mutate "no-overall-timeout" 's/&& TO=(timeout "\$TIMEOUT")//'
   mutate "window-not-passed" 's/ WINDOW=\$WINDOW MARK/ MARK/'
   mutate "tmp-not-removed" "s/^trap 'rm -rf \"\$TMPD\"' EXIT$/true/"
   # validation
@@ -123,7 +136,9 @@ case "$*" in *" logs "*) [ -f "$STUB_LOGDIR/$last.log" ] && cat "$STUB_LOGDIR/$l
 [ "$last" = "${STUB_DOCKER_FAIL:-@none@}" ] && exit 1
 exit 0
 EOF
-chmod +x "$T/bin/ssh" "$T/bin/pct" "$T/bin/docker"
+REAL_TIMEOUT=$(command -v timeout)
+printf '#!/bin/sh\necho "TIMEOUT $*" >>"$STUB_LOG"\nexec %s "$@"\n' "$REAL_TIMEOUT" >"$T/bin/timeout"
+chmod +x "$T/bin/ssh" "$T/bin/pct" "$T/bin/docker" "$T/bin/timeout"
 export STUB_LOG="$T/log" STUB_LOGDIR="$T/logs" PATH="$T/bin:$PATH" TMPDIR="$T/tmp"
 export PVE_HOST=pve.example.test PLANE_CTID=999 PLANE_APP_DIR="$T/app/plane-app"
 SENTINEL="SENTINEL-not-a-real-secret-4711"
@@ -402,7 +417,7 @@ want proxy-authorization "Proxy-Authorization: Basic dXNlcjpwYXNzd29yZA==" "Prox
 want basic-bare "got Basic dXNlcjpwYXNzd29yZA== here" "got Basic [REDACTED] here"
 want api-key-header "X-Api-Key: sk_live_123456" "X-Api-Key=[REDACTED]"
 want api-key-lower "x-api-key: plane_api_abcdef" "x-api-key=[REDACTED]"
-want api-key-json '{"api_key": "k123"}' '{"api_key=[REDACTED]"}'
+want api-key-json '{"api_key": "k123"}' '{"api_key=[REDACTED]}'
 want api-key-query "GET /x?api_key=abc123&y=1" "GET /x?api_key=[REDACTED]&y=1"
 want secret-header "live-server-secret-key: change-me-now" "live-server-secret-key=[REDACTED]"
 want token-query "GET /x?token=abc123&y=1" "GET /x?token=[REDACTED]&y=1"
@@ -420,6 +435,49 @@ want long-token "k Abcdefghijklmnopqrstuvwxyz0123456789_-AB end" "k [TOKEN] end"
 want plain-text-kept "ERROR task failed after 3 retries (code 4429)" "ERROR task failed after 3 retries (code 4429)"
 want path-kept "GET /api/v1/workspaces/w/projects/ 200" "GET /api/v1/workspaces/w/projects/ 200"
 want mixed "jane@x.io from 10.0.0.1 token=abc id 3fa85f64-5717-4562-b3fc-2c963f66afa6" "[EMAIL] from [IPV4] token=[REDACTED] id [UUID]"
+# review round 1: prefixed env-style names, any value length
+want env-live-secret "LIVE_SERVER_SECRET_KEY=x" "LIVE_SERVER_SECRET_KEY=[REDACTED]"
+want env-live-secret-long "LIVE_SERVER_SECRET_KEY=hunter2hunter2" "LIVE_SERVER_SECRET_KEY=[REDACTED]"
+want env-live-secret-quoted-space 'LIVE_SERVER_SECRET_KEY: "abc def"' "LIVE_SERVER_SECRET_KEY=[REDACTED]"
+want env-secret-key-short "SECRET_KEY=short" "SECRET_KEY=[REDACTED]"
+want env-aws "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG" "AWS_SECRET_ACCESS_KEY=[REDACTED]"
+want env-aws-access-key "AWS_ACCESS_KEY=abc" "AWS_ACCESS_KEY=[REDACTED]"
+want env-rabbit-pass "RABBITMQ_DEFAULT_PASS=guest1" "RABBITMQ_DEFAULT_PASS=[REDACTED]"
+want env-postgres-password "POSTGRES_PASSWORD=pw" "POSTGRES_PASSWORD=[REDACTED]"
+want env-token-suffix "GITHUB_TOKEN=t" "GITHUB_TOKEN=[REDACTED]"
+want env-token-prefix "TOKEN_VALUE_X=1 SECRETARY=2" "TOKEN_VALUE_X=1 SECRETARY=2"
+want env-lower-dotted "plane.live.secret_key = abc" "plane.live.secret_key=[REDACTED]"
+want env-session-id "JSESSIONID=ABC123" "JSESSIONID=[REDACTED]"
+# JSON cookie keys
+want json-cookie '{"cookie":"abc123"}' '{"cookie: [REDACTED]'
+want json-set-cookie '{"set-cookie":"sid=abc; Path=/"}' '{"set-cookie: [REDACTED]'
+want json-cookies-space "{'Cookies' : 'a=b'}" "{'Cookies: [REDACTED]"
+# quoted values with spaces: the whole value goes, no tail
+nogo quoted-json-space '{"password":"hunt er2 with space"}' "er2" "with" "space"
+nogo quoted-colon-space 'password: "pa ss word" tail' "pa ss" "ss word"
+nogo quoted-equals-space 'password = "my secret"' "secret" "my"
+nogo quoted-single-space "{'api_key': 'two words here'}" "words" "here" "two"
+nogo quoted-unterminated 'password: "unterminated value' "unterminated" "value"
+want quoted-tail-kept 'password: "a b" next=1' 'password=[REDACTED] next=1'
+# IPv6 right after a colon
+want ipv6-after-colon "addr:2001:db8::1 up" "addr:[IPV6] up"
+want ipv6-after-colon-loopback "peer:::1 up" "peer:[IPV6] up"
+want ipv6-after-equals "ip=fe80::1%eth0" "ip=[IPV6]%eth0"
+want ipv6-remote-address "remoteAddress: ::ffff:10.0.0.1" "remoteAddress: [IPV6]"
+want ipv6-bracket-mapped "[::ffff:1.2.3.4]:8080" "[[IPV6]]:8080"
+# short bare keys and other schemes
+want plane-api-short "key plane_api_abc123 in body" "key [APIKEY] in body"
+want plane-api-upper "PLANE_API_ABC in body" "[APIKEY] in body"
+want digest 'Authorization: Digest username="bob", response="abc"' "Authorization: [REDACTED]"
+want digest-json '{"authorization":"Digest username=\"bob\""}' '{"authorization: [REDACTED]'
+want oauth-code "GET /cb?code=ab12&state=1" "GET /cb?code=[REDACTED]&state=1"
+want oauth-code-prefixed "GET /cb?x=1&oauth_code=zz" "GET /cb?x=1&oauth_code=[REDACTED]"
+want status-code-kept "status_code=500 exit code=" "status_code=500 exit code="
+want slack-token "tok xoxb-123-abc end" "tok [VENDORTOKEN] end"
+want github-token "ghp_abcdefgh12345" "[VENDORTOKEN]"
+want sk-token "key sk-abcdefgh12" "key [VENDORTOKEN]"
+want aws-key-id "AKIAABCDEFGHIJKLMNOP" "[VENDORTOKEN]"
+nogo token-then-bearer "token: Bearer abc123def" "abc123def"
 for s in "jane@x.io from 10.0.0.1 token=abc Bearer qq2wwe3rrr4tt" "Cookie: a=b" "peer 2001:db8::1 up" "x-api-key: k Authorization: Bearer z"; do
   a=$(rd "$s")
   b=$(printf '%s\n' "$a" | "$SCRIPT" --redact-stdin)
@@ -428,6 +486,49 @@ done
 out=$(printf 'a\033[31mb\rc\n' | "$SCRIPT" --redact-stdin)
 [ "$out" = "abc" ] && ok "control characters stripped" || bad "control characters: '$out'"
 "$SCRIPT" --redact-stdin extra </dev/null >/dev/null 2>&1; [ $? = 2 ] && ok "--redact-stdin takes no other arguments" || bad "redact-stdin args"
+
+echo "-- zero counters are not errors (quiet stats lines)"
+reset_logs
+addlog live <<'EOF'
+LIVE_EVENTS: stats errors=0 rateLimitOverflows=0 fatal: 0 invalid.redisDropped=0
+LIVE_EVENTS: stats {"errors": 0, "uncaught":0, "rate_limit_overflows": 0}
+EOF
+echo "worker stats rateLimitOverflow=0 exceptions=0" | addlog worker
+run
+{ [ "$RC" = 0 ] && hasre 'live_errors +0 ' && hasre 'rate_limit_overflows +0 '; } && ok "zero counters do not count as live errors or overflows" || bad "zero counters rc=$RC: $OUT"
+echo "LIVE_EVENTS: stats errors=3" | addlog live
+run
+{ [ "$RC" = 1 ] && has "OVER THRESHOLD: live_errors"; } && ok "a non-zero error counter still counts" || bad "nonzero counter rc=$RC"
+reset_logs
+echo "LIVE_EVENTS: stats rateLimitOverflows=11" | addlog live
+run
+{ [ "$RC" = 0 ] && hasre 'rate_limit_overflows +1 '; } && ok "a non-zero overflow counter counts (under the threshold)" || bad "nonzero overflow rc=$RC"
+for i in 1 2 3 4 5 6 7 8 9 10 11; do echo "rate limit overflow $i errors=0"; done | addlog worker
+run
+{ [ "$RC" = 1 ] && has "OVER THRESHOLD: rate_limit_overflows"; } && ok "overflow lines with an unrelated zero counter still count" || bad "mixed zero rc=$RC"
+
+echo "-- prerequisites"
+mkdir -p "$T/badsed" "$T/nots"
+printf '#!/bin/sh\necho "sed: BSD stub" >&2\nexit 1\n' >"$T/badsed/sed"
+chmod +x "$T/badsed/sed"
+reset_logs
+(PATH="$T/badsed:$PATH"; run; [ "$RC" = 2 ] && has "GNU sed is required" && nolog) && ok "non-GNU sed: exit 2 with a clear message, no ssh" || bad "sed preflight rc=$RC"
+(PATH="$T/badsed:$PATH"; run --redact-stdin; [ "$RC" = 2 ] && has "GNU sed is required") && ok "non-GNU sed also refused for --redact-stdin" || bad "sed preflight redact"
+for t in sed awk grep tr cut sort uniq head mktemp rm cat dirname basename; do ln -sf "$(command -v $t)" "$T/nots/$t"; done
+cp "$T/bin/ssh" "$T/bin/pct" "$T/bin/docker" "$T/nots/"
+: >"$STUB_LOG"
+OUT=$(PATH="$T/nots" "$BASH" "$SCRIPT" 2>&1); RC=$?
+{ [ "$RC" = 2 ] && has "timeout command" && nolog; } && ok "missing timeout: exit 2 with a clear message, no ssh" || bad "timeout missing rc=$RC: $OUT"
+OUT=$(PATH="$T/nots" "$BASH" "$SCRIPT" --dry-run 2>&1); RC=$?
+[ "$RC" = 2 ] && ok "missing timeout is refused for --dry-run too" || bad "timeout missing dry-run rc=$RC"
+run --dry-run
+has "timeout --foreground 120 ssh" && ok "overall limit uses timeout --foreground (Ctrl-C reaches ssh)" || bad "foreground in dry-run"
+reset_logs
+run
+grep -q 'ssh -o BatchMode' "$STUB_LOG" && ok "real run goes through ssh" || bad "real run ssh"
+grep -q '^TIMEOUT --foreground 120 ssh ' "$STUB_LOG" && ok "real run: timeout --foreground 120 ssh" || bad "real timeout call"
+run --timeout 30
+grep -q '^TIMEOUT --foreground 30 ssh ' "$STUB_LOG" && ok "--timeout value reaches timeout" || bad "timeout value"
 
 echo "-- redaction end to end: sentinels in every service log never reach the output"
 reset_logs
