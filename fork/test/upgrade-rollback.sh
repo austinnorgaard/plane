@@ -226,7 +226,11 @@ UK=""
 ISSUES=()    # id|name of every work item the script created
 PAGES=()     # id|project|marker of every page the script created
 FORK_PAGE_IDS=()
-PATCHED_PAGE=""
+PATCHED_PAGE=""     # stock page with a stored binary, PATCHed in the fork (rebase path)
+PATCHED_NOBIN="" # stock page without a binary, PATCHed in the fork (direct path)
+BIN_KEEP=""      # stock page with a binary the fork never touches
+BIN_KEEP_SHA=""
+BIN_PATCHED_SHA=""
 LABEL_IDS=()
 CYCLE_ID=""
 MODULE_ID=""
@@ -272,6 +276,33 @@ mk_page() {
   LAST_ID=$(jq_py 'd["id"]')
   [ -n "$LAST_ID" ] || return 1
   PAGES+=("$LAST_ID|$pid|$marker")
+}
+
+# page_bin_sha PAGE -> "<bytes>:<sha256 prefix>" of the description endpoint, empty when 0 bytes
+page_bin_sha() {
+  curl -sS -m 30 -o "$TMP/desc.bin" -H "Cookie: session-id=$AS" "$WSAPI/projects/$PID_A/pages/$1/description/" 2>/dev/null
+  local n
+  n=$(wc -c <"$TMP/desc.bin" 2>/dev/null || echo 0)
+  [ "${n:-0}" -gt 0 ] || return 0
+  printf '%s:%s' "$n" "$(sha256sum "$TMP/desc.bin" | cut -c1-16)"
+}
+
+# seed_binary PAGE HTML: build the stored document through the live converter and write it with
+# the stock description endpoint (the call the stock editor makes)
+seed_binary() {
+  local page=$1 html b64
+  html=$(python3 -c 'import sys;sys.stdout.write(sys.argv[1].encode("ascii").decode("unicode_escape"))' "$2")
+  b64=$(HTML="$html" dc exec -T -e HTML api python -c '
+import os, requests
+r = requests.post("http://live:3000/live/convert-document", json={"description_html": os.environ["HTML"], "variant": "document"},
+                  headers={"live-server-secret-key": os.environ.get("LIVE_SERVER_SECRET_KEY", "")}, timeout=30)
+print("BIN " + (r.json().get("description_binary") or "") if r.status_code == 200 else "ERR %s" % r.status_code)
+' 2>/dev/null | tr -d '\r' | grep '^BIN ' | tail -n 1)
+  b64=${b64#BIN }
+  CODE=000
+  [ -n "$b64" ] || return 1
+  sreq PATCH "$WSAPI/projects/$PID_A/pages/$page/description/" "$MS" "{\"description_binary\":\"$b64\",\"description_html\":$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$html")}"
+  [ "$CODE" = 200 ]
 }
 
 seed_stock() {
@@ -337,6 +368,13 @@ seed_stock() {
   if [ -n "$p1" ] && [ -n "$p2" ] && [ -n "$p3" ] && [ -n "$pb" ]; then
     ok "seed: 4 pages with content"
     PATCHED_PAGE=$p3
+    PATCHED_NOBIN=$p1
+    BIN_KEEP=$p2
+    # two pages get a stored document, as the stock editor writes it (live converts the html)
+    seed_binary "$p2" '<h2>Heading caf\u00e9 \u65e5\u672c\u8a9e</h2><ul><li>one</li><li>two</li></ul><p>upg-stock-page-2</p>' && ok "seed: stored document on the rich page" || bad "seed: stored document on the rich page" "http $CODE"
+    seed_binary "$p3" '<p>upg-stock-page-3 before the fork</p>' && ok "seed: stored document on the page the fork will PATCH" || bad "seed: stored document on the page the fork will PATCH" "http $CODE"
+    BIN_KEEP_SHA=$(page_bin_sha "$p2")
+    [ -n "$BIN_KEEP_SHA" ] && ok "seed: stored document of the rich page has ${BIN_KEEP_SHA%%:*} bytes" || bad "seed: stored document of the rich page" "empty"
   else
     bad "seed: 4 pages with content" "page create failed (last http $CODE)"
   fi
@@ -460,6 +498,7 @@ check_app() {
     expect_code "$label: /api/v1 pages API answers 200" '^200$'
     local missing=0 row
     for row in "${PAGES[@]}"; do
+      [ "$(printf '%s' "$row" | cut -d'|' -f2)" = "$PID_A" ] || continue
       grep -q "${row%%|*}" "$BODY" || missing=$((missing + 1))
     done
     [ "$missing" -eq 0 ] && ok "$label: /api/v1 pages list holds all project A pages" || bad "$label: /api/v1 pages list holds all pages" "$missing missing"
@@ -468,14 +507,22 @@ check_app() {
   fi
 }
 
-# check_fork_page_content LABEL: the page the fork PATCHed has the new text and a binary in the stock readers
+# check_patched_page LABEL: pages the fork changed or kept, read the way the stock UI reads them
 check_patched_page() {
-  local label=$1 len
+  local label=$1 sha
   sreq GET "$WSAPI/projects/$PID_A/pages/$PATCHED_PAGE/" "$AS"
-  if [ "$CODE" = 200 ] && jq_py 'd.get("description_html","")' | grep -q 'upg-patched-in-fork'; then ok "$label: page patched in the fork shows the new text"; else bad "$label: page patched in the fork shows the new text" "http $CODE"; fi
-  curl -sS -m 30 -o "$TMP/desc.bin" -H "Cookie: session-id=$AS" "$WSAPI/projects/$PID_A/pages/$PATCHED_PAGE/description/" 2>/dev/null
-  len=$(wc -c <"$TMP/desc.bin" 2>/dev/null || echo 0)
-  [ "${len:-0}" -gt 0 ] && ok "$label: description endpoint streams the binary written by the fork ($len bytes)" || bad "$label: description endpoint streams the binary written by the fork" "empty"
+  if [ "$CODE" = 200 ] && jq_py 'd.get("description_html","")' | grep -q 'upg-patched-in-fork'; then ok "$label: page with a stored document, PATCHed in the fork, shows the new text"; else bad "$label: page with a stored document, PATCHed in the fork, shows the new text" "http $CODE"; fi
+  sreq GET "$WSAPI/projects/$PID_A/pages/$PATCHED_NOBIN/" "$AS"
+  if [ "$CODE" = 200 ] && jq_py 'd.get("description_html","")' | grep -q 'upg-patched-nobinary-in-fork'; then ok "$label: page without a stored document, PATCHed in the fork, shows the new text"; else bad "$label: page without a stored document, PATCHed in the fork, shows the new text" "http $CODE"; fi
+  sha=$(page_bin_sha "$BIN_KEEP")
+  [ -n "$sha" ] && [ "$sha" = "$BIN_KEEP_SHA" ] && ok "$label: stored document of the untouched stock page is byte-identical ($sha)" || bad "$label: stored document of the untouched stock page is byte-identical" "want $BIN_KEEP_SHA got ${sha:-empty}"
+  sha=$(page_bin_sha "$PATCHED_PAGE")
+  if [ -z "$BIN_PATCHED_SHA" ]; then
+    BIN_PATCHED_SHA=$sha
+    [ -n "$sha" ] && ok "$label: the fork wrote a new stored document ($sha), readable by the description endpoint" || bad "$label: the fork wrote a stored document" "empty"
+  else
+    [ "$sha" = "$BIN_PATCHED_SHA" ] && ok "$label: stored document written by the fork is byte-identical ($sha)" || bad "$label: stored document written by the fork is byte-identical" "want $BIN_PATCHED_SHA got ${sha:-empty}"
+  fi
 }
 
 events_check() { # events_check LABEL: a PATCH with the API key delivers a frame (fork flags on)
@@ -564,12 +611,19 @@ cmd_run() {
       bad "fork: page $fp created through /api/v1" "http $CODE"
     fi
   done
+  local before_sha
+  before_sha=$(page_bin_sha "$PATCHED_PAGE")
+  [ -n "$before_sha" ] && ok "fork: the page to PATCH has a stored document from stock ($before_sha)" || bad "fork: the page to PATCH has a stored document from stock" "empty"
   req PATCH "$API/projects/$PID_A/pages/$PATCHED_PAGE/" "$MK" '{"description_html":"<p>upg-patched-in-fork</p>"}'
-  expect_code "fork: PATCH of a stock-created page through /api/v1" '^200$'
+  expect_code "fork: PATCH through /api/v1 of a stock page with a stored document (rebase through live)" '^200$'
+  [ "$(page_bin_sha "$PATCHED_PAGE")" != "$before_sha" ] && ok "fork: that PATCH changed the stored document" || bad "fork: that PATCH changed the stored document" "same bytes"
+  req PATCH "$API/projects/$PID_A/pages/$PATCHED_NOBIN/" "$MK" '{"description_html":"<p>upg-patched-nobinary-in-fork</p>"}'
+  expect_code "fork: PATCH through /api/v1 of a stock page without a stored document" '^200$'
   # one stock-created page keeps its marker for the readers; the patched one now carries a new one
   local i
   for i in "${!PAGES[@]}"; do
     [ "${PAGES[$i]%%|*}" = "$PATCHED_PAGE" ] && PAGES[i]="$PATCHED_PAGE|$PID_A|upg-patched-in-fork"
+    [ "${PAGES[$i]%%|*}" = "$PATCHED_NOBIN" ] && PAGES[i]="$PATCHED_NOBIN|$PID_A|upg-patched-nobinary-in-fork"
   done
   events_check "fork"
   check_app "fork" fork
@@ -577,7 +631,7 @@ cmd_run() {
   check_patched_page "fork"
   sleep 5
   take_fp 1-fork
-  compare_fp "upgrade: every stock row intact (only the PATCHed page may change)" 0-stock 1-fork "page:$PATCHED_PAGE"
+  compare_fp "upgrade: every stock row intact (only the two PATCHed pages may change)" 0-stock 1-fork "page:$PATCHED_PAGE" "page:$PATCHED_NOBIN"
 
   report "== 4. L1 rollback (flags off, fork images)"
   gen_l1
