@@ -119,8 +119,11 @@ services:
       # Magic-link tests mock the celery delay but the view first checks that
       # EMAIL_HOST is configured. Set a placeholder so the check passes.
       EMAIL_HOST: test-smtp.invalid
+      # Shared live event payload fixtures (mounted read-only below).
+      LIVE_EVENTS_CONTRACT_DIR: /contracts/live-events
     volumes:
       - ./apps/api:/code
+      - ./fork/contracts:/contracts:ro
     working_dir: /code
     depends_on:
       test-db:

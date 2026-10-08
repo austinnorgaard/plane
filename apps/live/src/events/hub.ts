@@ -97,7 +97,7 @@ export const EVENT_VERBS = ["created", "updated", "deleted", "removed", "archive
 const MAX_IDS = 500;
 const MAX_SETTLE_TIMERS_PER_PROJECT = 20;
 
-// The API publisher names the id list `ids`; the design names it `issue_ids`. Accept both.
+// `ids` is the legacy name of `issue_ids`, accepted for older publishers during a rolling deploy. The publisher must emit `issue_ids`.
 const withIssueIds = (raw: unknown) => {
   if (raw && typeof raw === "object" && !Array.isArray(raw)) {
     const obj = raw as Record<string, unknown>;
