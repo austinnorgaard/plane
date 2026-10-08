@@ -19,6 +19,12 @@
 #                           Without --browser the manual browser steps are printed.
 #   local-stack.sh browser [--negative]
 #                           only the browser checks (no API smoke, no rollbacks)
+#   local-stack.sh browser --live [--negative]
+#                           the two-session live-updates scenarios instead
+#                           (browser/live-updates-browser.mjs: create, update, move,
+#                           delete, bulk, comment, with the latency of each); --negative
+#                           also runs them with the events socket of the second session
+#                           blocked and requires every scenario to FAIL
 #   local-stack.sh down     stop the stack and remove its volumes
 #   local-stack.sh patch-page <page_id> [html]
 #                           PATCH a page with the member key (used by the manual steps)
@@ -40,6 +46,7 @@
 #   LOCAL_STACK_TLS_PORT       published https port (unused by the stack), default 18443
 #   LOCAL_STACK_MINIO_IMAGE    replace the upstream minio image (it may be unpullable)
 #   COMPOSE_CMD                compose command, for example "podman-compose"
+#   LOCAL_STACK_LIVE_BOUND_MS  latency bound per live check in ms (default 8000)
 #   LOCAL_STACK_ARTIFACTS      screenshot directory of the browser checks
 #                              (default: fork/test/artifacts, gitignored)
 #   PLAYWRIGHT_MODULE_DIR, PLAYWRIGHT_CHROMIUM_PATH  see browser/pages-browser.mjs
@@ -692,13 +699,65 @@ run_browser() {
   fi
 }
 
+# run_live NEGATIVE: run browser/live-updates-browser.mjs (session A admin, session B member) and
+# fold its lines into the report. With NEGATIVE=1 it runs a second time with the events socket of
+# session B blocked and a short bound; every one of the six scenarios must then have a FAIL line.
+LIVE_SCRIPT=${LOCAL_STACK_LIVE_SCRIPT:-$HERE/browser/live-updates-browser.mjs}
+LIVE_OUT=$TMP/live.out
+live_env() { # live_env [KEY=VALUE...] -> output in $LIVE_OUT, status in LIVE_RC
+  LIVE_BROWSER_BASE_URL=http://localhost:$(envval LISTEN_HTTP_PORT) \
+    LIVE_BROWSER_WORKSPACE=$WORKSPACE_SLUG \
+    LIVE_BROWSER_PROJECT_ID=$(stateval PROJECT_ID) \
+    LIVE_BROWSER_ADMIN_SESSION=$(stateval ADMIN_SESSION) \
+    LIVE_BROWSER_MEMBER_SESSION=$(stateval MEMBER_SESSION) \
+    LIVE_BROWSER_BOUND_MS=${LOCAL_STACK_LIVE_BOUND_MS:-8000} \
+    LIVE_BROWSER_ARTIFACTS=${LOCAL_STACK_ARTIFACTS:-$HERE/artifacts} \
+    env "$@" node "$LIVE_SCRIPT" >"$LIVE_OUT" 2>&1
+  LIVE_RC=$?
+}
+run_live() {
+  local negative=$1 line n missing=""
+  report "-- live-updates browser checks (two sessions, headless, bound ${LOCAL_STACK_LIVE_BOUND_MS:-8000} ms)"
+  if ! command -v node >/dev/null 2>&1 || [ ! -f "$LIVE_SCRIPT" ]; then
+    bad "live-updates browser checks" "node or $(basename "$LIVE_SCRIPT") missing"
+    return 0
+  fi
+  live_env
+  while IFS= read -r line; do
+    case "$line" in
+      "PASS "*) ok "live: ${line#PASS }" ;;
+      "FAIL "*) FAIL_N=$((FAIL_N + 1)); report "FAIL live: ${line#FAIL }" ;;
+      "NOTE "* | "SCENARIO "* | "BOUND "*) report "   $line" ;;
+    esac
+  done <"$LIVE_OUT"
+  if [ "$LIVE_RC" -ne 0 ] && ! grep -q '^FAIL ' "$LIVE_OUT"; then
+    bad "live-updates browser checks" "exit $LIVE_RC: $(grep -v '^PASS ' "$LIVE_OUT" | tail -n 1 | cut -c1-160)"
+  fi
+  [ "$negative" -eq 1 ] || return 0
+  report "-- live-updates negative check (events socket of session B blocked, every scenario must fail)"
+  live_env LIVE_BROWSER_BREAK=socket LIVE_BROWSER_BOUND_MS="${LOCAL_STACK_LIVE_NEG_BOUND_MS:-3000}"
+  for n in 1 2 3 4 5 6; do
+    grep -q "^FAIL S$n " "$LIVE_OUT" || missing="$missing S$n"
+  done
+  if [ "$LIVE_RC" -eq 1 ] && [ -z "$missing" ]; then
+    ok "live negative: script exits 1 and fails all six scenarios when the events socket is blocked"
+  else
+    bad "live negative: every scenario must fail when the events socket is blocked" "exit $LIVE_RC; no FAIL line for:${missing:- none}"
+  fi
+}
+
 cmd_browser() {
   [ -f "$STATE_FILE" ] || die "no $(basename "$STATE_FILE"); run '$0 up' first"
   : >"$REPORT_FILE"
-  local negative=0
-  [ "${1:-}" = "--negative" ] && negative=1
-  [ -z "${1:-}" ] || [ "$negative" -eq 1 ] || die "browser: unknown option $1 (use --negative)"
-  run_browser "$negative"
+  local negative=0 live=0 arg
+  for arg in "$@"; do
+    case "$arg" in
+      --negative) negative=1 ;;
+      --live) live=1 ;;
+      *) die "browser: unknown option $arg (use --live [--negative])" ;;
+    esac
+  done
+  if [ "$live" -eq 1 ]; then run_live "$negative"; else run_browser "$negative"; fi
   report ""
   report "SUMMARY: $PASS_N passed, $FAIL_N failed"
   [ "$FAIL_N" -eq 0 ]
@@ -752,7 +811,7 @@ cmd_down() {
 
 # ------------------------------------------------------------------ main
 
-usage() { sed -n '3,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 main() {
   local sub=${1:-help}

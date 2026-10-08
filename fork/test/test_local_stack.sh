@@ -349,6 +349,64 @@ rc=$?
 check "--negative without --browser is refused" "$([ "$rc" -ne 0 ] && echo 0 || echo 1)"
 check "browser mode is gitignored for its artifacts" "$(git -C "$HERE" check-ignore -q artifacts/x.png && echo 0 || echo 1)"
 
+# ------------------------------------------------------------------ live-updates browser checks, through browser --live
+# a stub stands in for browser/live-updates-browser.mjs: it records which variables it got (names only)
+cat >"$T/lstub.mjs" <<'JS'
+import { writeFileSync } from "node:fs";
+const e = process.env;
+writeFileSync(e.STUB_LIVE_LOG, [e.LIVE_BROWSER_ADMIN_SESSION ? "admin" : "", e.LIVE_BROWSER_MEMBER_SESSION ? "member" : "", e.LIVE_BROWSER_BREAK || "nobreak", e.LIVE_BROWSER_BOUND_MS, e.LIVE_BROWSER_ARTIFACTS].join(" ") + "\n", { flag: "a" });
+const mode = e.STUB_LIVE_MODE;
+if (mode === "crash") { console.error("boom"); process.exit(2); }
+const broken = e.LIVE_BROWSER_BREAK === "socket" && mode !== "blind";
+const failing = broken ? [1, 2, 3, 4, 5, 6] : mode === "fail" ? [3] : [];
+if (broken && mode === "partial") failing.pop();
+for (const n of [1, 2, 3, 4, 5, 6]) {
+  if (failing.includes(n)) console.log(`FAIL S${n} stub (not seen live within ${e.LIVE_BROWSER_BOUND_MS} ms without a reload)`);
+  else console.log(`PASS S${n} stub: seen live after 12 ms (bound ${e.LIVE_BROWSER_BOUND_MS} ms)`);
+  console.log(`NOTE S${n} stub latency ms: 12`);
+}
+console.log("SCENARIO S1 create   PASS  checks=1  max latency=12 ms");
+process.exit(failing.length ? 1 : 0);
+JS
+live_browser() { # live_browser OUTFILE ARGS... ; env STUB_LIVE_MODE selects the stub behaviour
+  local o=$1
+  shift
+  new_dir
+  "$SCRIPT" up >/dev/null 2>&1
+  : >"$T/live.log"
+  LOCAL_STACK_LIVE_SCRIPT=$T/lstub.mjs LOCAL_STACK_ARTIFACTS=$T/art STUB_LIVE_LOG=$T/live.log "$SCRIPT" browser "$@" >"$o" 2>&1
+}
+STUB_LIVE_MODE=ok live_browser "$T/l-ok.out" --live
+rc=$?
+check "browser --live exits 0 when the live checks pass" "$rc"
+check "browser --live folds the PASS, NOTE and SCENARIO lines into the report" "$(has "$T/l-ok.out" '^PASS live: S6 stub' && has "$T/d/local-stack.report" '^PASS live: S1 stub' && has "$T/d/local-stack.report" 'NOTE S2 stub latency' && has "$T/d/local-stack.report" 'SCENARIO S1 create' && echo 0 || echo 1)"
+check "browser --live does not run the pages checks" "$(has "$T/l-ok.out" 'P4 PATCH' && echo 1 || echo 0)"
+check "live script got both sessions, the default bound and the artifacts dir through its environment" "$([ "$(cat "$T/live.log")" = "admin member nobreak 8000 $T/art" ] && echo 0 || echo 1)"
+check "live sessions are not printed" "$(grep -qE 'sess-' "$T/l-ok.out" "$T/d/local-stack.report" && echo 1 || echo 0)"
+STUB_LIVE_MODE=ok LOCAL_STACK_LIVE_BOUND_MS=2500 live_browser "$T/l-bound.out" --live
+check "LOCAL_STACK_LIVE_BOUND_MS reaches the script as the bound" "$(grep -q ' 2500 ' "$T/live.log" && echo 0 || echo 1)"
+STUB_LIVE_MODE=fail live_browser "$T/l-fail.out" --live
+rc=$?
+check "a failing live check makes browser --live exit non-zero" "$([ "$rc" -ne 0 ] && has "$T/l-fail.out" '^FAIL live: S3 stub' && echo 0 || echo 1)"
+STUB_LIVE_MODE=crash live_browser "$T/l-crash.out" --live
+rc=$?
+check "a crashing live script (no FAIL line) makes browser --live exit non-zero" "$([ "$rc" -ne 0 ] && has "$T/l-crash.out" '^FAIL live-updates browser checks' && echo 0 || echo 1)"
+STUB_LIVE_MODE=ok live_browser "$T/l-neg.out" --live --negative
+rc=$?
+check "live --negative passes when the blocked run fails all six scenarios" "$rc"
+check "live --negative ran the script twice, the second time with the socket blocked and a short bound" "$([ "$(wc -l <"$T/live.log")" = 2 ] && tail -n 1 "$T/live.log" | grep -q "^admin member socket 3000 " && echo 0 || echo 1)"
+STUB_LIVE_MODE=partial live_browser "$T/l-part.out" --live --negative
+rc=$?
+check "live --negative fails when one scenario still passes with the socket blocked" "$([ "$rc" -ne 0 ] && has "$T/l-part.out" '^FAIL live negative' && has "$T/l-part.out" 'S6' && echo 0 || echo 1)"
+STUB_LIVE_MODE=blind live_browser "$T/l-blind.out" --live --negative
+rc=$?
+check "live --negative fails when the blocked run does not fail at all" "$([ "$rc" -ne 0 ] && has "$T/l-blind.out" '^FAIL live negative' && echo 0 || echo 1)"
+STUB_LIVE_MODE=ok live_browser "$T/l-bad.out" --lives
+rc=$?
+check "browser with an unknown option is refused" "$([ "$rc" -ne 0 ] && has "$T/l-bad.out" 'unknown option --lives' && echo 0 || echo 1)"
+STUB_LIVE_MODE=ok live_browser "$T/l-neg-only.out" --negative
+check "browser --negative without --live still runs the pages checks, not the live script" "$([ ! -s "$T/live.log" ] && echo 0 || echo 1)"
+
 # ------------------------------------------------------------------ L2 events socket check, through smoke
 l2_smoke() { # l2_smoke OUTFILE [ENV=VALUE...]; runs the real smoke with the stubbed probe
   local o=$1
