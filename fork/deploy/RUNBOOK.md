@@ -105,13 +105,14 @@ Checks, each a PASS or a FAIL:
 - the release sha is an ancestor of `origin/live-updates/v1.4.2` (the gate fetches that branch first);
 - the QA record has a PASS naming the sha and no FAIL for it;
 - the archive sha256 matches the build output (done by `fetch-images.sh` with `SKIP_LOAD=1`, which copies the archive to a temporary directory, so keep free disk for one more copy; nothing is loaded);
+- the archive is bound to the release sha: every image in it carries the label `plane-fork-build=<sha>` that `build.sh` sets (read from the archive manifest and image configs; nothing is loaded). If you pass the saved build output as `BUILD_NOTES`, its `SHA verified: <sha>` line must also name the release sha. An archive with no label and no notes is a FAIL;
 - every row of the inspection table has a result;
-- `LIVE_EVENTS_TRUSTED_PROXIES` is non-empty and every entry is an address or CIDR range (a `/0` range is refused);
+- `LIVE_EVENTS_TRUSTED_PROXIES` is non-empty and every entry is an address or CIDR range (ranges wider than /8 for IPv4 or /16 for IPv6 are refused);
 - `PAGES_REBASE_MAX_HTML_BYTES` is at least `PAGES_API_MAX_HTML_BYTES` (unset values count as the code defaults, 524288 and 262144);
 - `PAGES_REBASE_WORKER_MAX_MB` is between 64 and 4096 (unset is the code default, 256);
 - `NODE_OPTIONS` has no `--max-old-space-size`;
-- `LIVE_SERVER_SECRET_KEY` is set and not the shipped placeholder;
-- `inspect.sh` exits 0;
+- `LIVE_SERVER_SECRET_KEY` is set and neither is nor contains the shipped placeholder (whitespace and an unquoted `# comment` tail are removed first, as compose does);
+- `inspect.sh` exits 0 (`PLANE_CTID` must be digits and `PLANE_APP_DIR` a safe absolute path, else nothing is sent; ssh runs with `BatchMode` and a timeout, `GATE_INSPECT_TIMEOUT` seconds overall, default 300);
 - rollback is available: the five L1 flag lines are in the override, and `STOCK_RELEASE` is set and is not a fork tag.
 
 Any FAIL means stop and fix the item or escalate; there is no override. Without `-e`, a `NODE_OPTIONS` in your own shell is read too.
