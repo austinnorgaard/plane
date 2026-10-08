@@ -269,6 +269,15 @@ The web bundle changed. Tabs opened before the deploy keep running the old code 
 
 Choose the smallest level that fixes the problem.
 
+**Wrapper.** `fork/deploy/rollback.sh l1|l2|forward` runs the commands of L1, L2 and the roll-forward below, in the same order, with the sed check and a timing line per step. Run it from a workstation with `PVE_HOST`, `PLANE_CTID` and `PLANE_APP_DIR` set (plus `STOCK_RELEASE` for `l2` and `FORK_N` for `forward`). `--dry-run` prints every command and changes nothing. Exit codes: 0 done, 1 usage, 2 a check failed (nothing further was run), 3 a remote command failed. It is idempotent: running `l1` twice is safe. Tests: `fork/deploy/test_rollback.sh` (stubbed ssh, pct and docker; `--self-mutate` proves the checks bite).
+
+```
+fork/deploy/rollback.sh --dry-run l1
+fork/deploy/rollback.sh l1
+```
+
+`l2` also checks first that the stock image tag is in the local store (`docker image ls -q makeplane/plane-backend:$STOCK_RELEASE`) and warns when the up takes longer than 60 s. `forward` checks that the five fork services run `v1.4.2-live.$FORK_N` and deletes the L1 file only if they do. The manual commands below are the fallback and stay the reference.
+
 **L1: both flags off (about 1 to 2 min).** Keeps the fork images, turns the behaviour off. Live events stop (the socket closes with 4404) and the pages API answers 404. The L1 file is generated on the spot and deleted after the roll-forward.
 
 ```
@@ -285,7 +294,7 @@ else
 fi
 ```
 
-Roll forward: rerun step 6 with the normal override, then `rm docker-compose.override.l1.yaml`.
+Roll forward (`rollback.sh forward`, or by hand): rerun step 6 with the normal override, then `rm docker-compose.override.l1.yaml`.
 
 **L2: stock images (target 60 s or less, measured with `time`).** Run the stack from the upstream file alone. The stock images `makeplane/*` are still in the local image store because they are never pruned. `STOCK_RELEASE` is the tag recorded in the inspection table; check that the images exist before the window (`docker image ls makeplane/plane-backend`).
 
