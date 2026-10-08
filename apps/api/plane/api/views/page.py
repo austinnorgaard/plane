@@ -15,6 +15,7 @@ from django.db import connection, transaction
 from django.db.models import Q, UUIDField, Value
 
 # Third party imports
+from drf_spectacular.utils import OpenApiResponse
 from rest_framework import status
 from rest_framework.exceptions import NotFound
 from rest_framework.response import Response
@@ -22,9 +23,15 @@ from rest_framework.response import Response
 # Module imports
 from plane.api.serializers.page import (
     PageAPISerializer,
+    PageArchiveResultAPISerializer,
+    PageConflictAPISerializer,
     PageCreateAPISerializer,
+    PageErrorAPISerializer,
     PageListAPISerializer,
+    PageListErrorAPISerializer,
+    PageTooLargeAPISerializer,
     PageUpdateAPISerializer,
+    PageValidationErrorAPISerializer,
 )
 from plane.app.permissions import ROLE
 from plane.app.permissions.page import ProjectPagePermission
@@ -33,6 +40,28 @@ from plane.bgtasks.page_transaction_task import page_transaction
 from plane.bgtasks.page_version_task import track_page_version
 from plane.db.models import Page, Project, ProjectMember, ProjectPage, UserFavorite
 from plane.utils import live_pages
+from plane.utils.openapi import (
+    CURSOR_PARAMETER,
+    EXTERNAL_ID_PARAMETER,
+    EXTERNAL_SOURCE_PARAMETER,
+    PER_PAGE_PARAMETER,
+    create_paginated_response,
+)
+from plane.utils.openapi.decorators import page_docs
+from plane.utils.openapi.pages import (
+    PAGE_ARCHIVED_PARAMETER,
+    PAGE_BAD_REQUEST_RESPONSE_DESCRIPTION,
+    PAGE_CONFLICT_CREATE_RESPONSE,
+    PAGE_CONFLICT_UPDATE_RESPONSE,
+    PAGE_ID_PARAMETER,
+    PAGE_LIST_BAD_REQUEST_RESPONSE_DESCRIPTION,
+    PAGE_LIST_VALIDATION_EXAMPLES,
+    PAGE_LIVE_UNAVAILABLE_RESPONSE,
+    PAGE_ORDER_BY_PARAMETER,
+    PAGE_PARENT_ID_PARAMETER,
+    PAGE_TOO_LARGE_RESPONSE,
+    PAGE_VALIDATION_EXAMPLES,
+)
 from plane.utils.order_queryset import PAGE_ORDER_BY_ALLOWLIST, sanitize_order_by
 
 from .base import BaseAPIView
@@ -163,6 +192,31 @@ class PageBaseAPIEndpoint(BaseAPIView):
 class PageListCreateAPIEndpoint(PageBaseAPIEndpoint):
     """List and create pages of a project."""
 
+    @page_docs(
+        operation_id="list_pages",
+        summary="List pages",
+        description=(
+            "List the pages of a project that the caller can see, without the html body. "
+            "Archived pages are returned only with archived=true."
+        ),
+        parameters=[
+            PAGE_ARCHIVED_PARAMETER,
+            PAGE_PARENT_ID_PARAMETER,
+            EXTERNAL_ID_PARAMETER,
+            EXTERNAL_SOURCE_PARAMETER,
+            PAGE_ORDER_BY_PARAMETER,
+            CURSOR_PARAMETER,
+            PER_PAGE_PARAMETER,
+        ],
+        responses={
+            200: create_paginated_response(PageListAPISerializer, "Page", "List of pages", "List of pages"),
+            400: OpenApiResponse(
+                response=PageListErrorAPISerializer,
+                description=PAGE_LIST_BAD_REQUEST_RESPONSE_DESCRIPTION,
+                examples=PAGE_LIST_VALIDATION_EXAMPLES,
+            ),
+        },
+    )
     def get(self, request, slug, project_id):
         queryset = self.base_queryset(slug, project_id)
         if request.GET.get("archived", "false").lower() == "true":
@@ -184,6 +238,33 @@ class PageListCreateAPIEndpoint(PageBaseAPIEndpoint):
             on_results=lambda pages: PageListAPISerializer(pages, many=True).data,
         )
 
+    @page_docs(
+        operation_id="create_page",
+        summary="Create a page",
+        description=(
+            "Create a page in the project. When external_id and external_source are both given and a page "
+            "with that pair already exists in the project, nothing is created and the response is 409."
+        ),
+        request=PageCreateAPISerializer,
+        responses={
+            201: OpenApiResponse(response=PageAPISerializer, description="Page created"),
+            400: OpenApiResponse(
+                response=PageValidationErrorAPISerializer,
+                description=PAGE_BAD_REQUEST_RESPONSE_DESCRIPTION,
+                examples=PAGE_VALIDATION_EXAMPLES,
+            ),
+            409: OpenApiResponse(
+                response=PageConflictAPISerializer,
+                description=PAGE_CONFLICT_CREATE_RESPONSE.description,
+                examples=PAGE_CONFLICT_CREATE_RESPONSE.examples,
+            ),
+            413: OpenApiResponse(
+                response=PageTooLargeAPISerializer,
+                description=PAGE_TOO_LARGE_RESPONSE.description,
+                examples=PAGE_TOO_LARGE_RESPONSE.examples,
+            ),
+        },
+    )
     def post(self, request, slug, project_id):
         self.check_body_size(request)
         self.check_html_size(request)
@@ -257,10 +338,52 @@ class PageListCreateAPIEndpoint(PageBaseAPIEndpoint):
 class PageDetailAPIEndpoint(PageBaseAPIEndpoint):
     """Retrieve a page, or update its name and html while it is not open in an editor."""
 
+    @page_docs(
+        operation_id="retrieve_page",
+        summary="Retrieve a page",
+        description="Retrieve a page of the project, including its html body.",
+        parameters=[PAGE_ID_PARAMETER],
+        responses={200: OpenApiResponse(response=PageAPISerializer, description="The page")},
+    )
     def get(self, request, slug, project_id, page_id):
         page = self.get_page(slug, project_id, page_id)
         return Response(PageAPISerializer(page).data, status=status.HTTP_200_OK)
 
+    @page_docs(
+        operation_id="update_page",
+        summary="Update a page",
+        description=(
+            "Update the name and/or description_html of a page. Any other field is rejected. "
+            "A page that is open in an editor cannot be updated (409); an oversized body or html is "
+            "rejected (413); and when the page has a stored document and the live collaboration service "
+            "fails the page is left unchanged (503)."
+        ),
+        parameters=[PAGE_ID_PARAMETER],
+        request=PageUpdateAPISerializer,
+        responses={
+            200: OpenApiResponse(response=PageAPISerializer, description="Page updated"),
+            400: OpenApiResponse(
+                response=PageValidationErrorAPISerializer,
+                description=PAGE_BAD_REQUEST_RESPONSE_DESCRIPTION,
+                examples=PAGE_VALIDATION_EXAMPLES,
+            ),
+            409: OpenApiResponse(
+                response=PageConflictAPISerializer,
+                description=PAGE_CONFLICT_UPDATE_RESPONSE.description,
+                examples=PAGE_CONFLICT_UPDATE_RESPONSE.examples,
+            ),
+            413: OpenApiResponse(
+                response=PageTooLargeAPISerializer,
+                description=PAGE_TOO_LARGE_RESPONSE.description,
+                examples=PAGE_TOO_LARGE_RESPONSE.examples,
+            ),
+            503: OpenApiResponse(
+                response=PageErrorAPISerializer,
+                description=PAGE_LIVE_UNAVAILABLE_RESPONSE.description,
+                examples=PAGE_LIVE_UNAVAILABLE_RESPONSE.examples,
+            ),
+        },
+    )
     def patch(self, request, slug, project_id, page_id):
         self.check_body_size(request)
         self.check_html_size(request)
@@ -384,6 +507,20 @@ class PageArchiveAPIEndpoint(PageBaseAPIEndpoint):
             project_id=project_id, member=request.user, is_active=True, role=ROLE.ADMIN.value
         ).exists()
 
+    @page_docs(
+        operation_id="archive_page",
+        summary="Archive a page",
+        description="Archive a page and its descendants. Only the page owner or a project admin may do this.",
+        parameters=[PAGE_ID_PARAMETER],
+        request=None,
+        responses={
+            200: OpenApiResponse(response=PageArchiveResultAPISerializer, description="Page archived"),
+            400: OpenApiResponse(
+                response=PageErrorAPISerializer,
+                description="The caller is neither the page owner nor a project admin.",
+            ),
+        },
+    )
     def post(self, request, slug, project_id, page_id):
         from plane.app.views.page.base import unarchive_archive_page_and_descendants
 
@@ -398,6 +535,17 @@ class PageArchiveAPIEndpoint(PageBaseAPIEndpoint):
         unarchive_archive_page_and_descendants(page.id, date.today())
         return Response({"archived_at": str(date.today())}, status=status.HTTP_200_OK)
 
+    @page_docs(
+        operation_id="unarchive_page",
+        summary="Unarchive a page",
+        description=(
+            "Unarchive a page and its descendants. Only the page owner or a project admin may do this. "
+            "An archived parent is detached from the page."
+        ),
+        parameters=[PAGE_ID_PARAMETER],
+        request=None,
+        responses={204: OpenApiResponse(description="Page unarchived")},
+    )
     def delete(self, request, slug, project_id, page_id):
         from plane.app.views.page.base import unarchive_archive_page_and_descendants
 
