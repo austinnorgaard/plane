@@ -14,6 +14,11 @@ Files in this directory
                                 the commands; see RUNBOOK.md section 10)
   test_rollback.sh              tests rollback.sh against stub ssh, pct and docker (--self-mutate
                                 runs it against broken copies)
+  postdeploy-logs.sh            post-deploy log summary of api, worker, beat-worker and live: counts,
+                                top redacted error lines, exit 0 clean / 1 over threshold / 2 usage /
+                                3 remote failure (see RUNBOOK.md section 7a)
+  test_postdeploy-logs.sh       tests postdeploy-logs.sh against stub ssh, pct and docker (--self-mutate
+                                runs it against broken copies)
   RUNBOOK.md                    the deploy procedure, smoke tests and rollback
 
 WARNINGS

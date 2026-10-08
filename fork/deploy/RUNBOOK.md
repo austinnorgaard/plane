@@ -251,6 +251,16 @@ Why: the live guard answers 401 to a request with a missing or wrong `live-serve
 
 Duplicate a page in the UI: it must still work and the copy must open normally (the worker has no `LIVE_BASE_URL`, so the live sync stays off).
 
+### 7a. Post-deploy log check
+
+After the smoke tests, and again 15 minutes later, run from a workstation (same variables as `rollback.sh`):
+
+```
+fork/deploy/postdeploy-logs.sh --window 15m
+```
+
+It reads `docker compose logs --since` for api, worker, beat-worker and live and prints counts (5xx, 503, page PATCH 409 loaded versus unknown, "opened during an api update" warnings, tracebacks, live errors, close codes 4401, 4403, 4429, 1013, rate-limit overflows) plus the top distinct error lines with emails, addresses, ids and credentials redacted. Exit 0 is clean, 1 is over a threshold (investigate, and consider rollback L1), 2 is a usage or validation error, 3 means the logs could not be read, which is not a pass. Thresholds are options (`--help`); `--dry-run` prints the command. Tests: `fork/deploy/test_postdeploy-logs.sh` (stubbed ssh, pct and docker; `--self-mutate`).
+
 ## 8. Rehearsal of rollback L1 and L2, then roll forward
 
 Targets are estimates; record the measured times here.
@@ -295,6 +305,8 @@ fi
 ```
 
 Roll forward (`rollback.sh forward`, or by hand): rerun step 6 with the normal override, then `rm docker-compose.override.l1.yaml`.
+
+After any rollback level or the roll forward, run `fork/deploy/postdeploy-logs.sh --window 10m` (step 7a) once the services are up. Exit 0 means no 5xx, tracebacks or live errors above the thresholds; exit 3 means the logs were not read.
 
 **L2: stock images (target 60 s or less, measured with `time`).** Run the stack from the upstream file alone. The stock images `makeplane/*` are still in the local image store because they are never pruned. `STOCK_RELEASE` is the tag recorded in the inspection table; check that the images exist before the window (`docker image ls makeplane/plane-backend`).
 
