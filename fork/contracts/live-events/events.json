@@ -1,5 +1,5 @@
 {
-  "description": "Shared contract for the live event payload published by apps/api/plane/utils/live_events.py and validated by apps/live/src/events/hub.ts. Both test suites read this file.",
+  "description": "Shared contract for the live event payload published by apps/api/plane/utils/live_events.py and validated by apps/live/src/events/hub.ts. Both test suites read this file. Note: the legacy field name `ids` (accepted by the hub for older publishers during a rolling deploy) is not a contract shape; the publisher must emit `issue_ids`.",
   "channel_prefix": "plane:live-events:",
   "kinds": [
     "issue",

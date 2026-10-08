@@ -9,6 +9,7 @@ so changing the payload on one side fails the other side's suite.
 """
 
 import json
+import os
 from pathlib import Path
 from unittest import mock
 
@@ -19,6 +20,14 @@ from plane.utils import live_events
 
 
 def _fixture_file():
+    """The fixture file: $LIVE_EVENTS_CONTRACT_DIR if set (compose stack), else searched upward from here."""
+    configured = os.environ.get("LIVE_EVENTS_CONTRACT_DIR")
+    if configured:
+        candidate = Path(configured) / "events.json"
+        if not candidate.is_file():
+            # An explicit location that is wrong is a setup error, never a quiet skip.
+            raise RuntimeError(f"LIVE_EVENTS_CONTRACT_DIR is set but {candidate} does not exist")
+        return candidate
     for parent in Path(__file__).resolve().parents:
         candidate = parent / "fork" / "contracts" / "live-events" / "events.json"
         if candidate.is_file():
@@ -29,7 +38,11 @@ def _fixture_file():
 _FILE = _fixture_file()
 pytestmark = [
     pytest.mark.unit,
-    pytest.mark.skipif(_FILE is None, reason="fork/contracts/live-events is not in this checkout (api-only mount)"),
+    pytest.mark.skipif(
+        _FILE is None,
+        reason="SKIPPED, DRIFT NOT CHECKED: live event fixtures not found "
+        "(set LIVE_EVENTS_CONTRACT_DIR or run from a full checkout with fork/contracts/live-events/events.json)",
+    ),
 ]
 CONTRACT = json.loads(_FILE.read_text()) if _FILE else {"valid": [], "invalid": [], "producer_fields": {}}
 PRODUCIBLE = [c for c in CONTRACT["valid"] if c["producer"]]
