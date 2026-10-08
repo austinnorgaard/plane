@@ -14,11 +14,15 @@
 # Nothing is changed anywhere. Secret values are never printed: only key NAMES.
 #
 # Inputs (environment; none has a default except where stated):
+#   GATE_INSPECT_TIMEOUT  seconds allowed for inspect.sh (default 300)
 #   QA_RECORD         file holding the QA verdict text; needs a line "QA: PASS @ <sha>"
-#                     naming RELEASE_SHA (7 or more digits) and no "QA: FAIL @ <sha>" line for it
+#                     naming RELEASE_SHA (the full sha is preferred; 7 or more digits are accepted) and no "QA: FAIL @ <sha>" line for it
 #   IMAGE_TAR         the image archive plane-fork-live.<N>.tar
-#   IMAGE_SHA256      sha256 from the build output; or BUILD_NOTES, a file with a
-#                     "Tar sha256: <hex>" line (the line build.sh prints)
+#   IMAGE_SHA256      sha256 from the build output; or BUILD_NOTES, the saved build output
+#                     with its "Tar sha256: <hex>" line. The archive must also be bound to
+#                     RELEASE_SHA: every image in it carries the label plane-fork-build=<sha>
+#                     (read from the archive, nothing loaded), and a BUILD_NOTES file, if
+#                     given, must have a "SHA verified: <sha>" line naming it
 #   RUNBOOK_FILE      the runbook copy whose "Inspection results" table you filled
 #                     (default: RUNBOOK.md next to this script)
 #   STOCK_RELEASE     tag of the stock images now running (rollback L2)
@@ -41,7 +45,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 env_file=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    -h|--help) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n "2,38p" "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -e) [ $# -ge 2 ] || { echo "usage: gate.sh [-e ENV_FILE] RELEASE_SHA" >&2; exit 2; }
         env_file="$2"; shift 2 ;;
     -*) echo "usage: gate.sh [-e ENV_FILE] RELEASE_SHA" >&2; exit 2 ;;
@@ -66,6 +70,25 @@ fails=()
 pass() { echo "PASS $1"; }
 fail() { echo "FAIL $1: $2"; fails+=("$1"); }
 
+# unquote VALUE: the value as docker compose reads an env file line. Surrounding
+# whitespace is dropped; a quoted value ends at its closing quote (a comment may
+# follow); an unquoted value loses a " #..." tail, and a value that starts with #
+# is empty.
+unquote() {
+  local v=$1 q rest
+  v="${v#"${v%%[![:space:]]*}"}"
+  q="${v:0:1}"
+  if [ "$q" = '"' ] || [ "$q" = "'" ]; then
+    rest="${v:1}"
+    v="${rest%%"$q"*}"
+  else
+    case "$v" in "#"*) v="" ;; esac
+    v="${v%%[[:space:]]#*}"
+    v="${v%"${v##*[![:space:]]}"}"
+  fi
+  printf '%s' "$v"
+}
+
 # cfg KEY: value of KEY from ENV_FILE (last assignment wins, quotes and CR removed)
 # or from the environment. Never echoed by this script.
 cfg() {
@@ -73,11 +96,9 @@ cfg() {
   if [ -n "$env_file" ]; then
     line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1=" "$env_file" | tail -n1 | tr -d '\r')" || true
     [ -n "$line" ] || return 0
-    v="${line#*=}"
-    v="${v#\"}"; v="${v%\"}"; v="${v#\'}"; v="${v%\'}"
-    printf '%s' "$v"
+    unquote "${line#*=}"
   else
-    printf '%s' "${!1:-}"
+    unquote "${!1:-}"
   fi
 }
 
@@ -87,6 +108,8 @@ is_ipv6() {
   [[ "$a" =~ ^[0-9A-Fa-f:]+$ && "$a" == *:*:* && "$a" != *:::* ]] || return 1
   [[ "$a" == *::* ]] && dbl=1
   [[ "$a" =~ ::.*:: ]] && return 1
+  [[ "$a" == :* && "$a" != ::* ]] && return 1
+  [[ "$a" == *: && "$a" != *:: ]] && return 1
   local IFS=:
   # shellcheck disable=SC2086
   for g in $a; do
@@ -94,6 +117,11 @@ is_ipv6() {
     [[ ${#g} -le 4 ]] || return 1
   done
   if [ "$dbl" = 1 ]; then [ "$n" -le 7 ]; else [ "$n" -eq 8 ] && [[ "$a" != :* && "$a" != *: ]]; fi
+}
+
+# run_limited CMD...: run with an overall time limit (GATE_INSPECT_TIMEOUT seconds, default 300)
+run_limited() {
+  if command -v timeout >/dev/null 2>&1; then timeout "${GATE_INSPECT_TIMEOUT:-300}" "$@"; else "$@"; fi
 }
 
 echo "== gate.sh: go/no-go before deploy =="
@@ -132,11 +160,16 @@ fi
 # 3. archive sha256 matches the build notes (fetch-images.sh does the compare; no load)
 name="image archive sha256 matches the build notes"
 want="${IMAGE_SHA256:-}"
-if [ -z "$want" ] && [ -n "${BUILD_NOTES:-}" ] && [ -r "${BUILD_NOTES}" ]; then
-  want="$(sed -n 's/^Tar sha256:[[:space:]]*\([0-9a-fA-F]\{64\}\)[[:space:]]*$/\1/p' "$BUILD_NOTES" | head -n1)"
+notes_tar=""
+if [ -n "${BUILD_NOTES:-}" ] && [ -r "${BUILD_NOTES}" ]; then
+  notes_tar="$(sed -n 's/^Tar sha256:[[:space:]]*\([0-9a-fA-F]\{64\}\)[[:space:]]*$/\1/p' "$BUILD_NOTES" | head -n1 | tr 'A-F' 'a-f')"
 fi
+[ -n "$want" ] || want="$notes_tar"
+want="$(printf '%s' "$want" | tr 'A-F' 'a-f')"
 if [ -z "${IMAGE_TAR:-}" ] || [ ! -f "${IMAGE_TAR}" ]; then
   fail "$name" "IMAGE_TAR not set or not a file"
+elif [ -n "$notes_tar" ] && [ "$notes_tar" != "$want" ]; then
+  fail "$name" "IMAGE_SHA256 differs from the Tar sha256 line in BUILD_NOTES"
 elif [ -z "$want" ]; then
   fail "$name" "no IMAGE_SHA256 and no 'Tar sha256:' line in BUILD_NOTES"
 else
@@ -147,6 +180,41 @@ else
     fail "$name" "$(grep -E '^ERROR:' "$tmp/fetch.out" | tail -n1 | cut -c1-200)"
   fi
   rm -rf "$tmp/img"
+fi
+
+# 3b. the archive is bound to the release sha. Preferred: every image in the archive
+# carries the label plane-fork-build=<sha> that build.sh sets (read from the archive's
+# manifest and image configs; nothing is loaded). Also: if BUILD_NOTES is given, its
+# "SHA verified: <sha>" line must name the release sha.
+name="image archive is bound to the release sha"
+label_state=none; notes_state=none; detail=""
+if [ -n "${IMAGE_TAR:-}" ] && [ -f "$IMAGE_TAR" ]; then
+  man="$(tar -xOf "$IMAGE_TAR" manifest.json 2>/dev/null | head -c 1048576)"
+  cfgs="$(printf '%s' "$man" | grep -oE '"Config"[[:space:]]*:[[:space:]]*"[^"]+"' | sed 's/^"Config"[[:space:]]*:[[:space:]]*"//; s/"$//')"
+  ncfg=0; nok=0; nbad=0
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    [[ "$c" =~ ^[A-Za-z0-9._/-]+$ && "$c" != *..* && "$c" != /* ]] || { nbad=$((nbad + 1)); ncfg=$((ncfg + 1)); continue; }
+    ncfg=$((ncfg + 1))
+    lab="$(tar -xOf "$IMAGE_TAR" -- "$c" 2>/dev/null | head -c 4194304 | grep -oE '"plane-fork-build"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n1 | sed 's/.*:[[:space:]]*"//; s/"$//')"
+    if [ "$lab" = "$sha" ]; then nok=$((nok + 1)); elif [ -n "$lab" ]; then nbad=$((nbad + 1)); fi
+  done <<<"$cfgs"
+  if [ "$ncfg" -ge 3 ] && [ "$nok" = "$ncfg" ]; then label_state=ok
+  elif [ "$nbad" -gt 0 ]; then label_state=mismatch; detail="$nbad of $ncfg image configs carry another or an unusable build label"
+  fi
+fi
+if [ -n "${BUILD_NOTES:-}" ]; then
+  if [ ! -r "$BUILD_NOTES" ]; then notes_state=mismatch; detail="$detail BUILD_NOTES not readable;"
+  else
+    nv="$(sed -n 's/^SHA verified:[[:space:]]*\([0-9a-fA-F]\{40\}\)[[:space:]].*$/\1/p' "$BUILD_NOTES" | tr 'A-F' 'a-f')"
+    if [ -z "$nv" ]; then notes_state=mismatch; detail="$detail BUILD_NOTES has no 'SHA verified: <sha>' line;"
+    elif [ "$(printf '%s\n' "$nv" | grep -vc "^$sha$")" -gt 0 ]; then notes_state=mismatch; detail="$detail BUILD_NOTES names another sha;"
+    else notes_state=ok; fi
+  fi
+fi
+if [ "$label_state" = mismatch ] || [ "$notes_state" = mismatch ]; then fail "$name" "$detail"
+elif [ "$label_state" = ok ] || [ "$notes_state" = ok ]; then pass "$name (label=$label_state notes=$notes_state)"
+else fail "$name" "archive not bound to the release sha: no plane-fork-build label found in the archive and no BUILD_NOTES"
 fi
 
 # 4. RUNBOOK inspection table filled
@@ -194,12 +262,13 @@ else
       ok=1; max=128
     fi
     if [ "$ok" = 1 ] && [ "$hasp" = 1 ]; then
-      # /0 would trust every address, so it is refused
-      if ! [[ "$pre" =~ ^[0-9]{1,3}$ ]] || [ "$((10#$pre))" -gt "$max" ] || [ "$((10#$pre))" -eq 0 ]; then ok=0; fi
+      # wider ranges would trust nearly every address
+      # minimum prefix /8 (IPv4) and /16 (IPv6): wider ranges, such as two /1 halves, trust nearly everything
+      if ! [[ "$pre" =~ ^[0-9]{1,3}$ ]] || [ "$((10#$pre))" -gt "$max" ] || [ "$((10#$pre))" -lt "$((max == 32 ? 8 : 16))" ]; then ok=0; fi
     fi
     [ "$ok" = 1 ] || bad=$((bad + 1))
   done
-  if [ "$bad" -gt 0 ]; then fail "$name" "$bad of $n entries are not valid single addresses or CIDR ranges (a /0 range is refused)"
+  if [ "$bad" -gt 0 ]; then fail "$name" "$bad of $n entries are not valid single addresses or CIDR ranges (ranges wider than /8 for IPv4 or /16 for IPv6 are refused)"
   else pass "$name ($n entries)"; fi
 fi
 
@@ -232,7 +301,8 @@ esac
 name="LIVE_SERVER_SECRET_KEY is set and not the placeholder"
 sk="$(cfg LIVE_SERVER_SECRET_KEY)"
 if [ -z "$sk" ]; then fail "$name" "empty or unset"
-elif [ "$sk" = "$PLACEHOLDER" ]; then fail "$name" "is the shipped placeholder"
+elif [ -z "$(printf '%s' "$sk" | tr -d '[:space:]')" ]; then fail "$name" "empty or unset"
+elif [[ "${sk,,}" == *"$PLACEHOLDER"* ]]; then fail "$name" "is or contains the shipped placeholder"
 else pass "$name"; fi
 sk=""
 
@@ -242,17 +312,25 @@ if [ -z "${PLANE_CTID:-}" ] || [ -z "${PLANE_APP_DIR:-}" ]; then
   fail "$name" "set PLANE_CTID and PLANE_APP_DIR"
 else
   rc=0
-  if [ -n "${PVE_HOST:-}" ]; then
+  if ! [[ "$PLANE_CTID" =~ ^[0-9]+$ ]]; then
+    rc=126; echo "error: PLANE_CTID must be numeric (not sent)" >"$tmp/inspect.out"
+  elif ! [[ "$PLANE_APP_DIR" =~ ^/[A-Za-z0-9._/-]*$ ]]; then
+    rc=126; echo "error: PLANE_APP_DIR must be an absolute path of safe characters (not sent)" >"$tmp/inspect.out"
+  elif [ -n "${PVE_HOST:-}" ] && ! [[ "$PVE_HOST" =~ ^[A-Za-z0-9_][A-Za-z0-9._@:-]*$ ]]; then
+    rc=126; echo "error: PVE_HOST has unexpected characters (not used)" >"$tmp/inspect.out"
+  elif [ -n "${PVE_HOST:-}" ]; then
     # shellcheck disable=SC2029 # expanded on this side on purpose, as in RUNBOOK step 1
-    ssh "$PVE_HOST" "PLANE_CTID=$PLANE_CTID PLANE_APP_DIR=$PLANE_APP_DIR bash -s" <"$inspect" >"$tmp/inspect.out" 2>&1 || rc=$?
+    remote="PLANE_CTID=$(printf '%q' "$PLANE_CTID") PLANE_APP_DIR=$(printf '%q' "$PLANE_APP_DIR") bash -s"
+    run_limited ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -- "$PVE_HOST" "$remote" <"$inspect" >"$tmp/inspect.out" 2>&1 || rc=$?
   elif command -v pct >/dev/null 2>&1; then
-    bash "$inspect" >"$tmp/inspect.out" 2>&1 || rc=$?
+    run_limited bash "$inspect" >"$tmp/inspect.out" 2>&1 || rc=$?
   else
     rc=127; echo "pct not found and PVE_HOST not set" >"$tmp/inspect.out"
   fi
   if [ "$rc" = 0 ] && grep -q '^RESULT: no STOP lines' "$tmp/inspect.out"; then
     pass "$name"
   else
+    [ "$rc" = 124 ] && echo "(inspect.sh timed out)" >>"$tmp/inspect.out"
     fail "$name" "exit $rc; $( (grep -E '^(STOP|error|WARN):' "$tmp/inspect.out" || tail -n1 "$tmp/inspect.out") | head -n3 | cut -c1-200 | tr '\n' ' ')"
   fi
 fi

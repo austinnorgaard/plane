@@ -30,6 +30,7 @@ cat >"$T/bin/ssh" <<'STUB'
 #!/bin/sh
 echo "ssh $*" >>"$STUB_LOG"
 cat >/dev/null
+[ -n "${STUB_SLEEP:-}" ] && sleep "$STUB_SLEEP"
 if [ "${STUB_INSPECT_RC:-0}" = 0 ]; then echo "RESULT: no STOP lines"; else echo "STOP: stub reason"; echo "RESULT: 1 STOP line(s); do not deploy, escalate"; fi
 exit "${STUB_INSPECT_RC:-0}"
 STUB
@@ -39,7 +40,21 @@ export GIT_TERMINAL_PROMPT=0 STUB_LOG="$T/log" PATH="$T/bin:$PATH"
 # --- inputs
 SENTINEL="SENTINEL-not-a-real-secret-4711"
 printf 'QA: PASS @ %s\n' "${SHA:0:12}" >"$T/qa"
-printf 'tar-content' >"$T/plane-fork-live.1.tar"
+# mktar <file> <label-sha-or-NONE> [images]: a docker-archive style tar (manifest.json + image configs)
+mktar() {
+  local f=$1 lab=$2 n=${3:-3} i d
+  d=$(mktemp -d -p "$T")
+  : >"$d/m"
+  for i in $(seq 1 "$n"); do
+    if [ "$lab" = NONE ]; then printf '{"architecture":"amd64","config":{"Labels":{"other":"x"}}}' >"$d/cfg$i.json"
+    else printf '{"architecture":"amd64","config":{"Labels":{"other":"x","plane-fork-build":"%s"}}}' "$lab" >"$d/cfg$i.json"; fi
+    printf '%s{"Config":"cfg%s.json","RepoTags":["localhost/plane-fork-img%s:v1.4.2-live.1"],"Layers":[]}' "$([ "$i" -gt 1 ] && echo ,)" "$i" "$i" >>"$d/m"
+  done
+  { printf '['; cat "$d/m"; printf ']'; } >"$d/manifest.json"
+  ( cd "$d" && tar -cf "$f" manifest.json cfg*.json )
+  rm -rf "$d"
+}
+mktar "$T/plane-fork-live.1.tar" "$SHA"
 TARSHA=$(sha256sum "$T/plane-fork-live.1.tar" | awk '{print $1}')
 # a filled copy of the runbook table: take the real file and fill every empty result cell
 awk '/^### Inspection results/{s=1;print;next} s&&/^## /{s=0}
@@ -89,7 +104,8 @@ GATE_REPO="$T/nowhere" run -e "$T/env" "$SHA"; expect_fail "no checkout -> FAIL"
 NEW=$(git -C "$T/work" rev-parse HEAD)
 git -C "$T/work" update-ref refs/remotes/origin/live-updates/v1.4.2 "$SHA"
 printf 'QA: PASS @ %s\n' "$NEW" >"$T/qa"
-run -e "$T/env" "$NEW"
+mktar "$T/new.tar" "$NEW"; cp "$T/new.tar" "$T/plane-fork-live.9.tar"
+IMAGE_TAR="$T/plane-fork-live.9.tar" IMAGE_SHA256=$(sha256sum "$T/new.tar" | awk '{print $1}') run -e "$T/env" "$NEW"
 [ "$RC" = 0 ] && ok "gate fetches origin first (stale ref refreshed)" || bad "stale ref rc=$RC"
 printf 'QA: PASS @ %s\n' "${SHA:0:12}" >"$T/qa"
 
@@ -107,10 +123,43 @@ printf 'QA: PASS @ %s\n' "${SHA:0:12}" >"$T/qa"
 IMAGE_SHA256=$(printf '0%.0s' $(seq 64)) run -e "$T/env" "$SHA"; expect_fail "archive sha mismatch -> FAIL" "image archive sha256"
 IMAGE_SHA256="" run -e "$T/env" "$SHA"; expect_fail "no expected sha -> FAIL" "image archive sha256"
 IMAGE_TAR="$T/none.tar" run -e "$T/env" "$SHA"; expect_fail "archive missing -> FAIL" "image archive sha256"
-printf 'Build ok\nTar sha256: %s\n' "$TARSHA" >"$T/notes"
+printf 'Build ok\nSHA verified: %s is in origin/live-updates/v1.4.2\nTar sha256: %s\n' "$SHA" "$TARSHA" >"$T/notes"
 IMAGE_SHA256="" BUILD_NOTES="$T/notes" run -e "$T/env" "$SHA"; [ "$RC" = 0 ] && ok "sha from BUILD_NOTES line passes" || bad "BUILD_NOTES rc=$RC"
-printf 'Tar sha256: %s\n' "$(printf '1%.0s' $(seq 64))" >"$T/notes"
+printf 'SHA verified: %s is in origin/live-updates/v1.4.2\nTar sha256: %s\n' "$SHA" "$(printf '1%.0s' $(seq 64))" >"$T/notes"
 IMAGE_SHA256="" BUILD_NOTES="$T/notes" run -e "$T/env" "$SHA"; expect_fail "BUILD_NOTES with another sha -> FAIL" "image archive sha256"
+# 3b archive bound to the release sha
+OTHER=$(printf 'a%.0s' $(seq 40))
+bindrun() { # bindrun <label-or-NONE> [images]: new archive, matching IMAGE_SHA256
+  mktar "$T/b/plane-fork-live.1.tar" "$1" "${2:-3}"
+  IMAGE_TAR="$T/b/plane-fork-live.1.tar" IMAGE_SHA256=$(sha256sum "$T/b/plane-fork-live.1.tar" | awk '{print $1}') run -e "$T/env" "$SHA"
+}
+mkdir -p "$T/b"
+bindrun "$SHA"; [ "$RC" = 0 ] && echo "$OUT" | grep -q 'bound to the release sha (label=ok' && ok "all images labelled with the sha: bound" || bad "labelled archive rc=$RC"
+bindrun "$OTHER"; expect_fail "images labelled with another sha -> FAIL" "bound to the release sha"
+bindrun NONE; expect_fail "no label, no notes -> FAIL (not bound)" "bound to the release sha"
+echo "$OUT" | grep -q 'archive not bound' && ok "unbound message is visible" || bad "unbound message"
+bindrun "$SHA" 2; expect_fail "only two labelled images -> FAIL" "bound to the release sha"
+printf 'plain text, not a tar' >"$T/b/plane-fork-live.1.tar"
+IMAGE_TAR="$T/b/plane-fork-live.1.tar" IMAGE_SHA256=$(sha256sum "$T/b/plane-fork-live.1.tar" | awk '{print $1}') run -e "$T/env" "$SHA"; expect_fail "not a tar -> FAIL (not bound)" "bound to the release sha"
+# one image with another label among good ones
+mktar "$T/b/x.tar" "$SHA"; mkdir "$T/b/x"; ( cd "$T/b/x" && tar -xf ../x.tar && sed -i "s/$SHA/$OTHER/" cfg2.json && tar -cf ../plane-fork-live.1.tar manifest.json cfg*.json )
+IMAGE_TAR="$T/b/plane-fork-live.1.tar" IMAGE_SHA256=$(sha256sum "$T/b/plane-fork-live.1.tar" | awk '{print $1}') run -e "$T/env" "$SHA"; expect_fail "one of three images with another label -> FAIL" "bound to the release sha"
+# hostile config path inside the manifest
+rm -rf "$T/b/x"; mkdir "$T/b/x"; ( cd "$T/b/x" && printf '[{"Config":"../../etc/passwd"},{"Config":"/etc/passwd"},{"Config":"a b"}]' >manifest.json && tar -cf ../plane-fork-live.1.tar manifest.json )
+IMAGE_TAR="$T/b/plane-fork-live.1.tar" IMAGE_SHA256=$(sha256sum "$T/b/plane-fork-live.1.tar" | awk '{print $1}') run -e "$T/env" "$SHA"; expect_fail "hostile Config paths -> FAIL" "bound to the release sha"
+# notes as the binding source (archive without labels)
+printf 'SHA verified: %s is in origin/live-updates/v1.4.2\n' "$SHA" >"$T/notes2"
+mktar "$T/b/plane-fork-live.1.tar" NONE; H2=$(sha256sum "$T/b/plane-fork-live.1.tar" | awk '{print $1}')
+BUILD_NOTES="$T/notes2" IMAGE_TAR="$T/b/plane-fork-live.1.tar" IMAGE_SHA256=$H2 run -e "$T/env" "$SHA"; [ "$RC" = 0 ] && ok "SHA verified line naming the sha binds an unlabelled archive" || bad "notes binding rc=$RC"
+printf 'SHA verified: %s is in origin/live-updates/v1.4.2\n' "$OTHER" >"$T/notes2"
+BUILD_NOTES="$T/notes2" IMAGE_TAR="$T/b/plane-fork-live.1.tar" IMAGE_SHA256=$H2 run -e "$T/env" "$SHA"; expect_fail "notes naming a different sha -> FAIL" "bound to the release sha"
+printf 'Build ok\n' >"$T/notes2"
+BUILD_NOTES="$T/notes2" IMAGE_TAR="$T/b/plane-fork-live.1.tar" IMAGE_SHA256=$H2 run -e "$T/env" "$SHA"; expect_fail "notes without a SHA verified line -> FAIL" "bound to the release sha"
+printf 'SHA verified: %s is in origin/live-updates/v1.4.2\n' "$OTHER" >"$T/notes2"
+mktar "$T/b/plane-fork-live.1.tar" "$SHA"; H3=$(sha256sum "$T/b/plane-fork-live.1.tar" | awk '{print $1}')
+BUILD_NOTES="$T/notes2" IMAGE_TAR="$T/b/plane-fork-live.1.tar" IMAGE_SHA256=$H3 run -e "$T/env" "$SHA"; expect_fail "good labels but notes name another sha -> FAIL" "bound to the release sha"
+printf 'SHA verified: %s is in origin/live-updates/v1.4.2\nTar sha256: %s\n' "$SHA" "$(printf '2%.0s' $(seq 64))" >"$T/notes2"
+BUILD_NOTES="$T/notes2" IMAGE_TAR="$T/b/plane-fork-live.1.tar" IMAGE_SHA256=$H3 run -e "$T/env" "$SHA"; expect_fail "IMAGE_SHA256 differs from the notes Tar line -> FAIL" "image archive sha256"
 ls "$T"/*.sha256 >/dev/null 2>&1 && bad "gate left files next to the archive" || ok "no files left behind"
 
 # 4 runbook table
@@ -122,10 +171,10 @@ printf '# nothing\n' >"$T/rb.none"
 RUNBOOK_FILE="$T/rb.none" run -e "$T/env" "$SHA"; expect_fail "no table at all -> FAIL" "RUNBOOK inspection"
 
 # 5 settings
-for p in "10.0.0.0/8" "192.0.2.1" "2001:db8::/32" "::1" "fd00::1,10.1.2.3/32" "1:2:3:4:5:6:7:8"; do
+for p in "10.0.0.0/8" "192.0.2.1" "2001:db8::/32" "::1" "fd00::1,10.1.2.3/32" "1:2:3:4:5:6:7:8" "10.0.0.0/8 , 172.16.0.0/12" "2001:db8::/16" ; do
   setting LIVE_EVENTS_TRUSTED_PROXIES "$p"; good; [ "$RC" = 0 ] && ok "trusted proxies '$p' valid" || bad "trusted proxies '$p' rc=$RC"
 done
-for p in "" "," " " "10.0.0.0/33" "10.0.0.0/" "10.0.0.0/0" "300.1.1.1" "10.0.0/8" "not-an-ip" "10.0.0.0/8/8" "2001:db8::/129" "1:2:3:4:5:6:7" "1::2::3" "12345::1" "10.0.0.1,bad"; do
+for p in "" "," " " "10.0.0.0/33" "10.0.0.0/" "10.0.0.0/0" "300.1.1.1" "10.0.0/8" "not-an-ip" "10.0.0.0/8/8" "2001:db8::/129" "1:2:3:4:5:6:7" "1::2::3" "12345::1" "10.0.0.1,bad" "0.0.0.0/1" "10.0.0.0/1" "0.0.0.0/1,128.0.0.0/1" "10.0.0.0/7" "::/0" "2001::/15" "8000::/1" ":1::2" "1::2:" ":1:2:3:4:5:6:7"; do
   setting LIVE_EVENTS_TRUSTED_PROXIES "$p"; good; expect_fail "trusted proxies '$p' invalid" "LIVE_EVENTS_TRUSTED_PROXIES"
 done
 setting LIVE_EVENTS_TRUSTED_PROXIES UNSET; good; expect_fail "trusted proxies unset" "LIVE_EVENTS_TRUSTED_PROXIES"
@@ -150,7 +199,7 @@ setting NODE_OPTIONS "--trace-warnings --max-old-space-size=2048"; good; expect_
 setting NODE_OPTIONS UNSET; good; [ "$RC" = 0 ] && ok "NODE_OPTIONS unset passes" || bad "NODE_OPTIONS unset rc=$RC"
 cp "$T/env.base" "$T/env"
 
-for s in "" "change-this-key-on-deployment" "\"change-this-key-on-deployment\""; do
+for s in "" "change-this-key-on-deployment" "\"change-this-key-on-deployment\"" "change-this-key-on-deployment " " change-this-key-on-deployment" "change-this-key-on-deployment # note" "  change-this-key-on-deployment   # note" "'change-this-key-on-deployment' # note" "prefix-change-this-key-on-deployment-suffix" "CHANGE-THIS-KEY-ON-DEPLOYMENT" "   " "# only a comment"; do
   setting LIVE_SERVER_SECRET_KEY "$s"; good; expect_fail "secret '$s' fails" "LIVE_SERVER_SECRET_KEY"
 done
 setting LIVE_SERVER_SECRET_KEY UNSET; good; expect_fail "secret unset fails" "LIVE_SERVER_SECRET_KEY"
@@ -173,6 +222,36 @@ echo "$OUT" | grep -q 'STOP: stub reason' && ok "inspect STOP line is shown" || 
 PLANE_CTID="" run -e "$T/env" "$SHA"; expect_fail "PLANE_CTID unset -> FAIL" "inspect.sh preflight"
 PVE_HOST="" PATH="/usr/bin:/bin" run -e "$T/env" "$SHA"; expect_fail "no PVE_HOST and no pct -> FAIL" "inspect.sh preflight"
 grep -q 'bash -s' "$STUB_LOG" 2>/dev/null; good; grep -q 'PLANE_CTID=999 PLANE_APP_DIR=/opt/plane-app bash -s' "$STUB_LOG" && ok "inspect.sh is run over ssh like RUNBOOK step 1" || bad "ssh command"
+
+# 6b hostile or hanging inspect inputs are never sent
+for v in "101; touch x" '101 $(id)' "10a" "-1" "101 && id"; do
+  PLANE_CTID="$v" run -e "$T/env" "$SHA"; expect_fail "PLANE_CTID '$v' refused" "inspect.sh preflight"
+  [ ! -s "$STUB_LOG" ] && ok "  and never sent" || bad "hostile PLANE_CTID reached ssh"
+done
+for v in "relative/dir" "/opt/a;touch x" '/opt/$(id)' "/opt/a b" '/opt/`id`' "/opt/a|b" "/opt/a'b"; do
+  PLANE_APP_DIR="$v" run -e "$T/env" "$SHA"; expect_fail "PLANE_APP_DIR '$v' refused" "inspect.sh preflight"
+  [ ! -s "$STUB_LOG" ] && ok "  and never sent" || bad "hostile PLANE_APP_DIR reached ssh"
+done
+for v in "-oProxyCommand=id" "host;id" 'h$(id)' "a b"; do
+  PVE_HOST="$v" run -e "$T/env" "$SHA"; expect_fail "PVE_HOST '$v' refused" "inspect.sh preflight"
+  [ ! -s "$STUB_LOG" ] && ok "  and never sent" || bad "hostile PVE_HOST reached ssh"
+done
+good; grep -q -- '-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=' "$STUB_LOG" && grep -q -- ' -- pve.example.test ' "$STUB_LOG" && ok "ssh runs with BatchMode, ConnectTimeout, ServerAlive and --" || bad "ssh options"
+start=$SECONDS
+STUB_SLEEP=30 GATE_INSPECT_TIMEOUT=2 run -e "$T/env" "$SHA"
+[ "$((SECONDS - start))" -lt 20 ] && ok "a hanging ssh is cut off" || bad "gate hung"
+expect_fail "hanging ssh -> FAIL, not a hang" "inspect.sh preflight"
+
+# env-file values as compose reads them (trailing space and comments)
+setting PAGES_API_MAX_HTML_BYTES "262144 # api cap"; good; [ "$RC" = 0 ] && ok "numeric value with a trailing comment is read" || bad "numeric comment rc=$RC"
+setting PAGES_REBASE_WORKER_MAX_MB "   512"; good; [ "$RC" = 0 ] && ok "numeric value with leading spaces is read" || bad "numeric leading spaces rc=$RC"
+setting PAGES_REBASE_WORKER_MAX_MB "512   "; good; [ "$RC" = 0 ] && ok "numeric value with trailing spaces is read" || bad "numeric spaces rc=$RC"
+setting NODE_OPTIONS "--trace-warnings # --max-old-space-size=1"; good; [ "$RC" = 0 ] && ok "comment text is not part of NODE_OPTIONS" || bad "NODE_OPTIONS comment rc=$RC"
+cp "$T/env.base" "$T/env"
+for s in "change-this-key-on-deployment " " change-this-key-on-deployment" "change-this-key-on-deployment # note"; do
+  OUT=$(env -u NODE_OPTIONS LIVE_EVENTS_TRUSTED_PROXIES=10.0.0.0/8 LIVE_SERVER_SECRET_KEY="$s" "$GATE" "$SHA" 2>&1); RC=$?
+  [ "$RC" = 1 ] && echo "$OUT" | grep -q '^FAIL LIVE_SERVER_SECRET_KEY' && ok "environment placeholder form '$s' fails" || bad "env placeholder form '$s' rc=$RC"
+done
 
 # 7 rollback
 sed 's/LIVE_EVENTS_ENABLED: "1"/LIVE_EVENTS_ENABLED: "0"/' "$HERE/docker-compose.override.yaml" >"$T/ov"
