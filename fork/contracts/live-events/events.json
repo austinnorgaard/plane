@@ -728,6 +728,19 @@
         "ts": 1700000000.5,
         "settle": null
       }
+    },
+    {
+      "name": "metadata_unknown_verb",
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "state",
+        "verb": "renamed",
+        "issue_ids": "*",
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
     }
   ]
 }
