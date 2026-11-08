@@ -11,7 +11,9 @@
     "issue_relation",
     "issue_reaction",
     "comment_reaction",
-    "intake"
+    "intake",
+    "state",
+    "label"
   ],
   "verbs": ["created", "updated", "deleted", "removed", "archived", "unarchived", "restored"],
   "producer_fields": {
@@ -163,6 +165,90 @@
         "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
         "ts": 1700000000.5,
         "settle": false
+      }
+    },
+    {
+      "name": "state_created",
+      "producer": true,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "state",
+        "verb": "created",
+        "issue_ids": "*",
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "state_updated",
+      "producer": true,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "state",
+        "verb": "updated",
+        "issue_ids": "*",
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "state_deleted",
+      "producer": true,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "state",
+        "verb": "deleted",
+        "issue_ids": "*",
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": true
+      }
+    },
+    {
+      "name": "label_created",
+      "producer": true,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "label",
+        "verb": "created",
+        "issue_ids": "*",
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "label_updated",
+      "producer": true,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "label",
+        "verb": "updated",
+        "issue_ids": "*",
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "label_deleted",
+      "producer": true,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "label",
+        "verb": "deleted",
+        "issue_ids": "*",
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": true
       }
     },
     {

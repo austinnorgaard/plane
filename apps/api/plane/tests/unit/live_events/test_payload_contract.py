@@ -16,6 +16,7 @@ from unittest import mock
 import pytest
 
 from plane.bgtasks.issue_activities_task import LIVE_EVENT_KINDS, _publish_live_event
+from plane.utils.live_events import METADATA_KINDS, publish_metadata_event
 from plane.utils import live_events
 
 
@@ -61,15 +62,25 @@ def _produce(payload):
     with mock.patch.object(live_events, "_publish_client") as factory, mock.patch.dict(
         "os.environ", {"LIVE_EVENTS_ENABLED": "1"}
     ):
-        _publish_live_event(
-            f"{payload['kind']}.activity.{payload['verb']}",
-            requested,
-            None,
-            None,
-            payload.get("actor_id"),
-            payload["project_id"],
-            [],
-        )
+        if payload["kind"] in METADATA_KINDS:
+            # metadata events come from the state and label views, not the activity task
+            publish_metadata_event(
+                payload["project_id"],
+                payload["kind"],
+                payload["verb"],
+                payload.get("actor_id"),
+                settle=payload["settle"],
+            )
+        else:
+            _publish_live_event(
+                f"{payload['kind']}.activity.{payload['verb']}",
+                requested,
+                None,
+                None,
+                payload.get("actor_id"),
+                payload["project_id"],
+                [],
+            )
         calls = factory.return_value.publish.call_args_list
     assert len(calls) == 1, "the publisher did not publish exactly one message"
     channel, body = calls[0].args
@@ -100,8 +111,10 @@ def test_producible_fixture_has_the_publisher_field_types(case):
 
 
 def test_every_kind_has_a_producible_fixture():
-    assert set(CONTRACT["kinds"]) == set(LIVE_EVENT_KINDS)
-    assert {c["payload"]["kind"] for c in PRODUCIBLE} == set(LIVE_EVENT_KINDS)
+    # work item kinds come from the activity task, metadata kinds from the state and label views
+    expected = set(LIVE_EVENT_KINDS) | METADATA_KINDS
+    assert set(CONTRACT["kinds"]) == expected
+    assert {c["payload"]["kind"] for c in PRODUCIBLE} == expected
 
 
 def test_every_verb_has_a_producible_fixture():

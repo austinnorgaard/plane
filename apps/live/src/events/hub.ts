@@ -91,6 +91,8 @@ export const EVENT_KINDS = [
   "issue_reaction",
   "comment_reaction",
   "intake",
+  "state",
+  "label",
 ] as const;
 export const EVENT_VERBS = ["created", "updated", "deleted", "removed", "archived", "unarchived", "restored"] as const;
 
