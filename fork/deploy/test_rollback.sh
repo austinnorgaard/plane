@@ -79,15 +79,15 @@ case "$1" in
     case "$*" in
       *" ps "*)
         if [ -n "${STUB_L2_FORK:-}" ]; then
-          printf 'web makeplane/plane-frontend:v1.4.2\nlive localhost/plane-fork-live:v1.4.2-live.7\n'
+          printf 'web makeplane/plane-frontend:v1.4.3\nlive localhost/plane-fork-live:v1.4.3-live.7\n'
         elif case "$*" in *override*) false ;; *) true ;; esac; then
-          printf 'web makeplane/plane-frontend:v1.4.2\nlive makeplane/plane-live:v1.4.2\napi makeplane/plane-backend:v1.4.2\nplane-db postgres:15.7-alpine\n'
+          printf 'web makeplane/plane-frontend:v1.4.3\nlive makeplane/plane-live:v1.4.3\napi makeplane/plane-backend:v1.4.3\nplane-db postgres:15.7-alpine\n'
         elif [ -n "${STUB_PS_STOCK:-}" ]; then
-          printf 'web makeplane/plane-frontend:v1.4.2\nlive makeplane/plane-live:v1.4.2\n'
+          printf 'web makeplane/plane-frontend:v1.4.3\nlive makeplane/plane-live:v1.4.3\n'
         elif [ -n "${STUB_PS_BAD:-}" ]; then
-          printf 'web localhost/plane-fork-web:v1.4.2-live.7\nlive makeplane/plane-live:v1.4.2\napi localhost/plane-fork-api:v1.4.2-live.7\nworker localhost/plane-fork-api:v1.4.2-live.7\nbeat-worker localhost/plane-fork-api:v1.4.2-live.7\n'
+          printf 'web localhost/plane-fork-web:v1.4.3-live.7\nlive makeplane/plane-live:v1.4.3\napi localhost/plane-fork-api:v1.4.3-live.7\nworker localhost/plane-fork-api:v1.4.3-live.7\nbeat-worker localhost/plane-fork-api:v1.4.3-live.7\n'
         else
-          printf 'web localhost/plane-fork-web:v1.4.2-live.7\nlive localhost/plane-fork-live:v1.4.2-live.7\napi localhost/plane-fork-api:v1.4.2-live.7\nworker localhost/plane-fork-api:v1.4.2-live.7\nbeat-worker localhost/plane-fork-api:v1.4.2-live.7\nplane-db postgres:15\n'
+          printf 'web localhost/plane-fork-web:v1.4.3-live.7\nlive localhost/plane-fork-live:v1.4.3-live.7\napi localhost/plane-fork-api:v1.4.3-live.7\nworker localhost/plane-fork-api:v1.4.3-live.7\nbeat-worker localhost/plane-fork-api:v1.4.3-live.7\nplane-db postgres:15\n'
         fi ;;
       *" up "*) echo "stub: up done" ;;
     esac ;;
@@ -96,7 +96,7 @@ exit "${STUB_DOCKER_RC:-0}"
 EOF
 chmod +x "$T/bin/ssh" "$T/bin/pct" "$T/bin/docker"
 export STUB_LOG="$T/log" PATH="$T/bin:$PATH"
-export PVE_HOST=pve.example.test PLANE_CTID=999 PLANE_APP_DIR="$T/app/plane-app" STOCK_RELEASE=v1.4.2 FORK_N=7
+export PVE_HOST=pve.example.test PLANE_CTID=999 PLANE_APP_DIR="$T/app/plane-app" STOCK_RELEASE=v1.4.3 FORK_N=7
 SENTINEL="SENTINEL-not-a-real-secret-4711"
 export LIVE_SERVER_SECRET_KEY=$SENTINEL
 APP=$PLANE_APP_DIR
@@ -157,7 +157,7 @@ run --dry-run l2
 run --dry-run l1
 has "sed -e '\\''s/LIVE_EVENTS_ENABLED" && ! has "'\\'''\\''" && ok "dry-run shows the remote command once-quoted, as sent" || bad "dry-run double quoting"
 run --dry-run forward
-{ has "rm -f docker-compose.override.l1.yaml" && has "plane-fork-*:v1.4.2-live.7"; } && ok "forward dry-run prints rm and image check" || bad "forward dry-run content"
+{ has "rm -f docker-compose.override.l1.yaml" && has "plane-fork-*:v1.4.3-live.7"; } && ok "forward dry-run prints rm and image check" || bad "forward dry-run content"
 
 echo "-- l1 real"
 fresh_app
@@ -219,14 +219,14 @@ echo "-- l2 real"
 fresh_app
 run l2
 [ "$RC" = 0 ] && ok "l2 rc 0" || bad "l2 rc=$RC: $OUT"
-exp="DOCKER[plane-app][APP_RELEASE=] image ls -q makeplane/plane-backend:v1.4.2
-DOCKER[plane-app][APP_RELEASE=] image ls -q makeplane/plane-frontend:v1.4.2
-DOCKER[plane-app][APP_RELEASE=] image ls -q makeplane/plane-space:v1.4.2
-DOCKER[plane-app][APP_RELEASE=] image ls -q makeplane/plane-admin:v1.4.2
-DOCKER[plane-app][APP_RELEASE=] image ls -q makeplane/plane-live:v1.4.2
-DOCKER[plane-app][APP_RELEASE=] image ls -q makeplane/plane-proxy:v1.4.2
-DOCKER[plane-app][APP_RELEASE=v1.4.2] $C2
-DOCKER[plane-app][APP_RELEASE=v1.4.2] $C2PS"
+exp="DOCKER[plane-app][APP_RELEASE=] image ls -q makeplane/plane-backend:v1.4.3
+DOCKER[plane-app][APP_RELEASE=] image ls -q makeplane/plane-frontend:v1.4.3
+DOCKER[plane-app][APP_RELEASE=] image ls -q makeplane/plane-space:v1.4.3
+DOCKER[plane-app][APP_RELEASE=] image ls -q makeplane/plane-admin:v1.4.3
+DOCKER[plane-app][APP_RELEASE=] image ls -q makeplane/plane-live:v1.4.3
+DOCKER[plane-app][APP_RELEASE=] image ls -q makeplane/plane-proxy:v1.4.3
+DOCKER[plane-app][APP_RELEASE=v1.4.3] $C2
+DOCKER[plane-app][APP_RELEASE=v1.4.3] $C2PS"
 got=$(dockerlog)
 [ "$got" = "$exp" ] && ok "l2 exact docker sequence (image check, up, ps)" || bad "l2 sequence: $got"
 [ ! -e "$APP/docker-compose.override.l1.yaml" ] && ok "l2 does not create files" || bad "l2 created a file"
@@ -236,7 +236,7 @@ has "image check ok: no fork image" && ok "l2 verifies no fork image runs" || ba
 for img in plane-backend plane-frontend plane-space plane-admin plane-live plane-proxy; do
   fresh_app
   STUB_NO_STOCK="makeplane/$img:" run l2
-  { [ "$RC" = 2 ] && has "STOP: not in the local store: makeplane/$img:v1.4.2" && ! dockerlog | grep -q ' up '; } && ok "l2 without stock $img: rc 2, no up" || bad "l2 no $img rc=$RC"
+  { [ "$RC" = 2 ] && has "STOP: not in the local store: makeplane/$img:v1.4.3" && ! dockerlog | grep -q ' up '; } && ok "l2 without stock $img: rc 2, no up" || bad "l2 no $img rc=$RC"
 done
 fresh_app
 STUB_L2_FORK=1 run l2

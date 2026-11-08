@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 <#
 .SYNOPSIS
-Build fork images v1.4.2-live.N and save to tar archive.
+Build fork images v1.4.3-live.N and save to tar archive.
 
 .DESCRIPTION
 Builds three Docker images (web, live, api) from a specific commit,
@@ -10,7 +10,7 @@ Process counts are checked to ensure no windows were opened.
 
 .PARAMETER Sha
 The full 40-character commit SHA to build. Must be contained in
-origin/live-updates/v1.4.2. Required.
+origin/live-updates/v1.4.3. Required.
 
 .PARAMETER N
 The build number (live.<N>). Used in image tags and output filenames. Required.
@@ -67,7 +67,7 @@ if ($OutDir -notmatch '^/[A-Za-z0-9._/-]+$') {
 }
 
 # Tag for images
-$imageTag = "v1.4.2-live.$N"
+$imageTag = "v1.4.3-live.$N"
 $tarName = "plane-fork-live.$N.tar"
 $sha256Name = "plane-fork-live.$N.sha256"
 $buildDir = "/root/plane-build/$Sha"
@@ -117,24 +117,24 @@ function Get-Sh {
   return , @($out | Where-Object { $null -ne $_ } | ForEach-Object { "$_".TrimEnd("`r") })
 }
 
-# Check that Sha is in origin/live-updates/v1.4.2
+# Check that Sha is in origin/live-updates/v1.4.3
 if (-not $DryRun) {
-  Write-Host "Verifying SHA $Sha is in origin/live-updates/v1.4.2..."
+  Write-Host "Verifying SHA $Sha is in origin/live-updates/v1.4.3..."
 
   # No 2>&1 here: under $ErrorActionPreference='Stop' Windows PowerShell 5.1 turns
   # any redirected native stderr line (git fetch prints progress there) into a
   # terminating error. Let stderr go to the console and rely on the exit code.
-  & git -C $repoRoot fetch origin live-updates/v1.4.2 --quiet
+  & git -C $repoRoot fetch origin live-updates/v1.4.3 --quiet
   if ($LASTEXITCODE -ne 0) {
-    throw "Failed to fetch origin/live-updates/v1.4.2"
+    throw "Failed to fetch origin/live-updates/v1.4.3"
   }
 
-  & git -C $repoRoot merge-base --is-ancestor $Sha origin/live-updates/v1.4.2
+  & git -C $repoRoot merge-base --is-ancestor $Sha origin/live-updates/v1.4.3
   if ($LASTEXITCODE -ne 0) {
-    throw "SHA $Sha is not contained in origin/live-updates/v1.4.2. Refusing to build."
+    throw "SHA $Sha is not contained in origin/live-updates/v1.4.3. Refusing to build."
   }
 
-  Write-Host "SHA verified: $Sha is in origin/live-updates/v1.4.2"
+  Write-Host "SHA verified: $Sha is in origin/live-updates/v1.4.3"
 }
 
 # Record process counts at start
@@ -267,7 +267,7 @@ if (-not $DryRun) {
   $readmeFile = Join-Path (Join-Path $repoRoot 'fork') 'README.md'
   $utf8 = New-Object System.Text.UTF8Encoding($false)
   if (-not (Test-Path -LiteralPath $readmeFile)) {
-    $header = "# Plane Fork Build Results`n`nBuild results for plane-fork images v1.4.2-live releases.`n`n## Builds`n`n"
+    $header = "# Plane Fork Build Results`n`nBuild results for plane-fork images v1.4.3-live releases.`n`n## Builds`n`n"
     [System.IO.File]::WriteAllText($readmeFile, $header, $utf8)
   } elseif (-not ([System.IO.File]::ReadAllText($readmeFile).EndsWith("`n"))) {
     [System.IO.File]::AppendAllText($readmeFile, "`n", $utf8)

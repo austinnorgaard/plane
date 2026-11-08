@@ -55,7 +55,7 @@ WARNINGS
    events socket go in LIVE_EVENTS_ALLOWED_ORIGINS.
 
 Variables (supplied by the operator; nothing host-specific is stored in the repo)
-  FORK_N                       fork build number, image tag v1.4.2-live.$FORK_N
+  FORK_N                       fork build number, image tag v1.4.3-live.$FORK_N
   WEB_URL                      public origin (normally already in plane.env)
   LIVE_EVENTS_ALLOWED_ORIGINS  comma-separated origins users open Plane from
                                (scheme://host[:port], for example the values of

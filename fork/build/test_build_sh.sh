@@ -95,7 +95,7 @@ case "\$1" in
     exit 1 ;;
   images)
     if [ -n "\${FAKE_IMAGES:-}" ]; then printf '%s\n' "\$FAKE_IMAGES"; exit 0; fi
-    tag=\${FAKE_TAG:-v1.4.2-live.1}
+    tag=\${FAKE_TAG:-v1.4.3-live.1}
     for n in web live api; do echo "localhost/plane-fork-\$n:\$tag"; done
     exit 0 ;;
 esac
@@ -133,8 +133,8 @@ GIT_ANCESTOR_RC=1 run_build --sha $SHA --n 1 --out-dir "$work/out1" --engine doc
 [ $rc -ne 0 ]; check "sha gate: non-zero exit" $?
 echo "$out" | grep -q "Refusing to build"; check "sha gate: says it refuses" $?
 [ "$(calls_of docker)" -eq 0 ]; check "sha gate: engine never called" $?
-grep -q "^git .*fetch origin live-updates/v1.4.2" "$CALLS"; check "sha gate: fetched first" $?
-grep -q "merge-base --is-ancestor $SHA origin/live-updates/v1.4.2" "$CALLS"; check "sha gate: merge-base against origin branch" $?
+grep -q "^git .*fetch origin live-updates/v1.4.3" "$CALLS"; check "sha gate: fetched first" $?
+grep -q "merge-base --is-ancestor $SHA origin/live-updates/v1.4.3" "$CALLS"; check "sha gate: merge-base against origin branch" $?
 [ ! -e "$repo/work/$SHA" ]; check "sha gate: no build dir created" $?
 readme_unchanged; check "sha gate: README untouched" $?
 
@@ -154,7 +154,7 @@ run_build --sha $SHA --n 2 --out-dir "$work/out2" --engine docker --dry-run
 stubs="$stubs_save"
 readme_unchanged; check "dry-run: README untouched" $?
 [ "$(echo "$out" | grep -c 'measure.sh')" -eq 3 ]; check "dry-run: prints the three measured builds" $?
-echo "$out" | grep -q "plane-fork-build=$SHA" && echo "$out" | grep -q 'v1.4.2-live.2'; check "dry-run: label and tag shown" $?
+echo "$out" | grep -q "plane-fork-build=$SHA" && echo "$out" | grep -q 'v1.4.3-live.2'; check "dry-run: label and tag shown" $?
 echo "$out" | grep -q -- 'docker save -o '; check "dry-run: docker save command shown" $?
 
 # 2b. --ca-bundle in dry-run prints the patch and the secret, touches nothing
@@ -180,12 +180,12 @@ run_build --sha $SHA --n 1 --out-dir "$work/out4" --engine docker
 [ $rc -eq 0 ]; check "success (docker): exit 0" $?
 [ "$(grep -c '^docker build ' "$CALLS")" -eq 3 ]; check "success (docker): three builds" $?
 [ "$(grep '^docker build ' "$CALLS" | grep -c -- "--label plane-fork-build=$SHA")" -eq 3 ]; check "success (docker): every build labelled" $?
-grep -q '^docker build .* -f apps/web/Dockerfile.web -t localhost/plane-fork-web:v1.4.2-live.1 \.$' "$CALLS" &&
-  grep -q -- '-f apps/live/Dockerfile.live -t localhost/plane-fork-live:v1.4.2-live.1 \.$' "$CALLS" &&
-  grep -q -- '-f fork/docker/Dockerfile.fork-api -t localhost/plane-fork-api:v1.4.2-live.1 \.$' "$CALLS"; check "success (docker): dockerfiles and tags" $?
+grep -q '^docker build .* -f apps/web/Dockerfile.web -t localhost/plane-fork-web:v1.4.3-live.1 \.$' "$CALLS" &&
+  grep -q -- '-f apps/live/Dockerfile.live -t localhost/plane-fork-live:v1.4.3-live.1 \.$' "$CALLS" &&
+  grep -q -- '-f fork/docker/Dockerfile.fork-api -t localhost/plane-fork-api:v1.4.3-live.1 \.$' "$CALLS"; check "success (docker): dockerfiles and tags" $?
 ! grep '^docker build ' "$CALLS" | grep -q -- '--build-arg'; check "success (docker): no build args" $?
 ! grep '^docker build ' "$CALLS" | grep -q -- '--cpu-'; check "success (docker): no cpu cap flags" $?
-grep -q '^docker save -o .*plane-fork-live.1.tar localhost/plane-fork-web:v1.4.2-live.1 localhost/plane-fork-live:v1.4.2-live.1 localhost/plane-fork-api:v1.4.2-live.1$' "$CALLS"; check "success (docker): docker save with the three tags" $?
+grep -q '^docker save -o .*plane-fork-live.1.tar localhost/plane-fork-web:v1.4.3-live.1 localhost/plane-fork-live:v1.4.3-live.1 localhost/plane-fork-api:v1.4.3-live.1$' "$CALLS"; check "success (docker): docker save with the three tags" $?
 grep -q '^docker image prune -f --filter dangling=true --filter label=plane-fork-build='"$SHA"'$' "$CALLS"; check "success (docker): label-scoped dangling prune" $?
 [ "$(cd "$work/out4" && sha256sum -c plane-fork-live.1.sha256 2>&1 | grep -c ': OK$')" -eq 1 ]; check "success (docker): sha256 file verifies the tar" $?
 [ "$(wc -l < "$work/out4/plane-fork-live.1.sha256")" -eq 1 ] && grep -q '^[0-9a-f]\{64\}  plane-fork-live.1.tar$' "$work/out4/plane-fork-live.1.sha256"; check "success (docker): sha256 file format" $?
@@ -196,7 +196,7 @@ tar_sha="$(sha256sum "$work/out4/plane-fork-live.1.tar" | cut -d' ' -f1)"
 grep -q '^### Build 1 - [0-9-]* [0-9:]* UTC$' "$readme"; check "README: block header" $?
 grep -q "^- SHA: $SHA\$" "$readme"; check "README: sha line" $?
 grep -q "^- Output: plane-fork-live.1.tar, sha256 $tar_sha (plane-fork-live.1.sha256)\$" "$readme"; check "README: output line" $?
-grep -q '^- Tags: localhost/plane-fork-api:v1.4.2-live.1, localhost/plane-fork-live:v1.4.2-live.1, localhost/plane-fork-web:v1.4.2-live.1$' "$readme"; check "README: tags line" $?
+grep -q '^- Tags: localhost/plane-fork-api:v1.4.3-live.1, localhost/plane-fork-live:v1.4.3-live.1, localhost/plane-fork-web:v1.4.3-live.1$' "$readme"; check "README: tags line" $?
 for b in web live api; do
   grep -Eq "^- $b build: [0-9]+ s wall, peak RAM used [0-9]+ MB \(\+-?[0-9]+ MB over idle\), lowest available [0-9]+ MB\$" "$readme"; check "README: MEASURE captured for $b" $?
 done
@@ -261,9 +261,9 @@ run_build --sha $SHA --n 1 --out-dir "$work/out4n" --engine docker --ca-bundle "
 cp "$work/live.orig" "$tree/apps/live/Dockerfile.live"
 
 # 4c. n is normalized: 007 is build 7
-FAKE_TAG=v1.4.2-live.7 run_build --sha $SHA --n 007 --out-dir "$work/out4h" --engine docker
-[ $rc -eq 0 ] && [ -f "$work/out4h/plane-fork-live.7.tar" ] && grep -q '^### Build 7 - ' "$repo/fork/README.md" && grep -q 'plane-fork-web:v1.4.2-live.7 ' "$CALLS"; check "n: 007 normalized to 7 (tag, files, README)" $?
-FAKE_TAG=v1.4.2-live.8 run_build --sha $SHA --n 08 --out-dir "$work/out4i" --engine docker
+FAKE_TAG=v1.4.3-live.7 run_build --sha $SHA --n 007 --out-dir "$work/out4h" --engine docker
+[ $rc -eq 0 ] && [ -f "$work/out4h/plane-fork-live.7.tar" ] && grep -q '^### Build 7 - ' "$repo/fork/README.md" && grep -q 'plane-fork-web:v1.4.3-live.7 ' "$CALLS"; check "n: 007 normalized to 7 (tag, files, README)" $?
+FAKE_TAG=v1.4.3-live.8 run_build --sha $SHA --n 08 --out-dir "$work/out4i" --engine docker
 [ $rc -eq 0 ] && [ -f "$work/out4i/plane-fork-live.8.tar" ]; check "n: 08 is not parsed as octal" $?
 
 # 4d. failing mkdir / rm are fatal
@@ -295,7 +295,7 @@ grep -q '^podman save -m --format docker-archive -o .*plane-fork-live.1.tar ' "$
 grep -q '^podman image prune -f --filter dangling=true --filter label=' "$CALLS"; check "podman: label-scoped prune" $?
 
 # 6. verification failures after the builds
-FAKE_IMAGES="localhost/plane-fork-web:v1.4.2-live.1" run_build --sha $SHA --n 1 --out-dir "$work/out6" --engine docker
+FAKE_IMAGES="localhost/plane-fork-web:v1.4.3-live.1" run_build --sha $SHA --n 1 --out-dir "$work/out6" --engine docker
 [ $rc -ne 0 ] && readme_unchanged; check "missing images: non-zero, README untouched" $?
 
 GIT_LSTREE_EXTRA=2 run_build --sha $SHA --n 1 --out-dir "$work/out7" --engine docker

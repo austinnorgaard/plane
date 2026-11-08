@@ -216,19 +216,19 @@ case "$MODE" in
     step "up -d with the normal override" "$S_FWD_UP"
     step "list services and images" "$S_FWD_PS"
     if [ "$DRY" = 1 ]; then
-      echo "[dry-run] forward: check web, live, api, worker, beat-worker run localhost/plane-fork-*:v1.4.2-live.$FORK_N"
+      echo "[dry-run] forward: check web, live, api, worker, beat-worker run localhost/plane-fork-*:v1.4.3-live.$FORK_N"
     else
       bad=
       for pair in web:web live:live api:api worker:api beat-worker:api; do
         svc=${pair%%:*}
         img=${pair##*:}
-        printf '%s\n' "$OUT" | grep -qxF "$svc localhost/plane-fork-$img:v1.4.2-live.$FORK_N" || bad="$bad $svc"
+        printf '%s\n' "$OUT" | grep -qxF "$svc localhost/plane-fork-$img:v1.4.3-live.$FORK_N" || bad="$bad $svc"
       done
       if [ -n "$bad" ]; then
-        echo "STOP: not on the fork tag v1.4.2-live.$FORK_N:$bad. The L1 file was kept; rerun forward once the override is in place (never use setup.sh)." >&2
+        echo "STOP: not on the fork tag v1.4.3-live.$FORK_N:$bad. The L1 file was kept; rerun forward once the override is in place (never use setup.sh)." >&2
         exit 2
       fi
-      echo "image check ok: five services on v1.4.2-live.$FORK_N"
+      echo "image check ok: five services on v1.4.3-live.$FORK_N"
     fi
     step "delete the L1 file" "$S_FWD_RM"
     echo "NEXT: smoke tests (RUNBOOK section 7)"

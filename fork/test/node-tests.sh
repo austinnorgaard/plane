@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: AGPL-3.0-only
 # node-tests.sh - install and run Plane's node checks in node:22-alpine with the
-# corepack-pinned pnpm (packageManager in package.json, 11.3.0 at v1.4.2).
+# corepack-pinned pnpm (packageManager in package.json, 11.10.0 at v1.4.3).
 #
 # The source tree is bind-mounted at /work, so node_modules lives on the distro's
 # ext4 disk. The named volume plane-pnpm-store is mounted at /pnpm and holds both

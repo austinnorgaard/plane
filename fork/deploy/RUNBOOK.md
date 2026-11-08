@@ -14,7 +14,7 @@ Every host-specific value is a variable supplied by the operator at run time. No
 | `CT_STAGING_DIR`    | scratch directory in the container for the image archive                                     |
 | `BUILD_HOST`        | machine where the images were built with podman                                              |
 | `STOCK_RELEASE`     | tag of the stock `makeplane/*` images running before the deploy, taken from the inspection   |
-| `FORK_N`            | fork build number; tag is `v1.4.2-live.$FORK_N`                                              |
+| `FORK_N`            | fork build number; tag is `v1.4.3-live.$FORK_N`                                              |
 | `PUBLIC_URL`        | origin users open from outside the LAN                                                       |
 | `LAN_URL`           | origin users open from the LAN                                                               |
 | `WORKSPACE_SLUG`, `PROJECT_ID` | a test workspace and project for the smoke tests                                  |
@@ -102,7 +102,7 @@ QA_RECORD=<file> IMAGE_TAR=<archive> IMAGE_SHA256=<hash> RUNBOOK_FILE=<filled co
 
 Checks, each a PASS or a FAIL:
 
-- the release sha is an ancestor of `origin/live-updates/v1.4.2` (the gate fetches that branch first);
+- the release sha is an ancestor of `origin/live-updates/v1.4.3` (the gate fetches that branch first);
 - the QA record has a PASS naming the sha and no FAIL for it;
 - the archive sha256 matches the build output (done by `fetch-images.sh` with `SKIP_LOAD=1`, which copies the archive to a temporary directory, so keep free disk for one more copy; nothing is loaded);
 - the archive is bound to the release sha: every image in it carries the label `plane-fork-build=<sha>` that `build.sh` sets (read from the archive manifest and image configs; nothing is loaded). If you pass the saved build output as `BUILD_NOTES`, its `SHA verified: <sha>` line must also name the release sha. Notes alone bind the archive only with both the `SHA verified:` line and a `Tar sha256:` line equal to `IMAGE_SHA256`. An archive with no label and no usable notes is a FAIL. Known limitation: `::/16` passes the IPv6 range floor although it covers the IPv4-mapped range;
@@ -178,7 +178,7 @@ ssh "$PVE_HOST" "pct exec $PLANE_CTID -- env CONTAINER_ENGINE=docker FORK_N=$FOR
   $IMAGE_SHA256 $CT_STAGING_DIR"
 ```
 
-The script downloads to a temporary file, compares the sha256 with `IMAGE_SHA256`, and on a mismatch deletes the download, prints `sha256 mismatch` and exits 1: stop and do not retry with another hash; rebuild or republish instead. On a match it stores the archive and a `.sha256` file, then runs `verify-load.sh`, which checks the hash again, loads the archive and confirms the three `localhost/plane-fork-*:v1.4.2-live.$FORK_N` names. It prints `All checks passed` and exits 0 only if all of that succeeded.
+The script downloads to a temporary file, compares the sha256 with `IMAGE_SHA256`, and on a mismatch deletes the download, prints `sha256 mismatch` and exits 1: stop and do not retry with another hash; rebuild or republish instead. On a match it stores the archive and a `.sha256` file, then runs `verify-load.sh`, which checks the hash again, loads the archive and confirms the three `localhost/plane-fork-*:v1.4.3-live.$FORK_N` names. It prints `All checks passed` and exits 0 only if all of that succeeded.
 
 c. If the container cannot reach the internet, run step b on any machine that can, with `SKIP_LOAD=1` (it verifies and stores the archive and writes the `.sha256` file, and does not load). Copy both files into the container (`pct push`) and run the flat `verify-load.sh` there (push it as in step b):
 
@@ -221,7 +221,7 @@ $C up -d
 $C ps --format '{{.Service}} {{.Image}}'
 ```
 
-Expected images: `web`, `live`, `api`, `worker`, `beat-worker` all `localhost/plane-fork-*:v1.4.2-live.$FORK_N` (web -> `plane-fork-web`, live -> `plane-fork-live`, the other three -> `plane-fork-api`). Every other service keeps its stock image. Exactly one `live` container must be running. If any of the five shows a stock image, the stack was started without the override (for example through `setup.sh`): rerun `$C up -d`.
+Expected images: `web`, `live`, `api`, `worker`, `beat-worker` all `localhost/plane-fork-*:v1.4.3-live.$FORK_N` (web -> `plane-fork-web`, live -> `plane-fork-live`, the other three -> `plane-fork-api`). Every other service keeps its stock image. Exactly one `live` container must be running. If any of the five shows a stock image, the stack was started without the override (for example through `setup.sh`): rerun `$C up -d`.
 
 Wait for `api` to be healthy: `$C logs --tail 30 api`.
 
@@ -325,7 +325,7 @@ fork/deploy/rollback.sh --dry-run l1
 fork/deploy/rollback.sh l1
 ```
 
-`l2` also checks first that every stock image that uses `APP_RELEASE` (backend, frontend, space, admin, live, proxy) is in the local store at `$STOCK_RELEASE`, warns when the up takes longer than 60 s, and exits 2 if any service still shows a `localhost/plane-fork-` image afterwards. The ssh calls use `BatchMode`, `ConnectTimeout=10` and a keepalive, so a dead host fails fast. `forward` checks that the five fork services run `v1.4.2-live.$FORK_N` and deletes the L1 file only if they do. The manual commands below are the fallback and stay the reference.
+`l2` also checks first that every stock image that uses `APP_RELEASE` (backend, frontend, space, admin, live, proxy) is in the local store at `$STOCK_RELEASE`, warns when the up takes longer than 60 s, and exits 2 if any service still shows a `localhost/plane-fork-` image afterwards. The ssh calls use `BatchMode`, `ConnectTimeout=10` and a keepalive, so a dead host fails fast. `forward` checks that the five fork services run `v1.4.3-live.$FORK_N` and deletes the L1 file only if they do. The manual commands below are the fallback and stay the reference.
 
 **L1: both flags off (about 1 to 2 min).** Keeps the fork images, turns the behaviour off. Live events stop (the socket closes with 4404) and the pages API answers 404. The L1 file is generated on the spot and deleted after the roll-forward.
 
@@ -366,7 +366,7 @@ Afterwards run the stock stack as in L2 and check the web UI. Delete the snapsho
 
 ## 11. Retention
 
-- Keep the two most recent fork tags in the container's image store (the running one and the previous one). Remove older ones by exact tag: `docker image rm localhost/plane-fork-web:v1.4.2-live.<old>` (and `-live`, `-api`).
+- Keep the two most recent fork tags in the container's image store (the running one and the previous one). Remove older ones by exact tag: `docker image rm localhost/plane-fork-web:v1.4.3-live.<old>` (and `-live`, `-api`).
 - Never prune stock images: no `docker image prune -a`, no `docker system prune -a`, no removal of `makeplane/*`, `postgres`, `valkey`, `rabbitmq` or `minio` images. Rollback L2 depends on them.
 - Delete image archives from `$PVE_STAGING_DIR` and `$CT_STAGING_DIR` after the checksum check.
 

@@ -61,10 +61,10 @@ case "$args" in
   *" ps --filter "*)
     [ -n "${STUB_NO_IMAGES:-}" ] && exit 0
     if [ "$phase" = stock ]; then
-      for s in web live api worker beat-worker proxy; do echo "makeplane/plane-$s:v1.4.2"; done
+      for s in web live api worker beat-worker proxy; do echo "makeplane/plane-$s:v1.4.3"; done
     else
-      for s in web live api worker beat-worker; do echo "localhost/plane-fork-$s:v1.4.2-live.1"; done
-      echo "makeplane/plane-proxy:v1.4.2"
+      for s in web live api worker beat-worker; do echo "localhost/plane-fork-$s:v1.4.3-live.1"; done
+      echo "makeplane/plane-proxy:v1.4.3"
     fi ;;
   *" exec "*"manage.py shell"*)
     if [[ $* == *"PROJECT_ID ="* ]]; then echo "STATE MEMBERS_SEEDED=1"; exit 0; fi
@@ -273,7 +273,7 @@ check "the no-image case consulted the stubbed docker, not a host engine" "$(gre
 new_dir
 STUB_MISSING_IMAGE=1 "$SCRIPT" up >"$T/up-missing.out" 2>&1
 rc=$?
-check "up stops when a fork image is missing" "$([ "$rc" -ne 0 ] && has "$T/up-missing.out" 'missing image localhost/plane-fork-web:v1.4.2-live.1' && echo 0 || echo 1)"
+check "up stops when a fork image is missing" "$([ "$rc" -ne 0 ] && has "$T/up-missing.out" 'missing image localhost/plane-fork-web:v1.4.3-live.1' && echo 0 || echo 1)"
 check "up did not start the stack when an image is missing" "$(grep -q ' up -d' "$T/podman.log" && echo 1 || echo 0)"
 
 # ------------------------------------------------------------------ up --stock (start of upgrade-rollback.sh)

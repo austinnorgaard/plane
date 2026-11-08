@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-only
 #
-# upgrade-rollback.sh - data safety test for upgrading stock v1.4.2 to the fork images and
+# upgrade-rollback.sh - data safety test for upgrading stock v1.4.3 to the fork images and
 # rolling back (QA-12). Runs on the local throwaway stack of local-stack.sh.
 #
 #   upgrade-rollback.sh run [--keep]
@@ -26,10 +26,10 @@
 #
 # Settings (environment): the ones of local-stack.sh (LOCAL_STACK_PROJECT, LOCAL_STACK_PORT,
 # LOCAL_STACK_TLS_PORT, LOCAL_STACK_MINIO_IMAGE, LOCAL_STACK_DIR, COMPOSE_CMD) and
-#   FORK_N                   fork image build number, default 2 (tag v1.4.2-live.2)
+#   FORK_N                   fork image build number, default 2 (tag v1.4.3-live.2)
 #   UPGRADE_ROLLBACK_REPORT  report file, default $LOCAL_STACK_DIR/upgrade-rollback.report
-# Needs the stock images makeplane/plane-*:v1.4.2 and the fork images
-# localhost/plane-fork-{web,live,api}:v1.4.2-live.$FORK_N loaded in the engine
+# Needs the stock images makeplane/plane-*:v1.4.3 and the fork images
+# localhost/plane-fork-{web,live,api}:v1.4.3-live.$FORK_N loaded in the engine
 # (fork/build/verify-load.sh loads a built archive). The compose files are never pulled from.
 # Fingerprints, state and report are written to the settings directory (mode 600); they hold no
 # secret values: the fingerprint only holds a hash of each API key. Secrets are never printed.
@@ -542,10 +542,10 @@ events_check() { # events_check LABEL: a PATCH with the API key delivers a frame
 preflight() {
   local img missing=0
   for img in plane-backend plane-frontend plane-live plane-admin plane-space plane-proxy; do
-    image_exists "makeplane/$img:v1.4.2" || { log "missing stock image makeplane/$img:v1.4.2"; missing=1; }
+    image_exists "makeplane/$img:v1.4.3" || { log "missing stock image makeplane/$img:v1.4.3"; missing=1; }
   done
   for img in web live api; do
-    image_exists "localhost/plane-fork-$img:v1.4.2-live.$FORK_N" || { log "missing image localhost/plane-fork-$img:v1.4.2-live.$FORK_N (load it with fork/build/verify-load.sh)"; missing=1; }
+    image_exists "localhost/plane-fork-$img:v1.4.3-live.$FORK_N" || { log "missing image localhost/plane-fork-$img:v1.4.3-live.$FORK_N (load it with fork/build/verify-load.sh)"; missing=1; }
   done
   [ "$missing" -eq 0 ] || die "images missing, load them first"
 }
@@ -562,7 +562,7 @@ cmd_run() {
   preflight
   : >"$REPORT_FILE"
   rm -rf "$FP_DIR"
-  report "UPGRADE/ROLLBACK REPORT stock v1.4.2 -> fork tag v1.4.2-live.$FORK_N, compose provider: $COMPOSE"
+  report "UPGRADE/ROLLBACK REPORT stock v1.4.3 -> fork tag v1.4.3-live.$FORK_N, compose provider: $COMPOSE"
 
   report "== 1. stock stack"
   cmd_up --stock >"$TMP/up.out" 2>&1 || { tail -n 8 "$TMP/up.out"; die "stock stack did not start"; }

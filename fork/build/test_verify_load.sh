@@ -42,9 +42,9 @@ fi
 podman_fake="$test_dir/podman"
 cat > "$podman_fake" << 'EOF'
 #!/bin/bash
-list="${FAKE_PODMAN_IMAGES:-localhost/plane-fork-web:v1.4.2-live.1
-localhost/plane-fork-live:v1.4.2-live.1
-localhost/plane-fork-api:v1.4.2-live.1}"
+list="${FAKE_PODMAN_IMAGES:-localhost/plane-fork-web:v1.4.3-live.1
+localhost/plane-fork-live:v1.4.3-live.1
+localhost/plane-fork-api:v1.4.3-live.1}"
 case "$1 $2" in
   "load -i")
     exit 0
@@ -146,8 +146,8 @@ tag_tar="$test_dir/plane-fork-live.1.tar"
 tag_sha="$test_dir/plane-fork-live.1.sha256"
 echo -n "$test_content" > "$tag_tar"
 (cd "$test_dir" && sha256sum plane-fork-live.1.tar > plane-fork-live.1.sha256)
-web1="localhost/plane-fork-web:v1.4.2-live.1"
-live1="localhost/plane-fork-live:v1.4.2-live.1"
+web1="localhost/plane-fork-web:v1.4.3-live.1"
+live1="localhost/plane-fork-live:v1.4.3-live.1"
 
 echo "Test 6: all three tags, N derived from the tar name..."
 run_test "N from tar name" "$tag_tar" "$tag_sha" 1
@@ -163,12 +163,12 @@ $live1" run_test "missing api image" "$tag_tar" "$tag_sha" 0
 echo "Test 9: one image has the wrong tag..."
 FAKE_PODMAN_IMAGES="$web1
 $live1
-localhost/plane-fork-api:v1.4.2-live.2" run_test "wrong api tag" "$tag_tar" "$tag_sha" 0
+localhost/plane-fork-api:v1.4.3-live.2" run_test "wrong api tag" "$tag_tar" "$tag_sha" 0
 
 echo "Test 10: images from an older build only..."
-FAKE_PODMAN_IMAGES="localhost/plane-fork-web:v1.4.2-live.0
-localhost/plane-fork-live:v1.4.2-live.0
-localhost/plane-fork-api:v1.4.2-live.0" run_test "stale build" "$tag_tar" "$tag_sha" 0
+FAKE_PODMAN_IMAGES="localhost/plane-fork-web:v1.4.3-live.0
+localhost/plane-fork-live:v1.4.3-live.0
+localhost/plane-fork-api:v1.4.3-live.0" run_test "stale build" "$tag_tar" "$tag_sha" 0
 
 echo "Test 11: N unknown (tar name has no N, no argument)..."
 run_test "N unknown" "$test_tar1" "$test_sha1" 0
@@ -182,9 +182,9 @@ run_test "short digest" "$tag_tar" "$test_dir/short.sha256" 0
 docker_fake="$test_dir/docker"
 cat > "$docker_fake" << 'EOF2'
 #!/bin/bash
-list="${FAKE_DOCKER_IMAGES:-localhost/plane-fork-web:v1.4.2-live.1
-localhost/plane-fork-live:v1.4.2-live.1
-localhost/plane-fork-api:v1.4.2-live.1}"
+list="${FAKE_DOCKER_IMAGES:-localhost/plane-fork-web:v1.4.3-live.1
+localhost/plane-fork-live:v1.4.3-live.1
+localhost/plane-fork-api:v1.4.3-live.1}"
 case "$1 $2" in
   "load -i") exit 0 ;;
   "image inspect") printf '%s\n' "$list" | grep -qxF -- "$3"; exit $? ;;

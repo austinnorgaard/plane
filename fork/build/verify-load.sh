@@ -4,7 +4,7 @@
 # verify-load.sh TAR SHA256_FILE [N]
 #
 # Verifies the tar archive's checksum, loads it into podman (or docker), and checks
-# that the three exact references localhost/plane-fork-{web,live,api}:v1.4.2-live.N
+# that the three exact references localhost/plane-fork-{web,live,api}:v1.4.3-live.N
 # exist. N is the optional third argument; if omitted it is taken from a tar
 # name of the form plane-fork-live.<N>.tar.
 #
@@ -39,7 +39,7 @@ if ! [[ "$n" =~ ^[0-9]+$ ]]; then
   echo "ERROR: build number N unknown: pass it as the third argument or name the tar plane-fork-live.<N>.tar" >&2
   exit 1
 fi
-image_tag="v1.4.2-live.$n"
+image_tag="v1.4.3-live.$n"
 
 engine="${CONTAINER_ENGINE:-}"
 if [ -z "$engine" ]; then

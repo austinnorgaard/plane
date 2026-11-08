@@ -17,10 +17,10 @@ GIT="git -c user.name=t -c user.email=t@example.test"
 # --- git fixture: bare origin with the release branch, a clone, one off-branch commit
 git init -q --bare "$T/origin.git"
 git init -q "$T/work"
-( cd "$T/work" && $GIT checkout -q -b live-updates/v1.4.2 && echo a >f && git add f && $GIT commit -qm one &&
-  git remote add origin "$T/origin.git" && git push -q origin live-updates/v1.4.2 2>/dev/null &&
+( cd "$T/work" && $GIT checkout -q -b live-updates/v1.4.3 && echo a >f && git add f && $GIT commit -qm one &&
+  git remote add origin "$T/origin.git" && git push -q origin live-updates/v1.4.3 2>/dev/null &&
   git checkout -q -b side && echo b >g && git add g && $GIT commit -qm side )
-SHA=$(git -C "$T/work" rev-parse live-updates/v1.4.2)
+SHA=$(git -C "$T/work" rev-parse live-updates/v1.4.3)
 SIDE=$(git -C "$T/work" rev-parse side)
 export GATE_REPO="$T/work"
 
@@ -48,7 +48,7 @@ mktar() {
   for i in $(seq 1 "$n"); do
     if [ "$lab" = NONE ]; then printf '{"architecture":"amd64","config":{"Labels":{"other":"x"}}}' >"$d/cfg$i.json"
     else printf '{"architecture":"amd64","config":{"Labels":{"other":"x","plane-fork-build":"%s"}}}' "$lab" >"$d/cfg$i.json"; fi
-    printf '%s{"Config":"cfg%s.json","RepoTags":["localhost/plane-fork-img%s:v1.4.2-live.1"],"Layers":[]}' "$([ "$i" -gt 1 ] && echo ,)" "$i" "$i" >>"$d/m"
+    printf '%s{"Config":"cfg%s.json","RepoTags":["localhost/plane-fork-img%s:v1.4.3-live.1"],"Layers":[]}' "$([ "$i" -gt 1 ] && echo ,)" "$i" "$i" >>"$d/m"
   done
   { printf '['; cat "$d/m"; printf ']'; } >"$d/manifest.json"
   ( cd "$d" && tar -cf "$f" manifest.json cfg*.json )
@@ -68,7 +68,7 @@ NODE_OPTIONS=--trace-warnings
 LIVE_SERVER_SECRET_KEY=$SENTINEL
 EOT
 export QA_RECORD="$T/qa" IMAGE_TAR="$T/plane-fork-live.1.tar" IMAGE_SHA256="$TARSHA"
-export RUNBOOK_FILE="$T/runbook.filled" STOCK_RELEASE=v1.4.2
+export RUNBOOK_FILE="$T/runbook.filled" STOCK_RELEASE=v1.4.3
 export PVE_HOST=pve.example.test PLANE_CTID=999 PLANE_APP_DIR=/opt/plane-app
 unset STUB_INSPECT_RC BUILD_NOTES
 
@@ -100,9 +100,9 @@ run -e "$T/env" "$SIDE"; expect_fail "sha not on branch -> FAIL" "release sha is
 run -e "$T/env" 0123456789012345678901234567890123456789; expect_fail "unknown sha -> FAIL" "release sha is on"
 GATE_REPO="$T/nowhere" run -e "$T/env" "$SHA"; expect_fail "no checkout -> FAIL" "release sha is on"
 # a stale clone must be refreshed: push a new commit to origin, check it without fetching by hand
-( cd "$T/work" && git checkout -q live-updates/v1.4.2 && echo c >h && git add h && $GIT commit -qm two && git push -q origin live-updates/v1.4.2 2>/dev/null )
+( cd "$T/work" && git checkout -q live-updates/v1.4.3 && echo c >h && git add h && $GIT commit -qm two && git push -q origin live-updates/v1.4.3 2>/dev/null )
 NEW=$(git -C "$T/work" rev-parse HEAD)
-git -C "$T/work" update-ref refs/remotes/origin/live-updates/v1.4.2 "$SHA"
+git -C "$T/work" update-ref refs/remotes/origin/live-updates/v1.4.3 "$SHA"
 printf 'QA: PASS @ %s\n' "$NEW" >"$T/qa"
 mktar "$T/new.tar" "$NEW"; cp "$T/new.tar" "$T/plane-fork-live.9.tar"
 IMAGE_TAR="$T/plane-fork-live.9.tar" IMAGE_SHA256=$(sha256sum "$T/new.tar" | awk '{print $1}') run -e "$T/env" "$NEW"
@@ -123,9 +123,9 @@ printf 'QA: PASS @ %s\n' "${SHA:0:12}" >"$T/qa"
 IMAGE_SHA256=$(printf '0%.0s' $(seq 64)) run -e "$T/env" "$SHA"; expect_fail "archive sha mismatch -> FAIL" "image archive sha256"
 IMAGE_SHA256="" run -e "$T/env" "$SHA"; expect_fail "no expected sha -> FAIL" "image archive sha256"
 IMAGE_TAR="$T/none.tar" run -e "$T/env" "$SHA"; expect_fail "archive missing -> FAIL" "image archive sha256"
-printf 'Build ok\nSHA verified: %s is in origin/live-updates/v1.4.2\nTar sha256: %s\n' "$SHA" "$TARSHA" >"$T/notes"
+printf 'Build ok\nSHA verified: %s is in origin/live-updates/v1.4.3\nTar sha256: %s\n' "$SHA" "$TARSHA" >"$T/notes"
 IMAGE_SHA256="" BUILD_NOTES="$T/notes" run -e "$T/env" "$SHA"; [ "$RC" = 0 ] && ok "sha from BUILD_NOTES line passes" || bad "BUILD_NOTES rc=$RC"
-printf 'SHA verified: %s is in origin/live-updates/v1.4.2\nTar sha256: %s\n' "$SHA" "$(printf '1%.0s' $(seq 64))" >"$T/notes"
+printf 'SHA verified: %s is in origin/live-updates/v1.4.3\nTar sha256: %s\n' "$SHA" "$(printf '1%.0s' $(seq 64))" >"$T/notes"
 IMAGE_SHA256="" BUILD_NOTES="$T/notes" run -e "$T/env" "$SHA"; expect_fail "BUILD_NOTES with another sha -> FAIL" "image archive sha256"
 # 3b archive bound to the release sha
 OTHER=$(printf 'a%.0s' $(seq 40))
@@ -149,22 +149,22 @@ rm -rf "$T/b/x"; mkdir "$T/b/x"; ( cd "$T/b/x" && printf '[{"Config":"../../etc/
 IMAGE_TAR="$T/b/plane-fork-live.1.tar" IMAGE_SHA256=$(sha256sum "$T/b/plane-fork-live.1.tar" | awk '{print $1}') run -e "$T/env" "$SHA"; expect_fail "hostile Config paths -> FAIL" "bound to the release sha"
 # notes as the binding source (archive without labels)
 mktar "$T/b/plane-fork-live.1.tar" NONE; H2=$(sha256sum "$T/b/plane-fork-live.1.tar" | awk '{print $1}')
-printf 'SHA verified: %s is in origin/live-updates/v1.4.2\nTar sha256: %s\n' "$SHA" "$H2" >"$T/notes2"
+printf 'SHA verified: %s is in origin/live-updates/v1.4.3\nTar sha256: %s\n' "$SHA" "$H2" >"$T/notes2"
 BUILD_NOTES="$T/notes2" IMAGE_TAR="$T/b/plane-fork-live.1.tar" IMAGE_SHA256=$H2 run -e "$T/env" "$SHA"; [ "$RC" = 0 ] && ok "SHA verified line naming the sha binds an unlabelled archive" || bad "notes binding rc=$RC"
 # notes-only binding needs BOTH the SHA verified line and a matching Tar sha256 line
-printf 'SHA verified: %s is in origin/live-updates/v1.4.2\n' "$SHA" >"$T/notes2"
+printf 'SHA verified: %s is in origin/live-updates/v1.4.3\n' "$SHA" >"$T/notes2"
 BUILD_NOTES="$T/notes2" IMAGE_TAR="$T/b/plane-fork-live.1.tar" IMAGE_SHA256=$H2 run -e "$T/env" "$SHA"; expect_fail "notes-only binding without a Tar sha256 line -> FAIL" "bound to the release sha"
 echo "$OUT" | grep -q "no 'Tar sha256:' line" && ok "missing Tar line is named" || bad "missing Tar line message"
-printf 'SHA verified: %s is in origin/live-updates/v1.4.2\nTar sha256: %s\n' "$SHA" "$(printf '3%.0s' $(seq 64))" >"$T/notes2"
+printf 'SHA verified: %s is in origin/live-updates/v1.4.3\nTar sha256: %s\n' "$SHA" "$(printf '3%.0s' $(seq 64))" >"$T/notes2"
 BUILD_NOTES="$T/notes2" IMAGE_TAR="$T/b/plane-fork-live.1.tar" IMAGE_SHA256=$H2 run -e "$T/env" "$SHA"; expect_fail "notes-only binding with a different Tar sha256 -> FAIL" "bound to the release sha"
-printf 'SHA verified: %s is in origin/live-updates/v1.4.2\n' "$OTHER" >"$T/notes2"
+printf 'SHA verified: %s is in origin/live-updates/v1.4.3\n' "$OTHER" >"$T/notes2"
 BUILD_NOTES="$T/notes2" IMAGE_TAR="$T/b/plane-fork-live.1.tar" IMAGE_SHA256=$H2 run -e "$T/env" "$SHA"; expect_fail "notes naming a different sha -> FAIL" "bound to the release sha"
 printf 'Build ok\n' >"$T/notes2"
 BUILD_NOTES="$T/notes2" IMAGE_TAR="$T/b/plane-fork-live.1.tar" IMAGE_SHA256=$H2 run -e "$T/env" "$SHA"; expect_fail "notes without a SHA verified line -> FAIL" "bound to the release sha"
-printf 'SHA verified: %s is in origin/live-updates/v1.4.2\n' "$OTHER" >"$T/notes2"
+printf 'SHA verified: %s is in origin/live-updates/v1.4.3\n' "$OTHER" >"$T/notes2"
 mktar "$T/b/plane-fork-live.1.tar" "$SHA"; H3=$(sha256sum "$T/b/plane-fork-live.1.tar" | awk '{print $1}')
 BUILD_NOTES="$T/notes2" IMAGE_TAR="$T/b/plane-fork-live.1.tar" IMAGE_SHA256=$H3 run -e "$T/env" "$SHA"; expect_fail "good labels but notes name another sha -> FAIL" "bound to the release sha"
-printf 'SHA verified: %s is in origin/live-updates/v1.4.2\nTar sha256: %s\n' "$SHA" "$(printf '2%.0s' $(seq 64))" >"$T/notes2"
+printf 'SHA verified: %s is in origin/live-updates/v1.4.3\nTar sha256: %s\n' "$SHA" "$(printf '2%.0s' $(seq 64))" >"$T/notes2"
 BUILD_NOTES="$T/notes2" IMAGE_TAR="$T/b/plane-fork-live.1.tar" IMAGE_SHA256=$H3 run -e "$T/env" "$SHA"; expect_fail "IMAGE_SHA256 differs from the notes Tar line -> FAIL" "image archive sha256"
 ls "$T"/*.sha256 >/dev/null 2>&1 && bad "gate left files next to the archive" || ok "no files left behind"
 
@@ -274,7 +274,7 @@ sed 's/LIVE_EVENTS_ENABLED: "1"/LIVE_EVENTS_ENABLED: "0"/' "$HERE/docker-compose
 OVERRIDE_FILE="$T/ov" run -e "$T/env" "$SHA"; expect_fail "L1 flag lines missing -> FAIL" "rollback L1"
 OVERRIDE_FILE="$T/none" run -e "$T/env" "$SHA"; expect_fail "override missing -> FAIL" "rollback L1"
 STOCK_RELEASE="" run -e "$T/env" "$SHA"; expect_fail "STOCK_RELEASE unset -> FAIL" "rollback L2"
-STOCK_RELEASE="v1.4.2-live.3" run -e "$T/env" "$SHA"; expect_fail "STOCK_RELEASE is a fork tag -> FAIL" "rollback L2"
+STOCK_RELEASE="v1.4.3-live.3" run -e "$T/env" "$SHA"; expect_fail "STOCK_RELEASE is a fork tag -> FAIL" "rollback L2"
 STOCK_RELEASE='v1;rm' run -e "$T/env" "$SHA"; expect_fail "STOCK_RELEASE bad characters -> FAIL" "rollback L2"
 
 # summary lists every failing item and nothing is written into the repo

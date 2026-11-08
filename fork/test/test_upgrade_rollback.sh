@@ -71,10 +71,10 @@ check "run with an unknown option touches no engine" "$([ ! -s "$T/engine.log" ]
 
 STUB_MISSING_IMAGE=1 "$SCRIPT" run >"$T/img.out" 2>&1
 check "run exits 2 when an image is missing" "$([ $? -eq 2 ] && echo 0 || echo 1)"
-has "$T/img.out" 'missing stock image makeplane/plane-backend:v1.4.2' && check "run names the missing stock image" 0 || check "run names the missing stock image" 1
-has "$T/img.out" 'plane-fork-api:v1.4.2-live.2' && check "run defaults to fork build 2" 0 || check "run defaults to fork build 2" 1
+has "$T/img.out" 'missing stock image makeplane/plane-backend:v1.4.3' && check "run names the missing stock image" 0 || check "run names the missing stock image" 1
+has "$T/img.out" 'plane-fork-api:v1.4.3-live.2' && check "run defaults to fork build 2" 0 || check "run defaults to fork build 2" 1
 FORK_N=7 STUB_MISSING_IMAGE=1 "$SCRIPT" run >"$T/img7.out" 2>&1
-has "$T/img7.out" 'plane-fork-api:v1.4.2-live.7' && check "FORK_N selects the fork build" 0 || check "FORK_N selects the fork build" 1
+has "$T/img7.out" 'plane-fork-api:v1.4.3-live.7' && check "FORK_N selects the fork build" 0 || check "FORK_N selects the fork build" 1
 check "a missing image stops before any stack is started" "$(! grep -qE ' (up|run) ' "$T/engine.log" && echo 0 || echo 1)"
 
 "$SCRIPT" compare >"$T/cmp0.out" 2>&1

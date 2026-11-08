@@ -26,7 +26,7 @@ set -uo pipefail
 
 SRC=${PLANE_SRC:-/root/plane-work}
 OUT_DIR=${OUT_DIR:-/root/plane-build/logs}
-BACKEND_IMAGE=${BACKEND_IMAGE:-docker.io/makeplane/plane-backend:v1.4.2}
+BACKEND_IMAGE=${BACKEND_IMAGE:-docker.io/makeplane/plane-backend:v1.4.3}
 POD=plane-apitest
 PG_IMAGE=docker.io/library/postgres:15.7-alpine
 REDIS_IMAGE=docker.io/valkey/valkey:7.2.11-alpine

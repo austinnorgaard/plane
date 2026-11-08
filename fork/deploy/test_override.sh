@@ -69,9 +69,9 @@ for name in FIVE:
         err(f"service {name!r} missing")
         continue
 
-IMG = {"web": "localhost/plane-fork-web:v1.4.2-live.", "live": "localhost/plane-fork-live:v1.4.2-live.",
-       "api": "localhost/plane-fork-api:v1.4.2-live.", "worker": "localhost/plane-fork-api:v1.4.2-live.",
-       "beat-worker": "localhost/plane-fork-api:v1.4.2-live."}
+IMG = {"web": "localhost/plane-fork-web:v1.4.3-live.", "live": "localhost/plane-fork-live:v1.4.3-live.",
+       "api": "localhost/plane-fork-api:v1.4.3-live.", "worker": "localhost/plane-fork-api:v1.4.3-live.",
+       "beat-worker": "localhost/plane-fork-api:v1.4.3-live."}
 for name, prefix in IMG.items():
     image = str((svcs.get(name) or {}).get("image", ""))
     if not image.startswith(prefix):

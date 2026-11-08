@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: AGPL-3.0-only
 #
-# build.sh - build the fork images v1.4.2-live.N on a Linux host and save them
+# build.sh - build the fork images v1.4.3-live.N on a Linux host and save them
 # to a docker-archive tar. Linux counterpart of build.ps1, same contract.
 #
 # Usage:
@@ -9,8 +9,8 @@
 #                [--ca-bundle FILE] [--build-proxy|--no-build-proxy] [--dry-run]
 #
 #   --sha      full commit sha to build; must be contained in
-#              origin/live-updates/v1.4.2 (checked after a fetch). Required.
-#   --n        build number; images are tagged v1.4.2-live.<N>. Required.
+#              origin/live-updates/v1.4.3 (checked after a fetch). Required.
+#   --n        build number; images are tagged v1.4.3-live.<N>. Required.
 #   --out-dir  where plane-fork-live.<N>.tar and .sha256 are written.
 #              Default /root/out.
 #   --engine   docker or podman. Default: podman if installed, else docker.
@@ -186,14 +186,14 @@ else
   fi
 fi
 
-image_tag="v1.4.2-live.$n"
+image_tag="v1.4.3-live.$n"
 tar_name="plane-fork-live.$n.tar"
 sha256_name="plane-fork-live.$n.sha256"
 build_root="${PLANE_BUILD_ROOT:-/root/plane-build}"
 build_root="${build_root%/}"
 build_dir="$build_root/$sha"
 build_label="plane-fork-build=$sha"
-branch="live-updates/v1.4.2"
+branch="live-updates/v1.4.3"
 
 # The checkout that holds this script, not the caller's working directory.
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -381,7 +381,7 @@ block+="- Prune ($build_label, dangling only): $pruned_count image(s) removed
 "
 
 if [ ! -f "$readme" ]; then
-  printf '# Plane Fork Build Results\n\nBuild results for plane-fork images v1.4.2-live releases.\n\n## Builds\n\n' > "$readme"
+  printf '# Plane Fork Build Results\n\nBuild results for plane-fork images v1.4.3-live releases.\n\n## Builds\n\n' > "$readme"
 elif [ -n "$(tail -c1 "$readme")" ]; then
   printf '\n' >> "$readme"
 fi

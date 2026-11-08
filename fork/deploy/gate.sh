@@ -40,7 +40,7 @@
 # Exit status: 0 GO, 1 NO-GO, 2 usage.
 set -u
 
-BRANCH=live-updates/v1.4.2
+BRANCH=live-updates/v1.4.3
 PLACEHOLDER=change-this-key-on-deployment
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -133,7 +133,7 @@ run_limited() {
 
 echo "== gate.sh: go/no-go before deploy =="
 
-# 1. release sha is on origin/live-updates/v1.4.2
+# 1. release sha is on origin/live-updates/v1.4.3
 name="release sha is on $BRANCH"
 if ! git -C "$repo" fetch -q origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" >/dev/null 2>&1; then
   fail "$name" "cannot fetch origin $BRANCH"

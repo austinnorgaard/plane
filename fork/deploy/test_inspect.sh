@@ -31,7 +31,7 @@ svc=$(printf '%s\n' "$*" | sed -n 's/.*service=\([A-Za-z-]*\).*/\1/p')
 case "$1" in
   ps)
     case "$*" in
-      *"{{.Image}}"*) echo "localhost/plane-fork-$svc:v1.4.2-live.1" ;;
+      *"{{.Image}}"*) echo "localhost/plane-fork-$svc:v1.4.3-live.1" ;;
       *"{{.Ports}}"*) [ -n "${STUB_REDIS_PORTS:-}" ] && echo "$STUB_REDIS_PORTS" ;;
       *) case " ${STUB_DOWN:-} " in *" $svc "*) ;; *) echo "c_$svc" ;; esac ;;
     esac ;;
@@ -46,15 +46,15 @@ SENTINEL=SENTINEL-not-a-real-secret-4711
 cat >"$T/app/docker-compose.yaml" <<'EOF'
 services:
   web:
-    image: localhost/plane-fork-web:v1.4.2-live.1
+    image: localhost/plane-fork-web:v1.4.3-live.1
   live:
-    image: localhost/plane-fork-live:v1.4.2-live.1
+    image: localhost/plane-fork-live:v1.4.3-live.1
   api:
-    image: localhost/plane-fork-api:v1.4.2-live.1
+    image: localhost/plane-fork-api:v1.4.3-live.1
   worker:
-    image: localhost/plane-fork-api:v1.4.2-live.1
+    image: localhost/plane-fork-api:v1.4.3-live.1
   beat-worker:
-    image: localhost/plane-fork-api:v1.4.2-live.1
+    image: localhost/plane-fork-api:v1.4.3-live.1
   plane-redis:
     image: valkey/valkey:7.2.11-alpine
 EOF

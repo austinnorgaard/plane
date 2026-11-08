@@ -8,7 +8,7 @@
 #       --env-file plane.env up -d
 #
 # Required variables (from plane.env or the shell):
-#   FORK_N                       fork build number; images are ...:v1.4.2-live.${FORK_N}
+#   FORK_N                       fork build number; images are ...:v1.4.3-live.${FORK_N}
 #   WEB_URL                      the public origin users open (already in plane.env)
 #   LIVE_EVENTS_ALLOWED_ORIGINS  comma-separated browser origins allowed on the events socket
 #   LIVE_SERVER_SECRET_KEY       must not be the shipped placeholder (already in plane.env)
@@ -22,10 +22,10 @@
 
 services:
   web:
-    image: localhost/plane-fork-web:v1.4.2-live.${FORK_N:?set FORK_N}
+    image: localhost/plane-fork-web:v1.4.3-live.${FORK_N:?set FORK_N}
 
   live:
-    image: localhost/plane-fork-live:v1.4.2-live.${FORK_N:?set FORK_N}
+    image: localhost/plane-fork-live:v1.4.3-live.${FORK_N:?set FORK_N}
     environment:
       LIVE_EVENTS_ENABLED: "1"
       LIVE_EVENTS_ALLOWED_ORIGINS: ${LIVE_EVENTS_ALLOWED_ORIGINS:?set LIVE_EVENTS_ALLOWED_ORIGINS}
@@ -35,7 +35,7 @@ services:
       # middleware. The events socket uses LIVE_EVENTS_ALLOWED_ORIGINS instead.
 
   api:
-    image: localhost/plane-fork-api:v1.4.2-live.${FORK_N:?set FORK_N}
+    image: localhost/plane-fork-api:v1.4.3-live.${FORK_N:?set FORK_N}
     environment:
       LIVE_EVENTS_ENABLED: "1"
       PAGES_API_ENABLED: "1"
@@ -49,11 +49,11 @@ services:
       LIVE_BASE_URL: http://live:3000
 
   worker:
-    image: localhost/plane-fork-api:v1.4.2-live.${FORK_N:?set FORK_N}
+    image: localhost/plane-fork-api:v1.4.3-live.${FORK_N:?set FORK_N}
     environment:
       LIVE_EVENTS_ENABLED: "1"
       # Intentionally no LIVE_BASE_URL (see api above).
 
   beat-worker:
-    image: localhost/plane-fork-api:v1.4.2-live.${FORK_N:?set FORK_N}
+    image: localhost/plane-fork-api:v1.4.3-live.${FORK_N:?set FORK_N}
     # Intentionally no LIVE_BASE_URL and no fork flags: beat only schedules.
