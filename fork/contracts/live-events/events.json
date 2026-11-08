@@ -1,0 +1,647 @@
+{
+  "description": "Shared contract for the live event payload published by apps/api/plane/utils/live_events.py and validated by apps/live/src/events/hub.ts. Both test suites read this file. Note: the legacy field name `ids` (accepted by the hub for older publishers during a rolling deploy) is not a contract shape; the publisher must emit `issue_ids`.",
+  "channel_prefix": "plane:live-events:",
+  "kinds": [
+    "issue",
+    "comment",
+    "cycle",
+    "module",
+    "link",
+    "attachment",
+    "issue_relation",
+    "issue_reaction",
+    "comment_reaction",
+    "intake"
+  ],
+  "verbs": ["created", "updated", "deleted", "removed", "archived", "unarchived", "restored"],
+  "producer_fields": {
+    "v": "int",
+    "project_id": "str",
+    "kind": "str",
+    "verb": "str",
+    "issue_ids": "list|str",
+    "actor_id": "str|null",
+    "ts": "float",
+    "settle": "bool"
+  },
+  "valid": [
+    {
+      "name": "issue_updated",
+      "producer": true,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "comment_updated",
+      "producer": true,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "comment",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "cycle_deleted",
+      "producer": true,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "cycle",
+        "verb": "deleted",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": true
+      }
+    },
+    {
+      "name": "module_deleted",
+      "producer": true,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "module",
+        "verb": "deleted",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": true
+      }
+    },
+    {
+      "name": "link_deleted",
+      "producer": true,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "link",
+        "verb": "deleted",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": true
+      }
+    },
+    {
+      "name": "attachment_updated",
+      "producer": true,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "attachment",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "issue_relation_updated",
+      "producer": true,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue_relation",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "issue_reaction_updated",
+      "producer": true,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue_reaction",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "comment_reaction_updated",
+      "producer": true,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "comment_reaction",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "intake_updated",
+      "producer": true,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "intake",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "issue_created_two_ids",
+      "producer": true,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "created",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "issue_archived",
+      "producer": true,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "archived",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "issue_unarchived",
+      "producer": true,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "unarchived",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "issue_restored",
+      "producer": true,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "restored",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "issue_removed",
+      "producer": true,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "removed",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "issue_deleted_settle",
+      "producer": false,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "deleted",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": true
+      },
+      "note": "settle is only set by the publisher for cycle, module and link deletes"
+    },
+    {
+      "name": "wildcard_ids",
+      "producer": true,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "updated",
+        "issue_ids": "*",
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "null_actor",
+      "producer": true,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": null,
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "integer_ts",
+      "producer": false,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000,
+        "settle": false
+      },
+      "note": "the publisher always sends a float"
+    },
+    {
+      "name": "string_ts",
+      "producer": false,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": "1700000000.5",
+        "settle": false
+      },
+      "note": "accepted by the hub, never produced"
+    },
+    {
+      "name": "no_ts_no_settle_no_actor",
+      "producer": false,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]
+      },
+      "note": "optional fields omitted"
+    },
+    {
+      "name": "ids_alias",
+      "producer": false,
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "updated",
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false,
+        "ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]
+      },
+      "note": "legacy name for issue_ids, accepted by the hub"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "not_json",
+      "raw": "not json"
+    },
+    {
+      "name": "array_body",
+      "raw": "[{\"v\": 1, \"project_id\": \"11111111-1111-4111-8111-111111111111\", \"kind\": \"issue\", \"verb\": \"updated\", \"issue_ids\": [\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\"], \"actor_id\": \"cccccccc-cccc-4ccc-8ccc-cccccccccccc\", \"ts\": 1700000000.5, \"settle\": false}]"
+    },
+    {
+      "name": "null_body",
+      "raw": "null"
+    },
+    {
+      "name": "version_2",
+      "payload": {
+        "v": 2,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "version_string",
+      "payload": {
+        "v": "1",
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "missing_version",
+      "payload": {
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "missing_project_id",
+      "payload": {
+        "v": 1,
+        "kind": "issue",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "project_id_not_uuid",
+      "payload": {
+        "v": 1,
+        "project_id": "not-a-uuid",
+        "kind": "issue",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "missing_issue_ids",
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "updated",
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "renamed_issue_ids",
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "updated",
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false,
+        "issueIds": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]
+      }
+    },
+    {
+      "name": "renamed_project_id",
+      "payload": {
+        "v": 1,
+        "kind": "issue",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false,
+        "projectId": "11111111-1111-4111-8111-111111111111"
+      }
+    },
+    {
+      "name": "issue_ids_not_wildcard",
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "updated",
+        "issue_ids": "all",
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "issue_ids_not_uuid",
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "updated",
+        "issue_ids": ["nope"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "issue_ids_mixed",
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "nope"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "issue_ids_number",
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "updated",
+        "issue_ids": 5,
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "issue_ids_null",
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "updated",
+        "issue_ids": null,
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "missing_kind",
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "unknown_kind",
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "bogus",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "missing_verb",
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "unknown_verb",
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "bogus",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "actor_id_not_uuid",
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "someone",
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "actor_id_number",
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": 7,
+        "ts": 1700000000.5,
+        "settle": false
+      }
+    },
+    {
+      "name": "ts_boolean",
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": true,
+        "settle": false
+      }
+    },
+    {
+      "name": "ts_null",
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": null,
+        "settle": false
+      }
+    },
+    {
+      "name": "settle_string",
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": "yes"
+      }
+    },
+    {
+      "name": "settle_null",
+      "payload": {
+        "v": 1,
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "issue",
+        "verb": "updated",
+        "issue_ids": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "ts": 1700000000.5,
+        "settle": null
+      }
+    }
+  ]
+}
