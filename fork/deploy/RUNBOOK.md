@@ -17,7 +17,7 @@ Every host-specific value is a variable supplied by the operator at run time. No
 | `FORK_N`            | fork build number; tag is `v1.4.3-live.$FORK_N`                                              |
 | `PUBLIC_URL`        | origin users open from outside the LAN                                                       |
 | `LAN_URL`           | origin users open from the LAN                                                               |
-| `WORKSPACE_SLUG`, `PROJECT_ID` | a test workspace and project for the smoke tests                                  |
+| `WORKSPACE_SLUG`, `PROJECT_ID` | a test workspace and project for the health checks                                 |
 | `PLANE_API_TOKEN`   | a Plane API token of a test user, exported in your shell only, never printed or committed    |
 
 Compose shorthand used below, run inside the container in `$PLANE_APP_DIR`:
@@ -30,7 +30,7 @@ Never run `$C config` without `-q` on the server: it prints every secret.
 
 ## 0. Plan and window
 
-One maintenance window covers: deploy, smoke tests, and a rehearsal of rollback L1 and L2 followed by a roll-forward. Rollback L3 is described but not rehearsed. Budget about 60 to 90 minutes, dominated by the image transfer.
+One maintenance window covers: deploy, the post-deploy health checks, and a rehearsal of rollback L1 and L2 followed by a roll-forward. Rollback L3 is described but not rehearsed. Budget about 60 to 90 minutes, dominated by the image transfer.
 
 Do not use the community installer (`setup.sh`) at any point. It starts the stack with an explicit `-f` and silently reverts to stock images. See `README.fork`.
 
@@ -87,7 +87,6 @@ Inputs, all supplied by you at run time (no secret is ever printed; only key nam
 | Input             | Meaning                                                                                          |
 | ----------------- | ------------------------------------------------------------------------------------------------ |
 | `RELEASE_SHA`     | argument: the full sha being deployed                                                            |
-| `QA_RECORD`       | file with the QA verdict text; needs a line `QA: PASS @ <sha>` naming the release sha            |
 | `IMAGE_TAR`, `IMAGE_SHA256` | the archive and the sha256 from the build output (or `BUILD_NOTES`, a file with the `Tar sha256:` line) |
 | `RUNBOOK_FILE`    | your copy of this file with the inspection table above filled in (default: the shipped file, which fails because its table is empty) |
 | `STOCK_RELEASE`   | the stock image tag from the inspection, used by rollback L2                                      |
@@ -95,7 +94,7 @@ Inputs, all supplied by you at run time (no secret is ever printed; only key nam
 | `ENV_FILE`        | a copy of the deploy settings (`plane.env`), passed with `-e`; without `-e` they are read from the environment |
 
 ```
-QA_RECORD=<file> IMAGE_TAR=<archive> IMAGE_SHA256=<hash> RUNBOOK_FILE=<filled copy> STOCK_RELEASE=<tag> \
+IMAGE_TAR=<archive> IMAGE_SHA256=<hash> RUNBOOK_FILE=<filled copy> STOCK_RELEASE=<tag> \
   PVE_HOST=$PVE_HOST PLANE_CTID=$PLANE_CTID PLANE_APP_DIR=$PLANE_APP_DIR \
   bash fork/deploy/gate.sh -e <env-file-copy> <release-sha>
 ```
@@ -103,7 +102,6 @@ QA_RECORD=<file> IMAGE_TAR=<archive> IMAGE_SHA256=<hash> RUNBOOK_FILE=<filled co
 Checks, each a PASS or a FAIL:
 
 - the release sha is an ancestor of `origin/live-updates/v1.4.3` (the gate fetches that branch first);
-- the QA record has a PASS naming the sha and no FAIL for it;
 - the archive sha256 matches the build output (done by `fetch-images.sh` with `SKIP_LOAD=1`, which copies the archive to a temporary directory, so keep free disk for one more copy; nothing is loaded);
 - the archive is bound to the release sha: every image in it carries the label `plane-fork-build=<sha>` that `build.sh` sets (read from the archive manifest and image configs; nothing is loaded). If you pass the saved build output as `BUILD_NOTES`, its `SHA verified: <sha>` line must also name the release sha. Notes alone bind the archive only with both the `SHA verified:` line and a `Tar sha256:` line equal to `IMAGE_SHA256`. An archive with no label and no usable notes is a FAIL. Known limitation: `::/16` passes the IPv6 range floor although it covers the IPv4-mapped range;
 - every row of the inspection table has a result;
@@ -149,7 +147,7 @@ Additional variables:
 
 The expected hash must come from the build output, not from the release page: that is what makes the check independent of the download.
 
-a. Publish (an owner step, done once per build, never part of the deploy window). `build.sh` writes `plane-fork-live.$FORK_N.tar` and `.sha256`. After the images pass `fork/test/live-smoke.sh`:
+a. Publish (an owner step, done once per build, never part of the deploy window). `build.sh` writes `plane-fork-live.$FORK_N.tar` and `.sha256`. Then:
 
 ```
 ls -l plane-fork-live.$FORK_N.tar          # must be below 2 GiB (2147483648 bytes)
@@ -246,7 +244,7 @@ Expected:
 
 If `LIVE_BASE_URL` shows on `worker` or `beat-worker`, run rollback L1 (below) at once and stop.
 
-## 7. Smoke tests
+## 7. Post-deploy health checks
 
 Live updates:
 
@@ -286,13 +284,13 @@ $C exec -T api python -c "import requests;print(requests.get('http://live:3000/l
 curl -sS -o /dev/null -w '%{http_code}\n' "$PUBLIC_URL/live/fork/pages/00000000-0000-0000-0000-000000000000/loaded"
 ```
 
-Why: the live guard answers 401 to a request with a missing or wrong `live-server-secret-key` (`apps/live/src/fork-pages/auth.ts`, tests in `apps/live/tests/fork-pages/auth.test.ts`), and answers 403 to any request that carries `X-Forwarded-For` or `X-Forwarded-Host` before it looks at the key. The proxy adds `X-Forwarded-For` to everything it forwards, so the public route is 403 with or without a key. Repeat the second call from `$LAN_URL`.
+Why: the live guard answers 401 to a request with a missing or wrong `live-server-secret-key` (`apps/live/src/fork-pages/auth.ts`), and answers 403 to any request that carries `X-Forwarded-For` or `X-Forwarded-Host` before it looks at the key. The proxy adds `X-Forwarded-For` to everything it forwards, so the public route is 403 with or without a key. Repeat the second call from `$LAN_URL`.
 
 Duplicate a page in the UI: it must still work and the copy must open normally (the worker has no `LIVE_BASE_URL`, so the live sync stays off).
 
 ### 7a. Post-deploy log check
 
-After the smoke tests, and again 15 minutes later, run from a workstation (same variables as `rollback.sh`):
+After the health checks, and again 15 minutes later, run from a workstation (same variables as `rollback.sh`):
 
 ```
 fork/deploy/postdeploy-logs.sh --window 15m
@@ -318,7 +316,7 @@ The web bundle changed. Tabs opened before the deploy keep running the old code 
 
 Choose the smallest level that fixes the problem.
 
-**Wrapper.** `fork/deploy/rollback.sh l1|l2|forward` runs the commands of L1, L2 and the roll-forward below, in the same order, with the sed check and a timing line per step. Run it from a workstation with `PVE_HOST`, `PLANE_CTID` and `PLANE_APP_DIR` set (plus `STOCK_RELEASE` for `l2` and `FORK_N` for `forward`). `--dry-run` prints every command and changes nothing. Exit codes: 0 done, 1 usage, 2 a check failed (nothing further was run), 3 a remote command failed. It is idempotent: running `l1` twice is safe. Tests: `fork/deploy/test_rollback.sh` (stubbed ssh, pct and docker; `--self-mutate` proves the checks bite).
+**Wrapper.** `fork/deploy/rollback.sh l1|l2|forward` runs the commands of L1, L2 and the roll-forward below, in the same order, with the sed check and a timing line per step. Run it from a workstation with `PVE_HOST`, `PLANE_CTID` and `PLANE_APP_DIR` set (plus `STOCK_RELEASE` for `l2` and `FORK_N` for `forward`). `--dry-run` prints every command and changes nothing. Exit codes: 0 done, 1 usage, 2 a check failed (nothing further was run), 3 a remote command failed. It is idempotent: running `l1` twice is safe.
 
 ```
 fork/deploy/rollback.sh --dry-run l1

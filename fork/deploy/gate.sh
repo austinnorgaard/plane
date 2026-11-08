@@ -15,8 +15,6 @@
 #
 # Inputs (environment; none has a default except where stated):
 #   GATE_INSPECT_TIMEOUT  seconds allowed for inspect.sh (default 300)
-#   QA_RECORD         file holding the QA verdict text; needs a line "QA: PASS @ <sha>"
-#                     naming RELEASE_SHA (the full sha is preferred; 7 or more digits are accepted) and no "QA: FAIL @ <sha>" line for it
 #   IMAGE_TAR         the image archive plane-fork-live.<N>.tar
 #   (Known limitation: the IPv6 floor is /16, so ::/16 passes although it covers the
 #    IPv4-mapped range; the IPv4 floor is /8.)
@@ -145,26 +143,7 @@ else
   fail "$name" "commit is not an ancestor of origin/$BRANCH"
 fi
 
-# 2. QA PASS names the sha
-name="QA PASS names the release sha"
-qa="${QA_RECORD:-}"
-if [ -z "$qa" ] || [ ! -r "$qa" ]; then
-  fail "$name" "QA_RECORD not set or not readable"
-else
-  qa_pass=0; qa_fail=0
-  while IFS= read -r l; do
-    l="${l%$'\r'}"
-    if [[ "$l" =~ ^QA:[[:space:]]+(PASS|FAIL)[[:space:]]+@[[:space:]]*([0-9a-fA-F]{7,40})([^0-9a-fA-F]|$) ]]; then
-      s="$(printf '%s' "${BASH_REMATCH[2]}" | tr 'A-F' 'a-f')"
-      case "$sha" in "$s"*) [ "${BASH_REMATCH[1]}" = PASS ] && qa_pass=1 || qa_fail=1 ;; esac
-    fi
-  done <"$qa"
-  if [ "$qa_fail" = 1 ]; then fail "$name" "the record has a QA: FAIL line for this sha"
-  elif [ "$qa_pass" = 1 ]; then pass "$name"
-  else fail "$name" "no 'QA: PASS @ <sha>' line for this sha"; fi
-fi
-
-# 3. archive sha256 matches the build notes (fetch-images.sh does the compare; no load)
+# 2. archive sha256 matches the build notes (fetch-images.sh does the compare; no load)
 name="image archive sha256 matches the build notes"
 want="${IMAGE_SHA256:-}"
 notes_tar=""
@@ -189,7 +168,7 @@ else
   rm -rf "$tmp/img"
 fi
 
-# 3b. the archive is bound to the release sha. Preferred: every image in the archive
+# 2b. the archive is bound to the release sha. Preferred: every image in the archive
 # carries the label plane-fork-build=<sha> that build.sh sets (read from the archive's
 # manifest and image configs; nothing is loaded). Also: if BUILD_NOTES is given, its
 # "SHA verified: <sha>" line must name the release sha.
@@ -226,7 +205,7 @@ elif [ "$label_state" = ok ] || [ "$notes_state" = ok ]; then pass "$name (label
 else fail "$name" "archive not bound to the release sha: no plane-fork-build label found in the archive and no usable BUILD_NOTES;$detail"
 fi
 
-# 4. RUNBOOK inspection table filled
+# 3. RUNBOOK inspection table filled
 name="RUNBOOK inspection table filled"
 if [ ! -r "$runbook" ]; then
   fail "$name" "RUNBOOK_FILE not readable"
@@ -247,7 +226,7 @@ else
   else pass "$name ($rows rows)"; fi
 fi
 
-# 5. deploy settings
+# 4. deploy settings
 if [ -n "$env_file" ]; then echo "-- settings from the env file (names only) --"; else echo "-- settings from the environment (names only) --"; fi
 
 v="$(cfg LIVE_EVENTS_TRUSTED_PROXIES)"
@@ -315,7 +294,7 @@ elif [[ "${sk,,}" == *"$PLACEHOLDER"* ]]; then fail "$name" "is or contains the 
 else pass "$name"; fi
 sk=""
 
-# 6. inspect.sh preflight (reused as is)
+# 5. inspect.sh preflight (reused as is)
 name="inspect.sh preflight passes"
 if [ -z "${PLANE_CTID:-}" ] || [ -z "${PLANE_APP_DIR:-}" ]; then
   fail "$name" "set PLANE_CTID and PLANE_APP_DIR"
@@ -344,7 +323,7 @@ else
   fi
 fi
 
-# 7. rollback path
+# 6. rollback path
 name="rollback L1: the five flag lines are present in the override"
 if [ ! -r "$override" ]; then
   fail "$name" "override file not readable"

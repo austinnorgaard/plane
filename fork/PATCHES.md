@@ -8,6 +8,7 @@ One line per touched upstream file: ticket id and the reason.
 - `apps/api/plane/api/urls/__init__.py`: PLN-8, include the project pages routes.
 - `apps/api/plane/api/views/__init__.py`: PLN-8, export the project pages endpoints.
 - `apps/api/plane/api/serializers/__init__.py`: PLN-8, export the project pages serializers.
+- `apps/live/vitest.config.ts`, `docker-compose-test.yml`: no longer patched; the fork's tests were removed on 2026-11-08 and these test hooks went with them.
 - `apps/api/plane/utils/order_queryset.py`: no longer patched. PLN-8 added `PAGE_ORDER_BY_ALLOWLIST`; upstream v1.4.3 ships the same allowlist (same four fields), so the fork pages API imports upstream's.
 - `apps/api/plane/bgtasks/page_version_task.py`: PLN-8, read `page.description_json` instead of the non-existent `page.description` (unconditional fix, two lines).
 - `apps/web/app/(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/layout.tsx` (PLN-5): mounts the `useLiveWorkItems` hook for the project.
@@ -18,7 +19,7 @@ One line per touched upstream file: ticket id and the reason.
 - `apps/api/plane/app/views/issue/sub_issue.py`: PLN-28, capture each sub-issue's old parent before the assign update and pass it as `current_instance.parent` (upstream passed the sub-issue id), so the live event covers the old parent; the found-sub-issues iteration PLN-29 added is now upstream's own `scoped_sub_issue_ids` (v1.4.3), and the fork keeps upstream's loop.
 - `apps/api/plane/app/views/issue/base.py` (destroy): PLN-29, capture the issue's `parent_id` before the delete and pass it as `current_instance.parent` (`{}` when there is no parent), so the live event covers the parent's sub-issue count.
 
-New files (not upstream): `apps/live/src/controllers/events.controller.ts`, `apps/live/src/events/{config,origin,auth,hub}.ts`, `apps/live/tests/events/*`; `apps/api/plane/api/{urls,views,serializers}/page.py`, `apps/api/plane/utils/live_pages.py`, `apps/api/plane/utils/live_events.py`, `apps/api/plane/tests/unit/live_events/*`, `apps/api/plane/tests/contract/api/test_pages.py`, `fork/PAGES.md`, `apps/live/src/fork-pages/*`, `apps/live/tests/fork-pages/*`, `fork/tools/*`.
+New files (not upstream): `apps/live/src/controllers/events.controller.ts`, `apps/live/src/events/{config,origin,auth,hub}.ts`; `apps/api/plane/api/{urls,views,serializers}/page.py`, `apps/api/plane/utils/live_pages.py`, `apps/api/plane/utils/live_events.py`, `fork/PAGES.md`, `apps/live/src/fork-pages/*`, `fork/tools/*`.
 
 ## Drift points (new files that mirror private upstream code)
 

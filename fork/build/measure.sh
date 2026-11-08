@@ -10,7 +10,7 @@
 # and the lowest MemAvailable seen. WSL sees the whole VM, so this includes every
 # container, not just CMD.
 #
-# Run inside the WSL distro:  wsl.exe -d <distro> -u root -- /root/plane-work/fork/test/measure.sh web-build podman build ...
+# Run inside the WSL distro:  wsl.exe -d <distro> -u root -- /root/plane-work/fork/build/measure.sh web-build podman build ...
 set -u
 
 label=${1:?usage: measure.sh LABEL CMD [ARGS...]}

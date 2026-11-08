@@ -77,7 +77,7 @@ $buildLabel = "plane-fork-build=$Sha"
 $repoRoot = (Resolve-Path (Join-Path (Join-Path $PSScriptRoot '..') '..')).Path
 $distroShown = if ($Distro) { $Distro } else { '<distro>' }
 
-# MEASURE lines printed by fork/test/measure.sh, collected while the builds run.
+# MEASURE lines printed by fork/build/measure.sh, collected while the builds run.
 $script:MeasureLines = New-Object System.Collections.Generic.List[string]
 
 # Run a shell command as root in the distro. Output goes to the console, the
@@ -190,7 +190,7 @@ if ($DryRun) {
 Write-Host "Building images with tag $imageTag..."
 
 $cd = "cd $buildDir"
-$m = 'fork/test/measure.sh'
+$m = 'fork/build/measure.sh'
 $builds = @(
   @{ Label = 'web'; Cmd = "$cd && $m web podman build --cpu-period=100000 --cpu-quota=800000 --label $buildLabel -f apps/web/Dockerfile.web -t localhost/plane-fork-web:$imageTag ." },
   @{ Label = 'live'; Cmd = "$cd && $m live podman build --cpu-period=100000 --cpu-quota=800000 --label $buildLabel -f apps/live/Dockerfile.live -t localhost/plane-fork-live:$imageTag ." },

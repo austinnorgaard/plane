@@ -301,7 +301,7 @@ for b in "${builds[@]}"; do
       flags+=(--network host --build-arg HTTPS_PROXY --build-arg https_proxy --build-arg NO_PROXY --build-arg no_proxy)
     fi
   fi
-  cmd=(fork/test/measure.sh "$b" "$engine" build ${flags[@]+"${flags[@]}"} --label "$build_label"
+  cmd=(fork/build/measure.sh "$b" "$engine" build ${flags[@]+"${flags[@]}"} --label "$build_label"
     -f "${dockerfile[$b]}" -t "localhost/plane-fork-$b:$image_tag" .)
   if [ "$dry_run" -eq 1 ]; then
     printf '+ (cd %s && MEASURE_DIR=%s' "$build_dir" "$measure_dir"

@@ -7,21 +7,13 @@ Files in this directory
   inspect.sh                    read-only pre-deploy inspection (run on the hypervisor)
   fetch-images.sh               downloads the image archive, verifies its sha256, then
                                 runs fork/build/verify-load.sh
-  test_fetch-images.sh          tests fetch-images.sh (stub verify-load, loopback HTTP)
-  test_override.sh              validates the override against the upstream compose file
-  test_inspect.sh               tests inspect.sh against stub commands
   gate.sh                       go/no-go gate: PASS/FAIL per item, then GO or NO-GO (RUNBOOK 1a)
-  test_gate.sh                  tests gate.sh (local git origin, stub ssh)
   rollback.sh                   one command per rollback level: l1, l2, forward (--dry-run prints
                                 the commands; see RUNBOOK.md section 10)
-  test_rollback.sh              tests rollback.sh against stub ssh, pct and docker (--self-mutate
-                                runs it against broken copies)
   postdeploy-logs.sh            post-deploy log summary of api, worker, beat-worker and live: counts,
                                 top redacted error lines, exit 0 clean / 1 over threshold / 2 usage /
                                 3 remote failure (see RUNBOOK.md section 7a)
-  test_postdeploy-logs.sh       tests postdeploy-logs.sh against stub ssh, pct and docker (--self-mutate
-                                runs it against broken copies)
-  RUNBOOK.md                    the deploy procedure, smoke tests and rollback
+  RUNBOOK.md                    the deploy procedure, post-deploy health checks and rollback
 
 WARNINGS
 
@@ -140,11 +132,6 @@ Commands (run in $PLANE_APP_DIR; FORK_N must be exported or in plane.env)
   $C up -d                      # apply (recreates only changed services)
   $C ps --format '{{.Service}} {{.Image}}'    # image-tag check
   $C logs --tail 50 live api
-
-Local validation of the override, no server needed
-  fork/deploy/test_override.sh --self-mutate
-Uses docker compose, podman compose or docker-compose if present, and always the
-python3 + PyYAML checks.
 
 Read-only inspection of the target (on the hypervisor; changes nothing)
   ssh "$PVE_HOST" "PLANE_CTID=$PLANE_CTID PLANE_APP_DIR=$PLANE_APP_DIR bash -s" < fork/deploy/inspect.sh

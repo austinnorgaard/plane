@@ -13,7 +13,7 @@
 #   LIVE_EVENTS_ALLOWED_ORIGINS  comma-separated browser origins allowed on the events socket
 #   LIVE_SERVER_SECRET_KEY       must not be the shipped placeholder (already in plane.env)
 #
-# Rules enforced by fork/deploy/test_override.sh:
+# Rules (checked by hand; there is no automated check):
 #   - LIVE_EVENTS_ENABLED=1 on api, worker, live.
 #   - PAGES_API_ENABLED=1 on api and live only.
 #   - LIVE_BASE_URL only on api. Never on worker or beat-worker.

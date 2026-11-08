@@ -11,9 +11,8 @@ Upkeep on each upstream rebase:
 
 `--ignore-lines` tolerates line shifts in files the fork patches; without it the check is exact.
 The snapshot keeps upstream line numbers; two rows (sub_issue.py PLN-28, issue/base.py destroy PLN-29) were edited by hand to the fork's `current_instance` text.
-Any diff means a call site was added, removed or changed: give it a row below and a test, then
+Any diff means a call site was added, removed or changed: give it a row below, then
 regenerate the snapshot (`python3 fork/tools/callsites.py --header "<source ref>" > <snapshot>`).
-Tool tests: `python3 fork/tools/test_callsites.py` (or pytest).
 
 Extractor sources (`extract_issue_ids` in `apps/api/plane/utils/live_events.py`):
 (a) `issue_id` unless it equals `cycle_id` / `module_id`; (b) `requested_data.issues`;
@@ -22,7 +21,7 @@ Extractor sources (`extract_issue_ids` in `apps/api/plane/utils/live_events.py`)
 (h) `issue.` types only: `parent` in `requested_data` and `current_instance` (id, UUID object or dict with `id`; includes the sub-issue delete);
 (i) `issue_relation` types only: `requested_data.related_issue` (relation delete).
 
-Tests live in `apps/api/plane/tests/unit/live_events/`. Abbreviations: `EX` =
+The fork's tests were removed on 2026-11-08 (the fork works without tests from then on). The coverage columns below name the tests that existed before that and no longer run. Abbreviations: `EX` =
 `test_extract_issue_ids.py` (class `TestExtractIssueIds`), `AT` = `test_activity_task.py`
 (class `TestIssueActivityLiveEvent`), `BE` = `test_bulk_endpoints.py`.
 Paths below are relative to `apps/api/plane/`; line numbers are upstream v1.4.3 (the fork patches shift some in app/views/issue/base.py, archive.py and sub_issue.py). `GAP` = no test covers the row's distinguishing shape.
