@@ -25,7 +25,7 @@ if [ "${1:-}" = --self-mutate ]; then
   mkdir -p "$M"
   survived=0
   mutate() { # mutate <name> <sed-expr>
-    sed -e "$2" "$HERE/postdeploy-logs.sh" >"$M/postdeploy-logs.sh"
+    if ! sed -e "$2" "$HERE/postdeploy-logs.sh" >"$M/postdeploy-logs.sh"; then echo "MUTANT $1: sed failed (bad expression)"; survived=1; return; fi
     chmod +x "$M/postdeploy-logs.sh"
     if cmp -s "$HERE/postdeploy-logs.sh" "$M/postdeploy-logs.sh"; then echo "MUTANT $1: sed did not change the file"; survived=1; return; fi
     if POSTDEPLOY=$M/postdeploy-logs.sh "$HERE/test_postdeploy-logs.sh" >/dev/null 2>&1; then
@@ -76,7 +76,11 @@ if [ "${1:-}" = --self-mutate ]; then
   mutate "409-not-pages-only" 's/path ~ \/\\\/pages\\\/\//path ~ \/\\\/x\\\/\//'
   mutate "live-errors-not-live-only" 's/^  if (svc == "live") {$/  if (svc != "live") {/'
   mutate "redact-no-key-name" 's#|token|key|signature#|token|signature#'
-  mutate "redact-no-quoted-values" 's#(\\"\[^\\"\]\*\\"|#(#'
+  mutate "redact-no-escaped-quote" 's/\\\\\\\\\.)\*/)*/g'
+  mutate "redact-no-passphrase" 's/passphrase|passw0rd|//'
+  mutate "redact-no-otp-pin" 's/|otp|pin))/))/'
+  mutate "redact-no-bearer-key" 's/|bearer|otp/|otp/'
+  mutate "redact-no-pct3d" 's/|%3\[Dd\])/)/'
   mutate "redact-cookie-no-json-quote" 's#(set-cookie|cookies?)\[\\"[^]]*\]?#(set-cookie|cookies?)#'
   mutate "redact-ipv6-no-colon-before" 's/(^|\[^0-9A-Za-z.\])((\[0-9A-Fa-f\]{1,4}:){7}/(^|[^0-9A-Za-z:.])(([0-9A-Fa-f]{1,4}:){7}/'
   mutate "redact-no-plane-api" '/\[APIKEY\]/d'
@@ -84,7 +88,7 @@ if [ "${1:-}" = --self-mutate ]; then
   mutate "redact-no-oauth-code" '/(oauth_)?code)=/d'
   mutate "redact-no-digest" '/Digest).\*/d'
   mutate "redact-no-sessionid" 's/session\[_-\]?id|//'
-  mutate "zero-counters-live-errors" 's/if (lz ~ \/error|if (low ~ \/error|'
+  mutate "zero-counters-live-errors" 's/if (lz ~ \/error|/if (low ~ \/error|/'
   mutate "zero-counters-ratelimit" 's/!isacc \&\& lz ~/!isacc \&\& low ~/'
   mutate "no-sed-preflight" 's/^\[ "\$sed_ok" = "x y" \] || die.*$/true/'
   mutate "no-timeout-required" 's/^command -v timeout.*$/true/'
@@ -431,6 +435,15 @@ want cookie-lower "cookie: a=b" "cookie: [REDACTED]"
 want cookie-after-text "request headers cookie: a=b; c=d" "request headers cookie: [REDACTED]"
 want jwt "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnc2ln end" "jwt [JWT] end"
 want url-credentials "redis://user:pa55@cache:6379/0" "redis://[REDACTED]@cache:6379/0"
+want escaped-quote-value '{"pass":"a\"b c", "n": 1}' '{"pass=[REDACTED], "n": 1}'
+nogo escaped-quote-tail '{"pass":"a\"b c"}' 'b c' 'a\"'
+want key-passphrase "passphrase=hunter2 next" "passphrase=[REDACTED] next"
+want key-passw0rd "passw0rd: hunter2 next" "passw0rd=[REDACTED] next"
+want key-otp "otp=123456 next" "otp=[REDACTED] next"
+want key-pin "pin=4321 next" "pin=[REDACTED] next"
+want key-bearer-eq "bearer=abc123 next" "bearer=[REDACTED] next"
+want pct3d-separator "password%3Dvalue x" "password=[REDACTED] x"
+want pct3d-lower "token%3dabc123 x" "token=[REDACTED] x"
 want long-token "k Abcdefghijklmnopqrstuvwxyz0123456789_-AB end" "k [TOKEN] end"
 want plain-text-kept "ERROR task failed after 3 retries (code 4429)" "ERROR task failed after 3 retries (code 4429)"
 want path-kept "GET /api/v1/workspaces/w/projects/ 200" "GET /api/v1/workspaces/w/projects/ 200"
