@@ -10,6 +10,8 @@ Files in this directory
   test_fetch-images.sh          tests fetch-images.sh (stub verify-load, loopback HTTP)
   test_override.sh              validates the override against the upstream compose file
   test_inspect.sh               tests inspect.sh against stub commands
+  gate.sh                       go/no-go gate: PASS/FAIL per item, then GO or NO-GO (RUNBOOK 1a)
+  test_gate.sh                  tests gate.sh (local git origin, stub ssh)
   rollback.sh                   one command per rollback level: l1, l2, forward (--dry-run prints
                                 the commands; see RUNBOOK.md section 10)
   test_rollback.sh              tests rollback.sh against stub ssh, pct and docker (--self-mutate
