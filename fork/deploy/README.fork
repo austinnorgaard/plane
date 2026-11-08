@@ -1,0 +1,141 @@
+Fork deploy files (live updates and pages API)
+==============================================
+
+Files in this directory
+  docker-compose.override.yaml  fork images and feature flags, layered over the
+                                upstream community compose file
+  inspect.sh                    read-only pre-deploy inspection (run on the hypervisor)
+  fetch-images.sh               downloads the image archive, verifies its sha256, then
+                                runs fork/build/verify-load.sh
+  gate.sh                       go/no-go gate: PASS/FAIL per item, then GO or NO-GO (RUNBOOK 1a)
+  rollback.sh                   one command per rollback level: l1, l2, forward (--dry-run prints
+                                the commands; see RUNBOOK.md section 10)
+  postdeploy-logs.sh            post-deploy log summary of api, worker, beat-worker and live: counts,
+                                top redacted error lines, exit 0 clean / 1 over threshold / 2 usage /
+                                3 remote failure (see RUNBOOK.md section 7a)
+  RUNBOOK.md                    the deploy procedure, post-deploy health checks and rollback
+
+WARNINGS
+
+1. The community installer (setup.sh, from the upstream release) starts the
+   stack with an explicit "-f docker-compose.yaml". Docker Compose only picks up
+   docker-compose.override.yaml automatically when NO -f is given, so anything
+   started or upgraded through setup.sh (start, restart, upgrade) runs the stock
+   images and drops every fork flag WITHOUT any error. The upgrade action also
+   re-downloads the stock docker-compose.yaml. Never use setup.sh on a fork
+   deployment; use the two-file commands below. After any use of setup.sh, redo
+   the image-tag check in RUNBOOK.md.
+
+2. live must stay at ONE replica (leave LIVE_REPLICAS unset or 1). The pages
+   API asks live whether a page is open in an editor; that state is held per
+   process, so a second replica would answer "not loaded" for pages open on the
+   other one and the API could overwrite an open document.
+
+3. LIVE_BASE_URL is set on api ONLY. Do not set it on worker or beat-worker, in
+   plane.env, or anywhere else that reaches them: with it set, the copy_s3_object
+   task (bgtasks/copy_s3_object.py) starts calling live's convert-document
+   endpoint when a page is duplicated. The value must be the direct internal
+   URL of the live container (http://live:3000), never the public URL: live
+   refuses requests that carry X-Forwarded-For / X-Forwarded-Host.
+
+4. LIVE_SERVER_SECRET_KEY must not be the shipped placeholder
+   (change-this-key-on-deployment); the pages endpoints answer 503 until it is
+   changed. Do not print it. Never run "docker compose config" without -q on
+   the server: it prints every secret.
+
+5. CORS_ALLOWED_ORIGINS must not be passed into live. Browser origins for the
+   events socket go in LIVE_EVENTS_ALLOWED_ORIGINS.
+
+Variables (supplied by the operator; nothing host-specific is stored in the repo)
+  FORK_N                       fork build number, image tag v1.4.3-live.$FORK_N
+  WEB_URL                      public origin (normally already in plane.env)
+  LIVE_EVENTS_ALLOWED_ORIGINS  comma-separated origins users open Plane from
+                               (scheme://host[:port], for example the values of
+                               PUBLIC_URL and LAN_URL)
+  PLANE_APP_DIR                the plane-app directory that holds docker-compose.yaml and plane.env
+
+Optional live events limits (set in the live service environment; defaults shown)
+  LIVE_EVENTS_MAX_PENDING_SOCKETS       100    sockets that have not authenticated yet
+  LIVE_EVENTS_MAX_SOCKETS_PER_ADDRESS   25     sockets per remote address
+  LIVE_EVENTS_AUTH_TIMEOUT_MS           8000   hub-side authentication timeout (kept below 20000)
+  LIVE_EVENTS_AUTH_FAIL_CACHE_MS        30000  how long a rejected session cookie is refused without a
+                                               lookup (0 disables)
+  LIVE_EVENTS_TRUSTED_PROXIES           empty  comma-separated IPs or CIDR ranges of reverse proxies whose
+                                               X-Forwarded-For is trusted for the per-address limit.
+                                               The per-address limit depends on this setting: while it
+                                               is empty, sockets from a loopback, private, link-local or
+                                               unique-local peer (normally the proxy itself) are not
+                                               limited per address and a warning is logged once. Include
+                                               CDN edge ranges as well, otherwise the address seen is a
+                                               shared edge address.
+
+Optional live events tuning (defaults shown; leave unset to use them)
+  LIVE_EVENTS_REVALIDATE_MS             60000   how often each socket's session and project
+                                                grants are rechecked (+/-20% jitter per socket)
+  LIVE_EVENTS_REVALIDATE_MAX_FAILURES   3       consecutive transient recheck failures before the
+                                                socket is closed with code 1013
+
+Live events counters (numbers since process start; no ids, users or addresses)
+  GET /live/health/stats on the live service (the router is mounted at LIVE_BASE_PATH,
+  default /live). It is internal only: read it from inside the
+  deploy network (for example with curl from a shell in the live or api container),
+  never through the public reverse proxy. A request that carries X-Forwarded-For,
+  X-Forwarded-Host, Forwarded or X-Real-IP answers 403 even with the right secret, so
+  the shared secret is never sent through the public proxy. The header
+  live-server-secret-key must hold the value of LIVE_SERVER_SECRET_KEY (take it from
+  the container environment, do not paste it into shell history or tickets). No header
+  or a wrong value answers 401; an unset or placeholder secret answers 503. The public
+  /health stays minimal and shows no counters. Example, run inside the live container
+  (LIVE_PORT is the port the live service listens on):
+
+    curl -s -H "live-server-secret-key: $LIVE_SERVER_SECRET_KEY" "http://localhost:$LIVE_PORT/live/health/stats"
+
+  Fields: startedAt, uptimeSeconds, eventsEnabled and, when the hub runs, events:
+    sockets.open|authenticated|pending   current gauges
+    accepted                             sockets that passed the pre-auth checks
+    authenticated                        sockets that finished authentication
+    rejected.pendingCap|addressCap|authFail|authTimeout|other
+    framesSent                           frames written to sockets
+    invalid.redisDropped|clientMessages  malformed Redis messages dropped, bad client frames closed
+    rateLimitOverflows.inboundMessages   4429 closes for message rate
+    rateLimitOverflows.projectEvents     per-project overflows answered with a full refresh
+    revalidationCloses.auth4401|unavailable1013
+
+Optional pages API size and time limits (defaults shown; leave unset to use them)
+  api service:
+  PAGES_API_MAX_HTML_BYTES              262144  largest description_html (decoded bytes) accepted by the
+                                                pages API on create and update; larger answers 413
+  PAGES_API_RETRY_AFTER_SECONDS         60      Retry-After value, in seconds, on the pages API 409 when a
+                                                page is open in an editor (minimum 1, maximum 3600)
+  live service:
+  PAGES_REBASE_MAX_HTML_BYTES           524288  largest description_html the rebase route converts;
+                                                larger answers 413, which the api passes on
+                                                as 413. Keep it at or above the api value
+  PAGES_REBASE_TIMEOUT_MS               8000    time budget of one conversion; on expiry the worker thread
+                                                is stopped and the route answers 503 (keep it below the api
+                                                client timeout of 10 s)
+  PAGES_REBASE_MAX_CONCURRENCY          2       conversions (worker threads) at the same time; more are
+                                                refused at once with 503 and Retry-After. Do not set it
+                                                above the spare CPU cores of the live container (use 1 on
+                                                a 2-core host): busy workers compete with the main thread
+  PAGES_REBASE_WORKER_MAX_MB            256     heap limit of one worker thread; a worker that exceeds it
+                                                is stopped, the request fails (the api answers 503) and
+                                                the next request gets a fresh worker. A base document over
+                                                about 2 MB of binary state can need more. A
+                                                --max-old-space-size in NODE_OPTIONS overrides this limit
+
+Commands (run in $PLANE_APP_DIR; FORK_N must be exported or in plane.env)
+
+  C="docker compose -f docker-compose.yaml -f docker-compose.override.yaml --env-file plane.env"
+
+  $C config -q                  # validate, prints nothing on success
+  $C up -d                      # apply (recreates only changed services)
+  $C ps --format '{{.Service}} {{.Image}}'    # image-tag check
+  $C logs --tail 50 live api
+
+Read-only inspection of the target (on the hypervisor; changes nothing)
+  ssh "$PVE_HOST" "PLANE_CTID=$PLANE_CTID PLANE_APP_DIR=$PLANE_APP_DIR bash -s" < fork/deploy/inspect.sh
+  add "-- --dry-run" after "bash -s" to print the commands without running them.
+
+The migrator service keeps the stock backend image: the fork adds no database
+migrations. If that ever changes, add the migrator to the override.
