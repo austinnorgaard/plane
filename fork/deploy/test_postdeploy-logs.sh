@@ -75,7 +75,7 @@ if [ "${1:-}" = --self-mutate ]; then
   mutate "opened-text-changed" 's/opened in an editor during an api update")) opened++/opened in an editor during an api updatex")) opened++/'
   mutate "409-not-pages-only" 's/path ~ \/\\\/pages\\\/\//path ~ \/\\\/x\\\/\//'
   mutate "live-errors-not-live-only" 's/^  if (svc == "live") {$/  if (svc != "live") {/'
-  mutate "redact-no-env-prefix" 's#(\[A-Za-z0-9_.-\]\*(secret#((secret#'
+  mutate "redact-no-key-name" 's#|token|key|signature#|token|signature#'
   mutate "redact-no-quoted-values" 's#(\\"\[^\\"\]\*\\"|#(#'
   mutate "redact-cookie-no-json-quote" 's#(set-cookie|cookies?)\[\\"[^]]*\]?#(set-cookie|cookies?)#'
   mutate "redact-ipv6-no-colon-before" 's/(^|\[^0-9A-Za-z.\])((\[0-9A-Fa-f\]{1,4}:){7}/(^|[^0-9A-Za-z:.])(([0-9A-Fa-f]{1,4}:){7}/'
