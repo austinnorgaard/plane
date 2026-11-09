@@ -35,9 +35,8 @@ import { getGroupByColumns, isWorkspaceLevel, getApproximateCardHeight } from ".
 // components
 import { HeaderGroupByCard } from "./headers/group-by-card";
 import { KanbanGroup } from "./kanban-group";
-// fork (PLN-107): auto-collapse empty groups
-import { useAutoCollapseEnabled } from "@/fork/board-settings/auto-collapse";
-import { CollapsedColumnDropTarget } from "@/fork/board-settings/components/collapsed-column-drop-target";
+// fork (PLN-110): a collapsed column is a full-height drop zone with a hover preview
+import { CollapsedColumnDropZone } from "@/fork/board-settings/components/collapsed-column-drop-target";
 
 export interface IKanBan {
   issuesMap: IIssueMap;
@@ -111,9 +110,6 @@ export const KanBan = observer(function KanBan(props: IKanBan) {
   const isDragDisabled = !issueKanBanView?.getCanUserDragDrop(group_by, sub_group_by);
 
   const { getIsWorkflowWorkItemCreationDisabled } = useWorkFlowFDragNDrop(group_by, sub_group_by);
-  // fork (PLN-107)
-  const autoCollapse = useAutoCollapseEnabled();
-
   const list = getGroupByColumns({
     groupBy: group_by as GroupByColumnTypes,
     includeNone: true,
@@ -165,6 +161,55 @@ export const KanBan = observer(function KanBan(props: IKanBan) {
             : ((groupedIssueIds as TGroupedIssues)?.[subList.id] ?? []);
           const issueLength = issueIds?.length;
           const groupHeight = issueLength * approximateCardHeight;
+          const groupCount = getGroupIssueCount(subList.id, undefined, false) ?? 0;
+
+          // fork (PLN-110): previewing renders the header of a collapsed column as expanded
+          const renderHeader = (previewing = false) => (
+            <HeaderGroupByCard
+              sub_group_by={sub_group_by}
+              group_by={group_by}
+              column_id={subList.id}
+              icon={subList.icon}
+              title={subList.name}
+              count={groupCount}
+              issuePayload={subList.payload}
+              disableIssueCreation={
+                disableIssueCreation ||
+                isGroupByCreatedBy ||
+                getIsWorkflowWorkItemCreationDisabled(subList.id, sub_group_id)
+              }
+              addIssuesToView={addIssuesToView}
+              collapsedGroups={
+                previewing
+                  ? { ...collapsedGroups, group_by: collapsedGroups.group_by.filter((id) => id !== subList.id) }
+                  : collapsedGroups
+              }
+              handleCollapsedGroups={handleCollapsedGroups}
+              isEpic={isEpic}
+            />
+          );
+
+          // fork (PLN-110): a collapsed column (auto-collapse on or collapsed by hand) is one drop zone over
+          // its header and the full lane under it, with a hover preview; the drop opens it (expandGroup)
+          if (sub_group_by === null && !groupByVisibilityToggle.showIssues) {
+            return (
+              <CollapsedColumnDropZone
+                key={subList.id}
+                groupId={subList.id}
+                subGroupId={sub_group_id}
+                count={groupCount}
+                isDropDisabled={!!subList.isDropDisabled || !!isDropDisabled}
+                dropErrorMessage={subList.dropErrorMessage ?? dropErrorMessage}
+                handleOnDrop={handleOnDrop}
+                onDropped={() =>
+                  handleExpandGroup
+                    ? handleExpandGroup("group_by", subList.id)
+                    : handleCollapsedGroups("group_by", subList.id)
+                }
+                renderHeader={renderHeader}
+              />
+            );
+          }
 
           return (
             <div
@@ -174,37 +219,7 @@ export const KanBan = observer(function KanBan(props: IKanBan) {
               } `}
             >
               {sub_group_by === null && (
-                <div className="sticky top-0 z-[2] w-full flex-shrink-0 bg-surface-2 py-1">
-                  {/* fork (PLN-107): a collapsed column still accepts drops while auto-collapse is on */}
-                  <CollapsedColumnDropTarget
-                    enabled={autoCollapse && !groupByVisibilityToggle.showIssues}
-                    groupId={subList.id}
-                    subGroupId={sub_group_id}
-                    isDropDisabled={!!subList.isDropDisabled || !!isDropDisabled}
-                    dropErrorMessage={subList.dropErrorMessage ?? dropErrorMessage}
-                    handleOnDrop={handleOnDrop}
-                    onDropped={() => handleExpandGroup?.("group_by", subList.id)}
-                  >
-                    <HeaderGroupByCard
-                      sub_group_by={sub_group_by}
-                      group_by={group_by}
-                      column_id={subList.id}
-                      icon={subList.icon}
-                      title={subList.name}
-                      count={getGroupIssueCount(subList.id, undefined, false) ?? 0}
-                      issuePayload={subList.payload}
-                      disableIssueCreation={
-                        disableIssueCreation ||
-                        isGroupByCreatedBy ||
-                        getIsWorkflowWorkItemCreationDisabled(subList.id, sub_group_id)
-                      }
-                      addIssuesToView={addIssuesToView}
-                      collapsedGroups={collapsedGroups}
-                      handleCollapsedGroups={handleCollapsedGroups}
-                      isEpic={isEpic}
-                    />
-                  </CollapsedColumnDropTarget>
-                </div>
+                <div className="sticky top-0 z-[2] w-full flex-shrink-0 bg-surface-2 py-1">{renderHeader()}</div>
               )}
 
               {groupByVisibilityToggle.showIssues && (
