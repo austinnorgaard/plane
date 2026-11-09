@@ -21,6 +21,9 @@ from plane.app.views import (
     UserWorkSpacesEndpoint,
 )
 
+# fork (PLN-106): per-user settings record
+from plane.app.views.user.fork_settings import ForkUserSettingsEndpoint
+
 urlpatterns = [
     # User Profile
     path(
@@ -44,6 +47,8 @@ urlpatterns = [
         UserEndpoint.as_view({"patch": "update_email"}),
         name="user-email-update",
     ),
+    # fork (PLN-106): per-user settings record
+    path("users/me/fork-settings/", ForkUserSettingsEndpoint.as_view(), name="user-fork-settings"),
     # Profile
     path("users/me/profile/", ProfileEndpoint.as_view(), name="accounts"),
     # End profile

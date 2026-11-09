@@ -25,6 +25,14 @@ still be visible to a read that races the write.
 Affected ids come from ``extract_issue_ids``, which also covers the parent of a
 sub-issue on assign, create with parent, reparent and delete (``issue.`` types) and the ``related_issue`` of a relation delete.
 
+User-scoped events (PLN-106) go to ``plane:live-events:user:<user_id>`` and
+reach only that user's own sockets, with no subscription needed::
+
+    {"v": 1, "user_id": "<uuid>", "kind": "user_settings", "verb": "updated",
+     "version": <int>, "ts": <epoch seconds, float>}
+
+They carry the new settings version only; the client refetches the settings.
+
 Publishing is gated by ``LIVE_EVENTS_ENABLED == "1"`` and never raises.
 """
 
@@ -47,6 +55,8 @@ from django.conf import settings
 logger = logging.getLogger("plane.worker")
 
 CHANNEL_PREFIX = "plane:live-events:"
+USER_CHANNEL_PREFIX = CHANNEL_PREFIX + "user:"
+USER_EVENT_KINDS = ("user_settings",)
 MAX_IDS = 500
 SOCKET_TIMEOUT_SECONDS = 1
 ALL_IDS = "*"
@@ -142,6 +152,27 @@ def publish_work_item_event(project_id, issue_ids, kind, verb, actor_id, settle=
     except Exception as e:
         # Log the exception type only; connection errors can carry the Redis URL.
         logger.warning("live event publish failed: %s", type(e).__name__)
+        return False
+
+
+def publish_user_event(user_id, kind, verb, version):
+    """Publish a user-scoped event carrying a version only. Never raises."""
+    try:
+        if not live_events_enabled() or kind not in USER_EVENT_KINDS:
+            return False
+        payload = {
+            "v": 1,
+            "user_id": str(user_id),
+            "kind": kind,
+            "verb": verb,
+            "version": int(version),
+            "ts": time.time(),
+        }
+        client = _publish_client()
+        client.publish(USER_CHANNEL_PREFIX + str(user_id), json.dumps(payload))
+        return True
+    except Exception as e:
+        logger.warning("live user event publish failed: %s", type(e).__name__)
         return False
 
 

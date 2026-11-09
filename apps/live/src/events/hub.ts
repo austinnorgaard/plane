@@ -20,7 +20,7 @@ import {
   partitionProjects,
 } from "./auth";
 import type { EventsConfig } from "./config";
-import { EVENTS_CHANNEL_PATTERN, EVENTS_CHANNEL_PREFIX } from "./config";
+import { EVENTS_CHANNEL_PATTERN, EVENTS_CHANNEL_PREFIX, EVENTS_USER_CHANNEL_PREFIX } from "./config";
 import { buildAllowlist, CLOSE_ORIGIN, isOriginAllowed } from "./origin";
 
 // Close codes used by the events socket.
@@ -121,6 +121,19 @@ const redisEventShape = z.object({
 export const redisMessageSchema = z.preprocess(withIssueIds, redisEventShape);
 export type RedisEvent = z.infer<typeof redisEventShape>;
 
+// fork (PLN-106): user-scoped events, published to plane:live-events:user:<user_id>. They carry a
+// version only and go to every authenticated socket of that user, without a subscription.
+export const USER_EVENT_KINDS = ["user_settings"] as const;
+export const userEventSchema = z.object({
+  v: z.literal(1),
+  user_id: z.string().uuid(),
+  kind: z.enum(USER_EVENT_KINDS),
+  verb: z.literal("updated"),
+  version: z.number().int().min(0),
+  ts: z.union([z.number(), z.string()]).optional(),
+});
+export type UserEvent = z.infer<typeof userEventSchema>;
+
 const clientMessageSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("subscribe"),
@@ -184,6 +197,7 @@ export class EventsHub {
   private readonly clients = new Set<Client>();
   private readonly byProject = new Map<string, Set<Client>>();
   private readonly pending = new Map<string, Pending>();
+  private readonly pendingUser = new Map<string, { event: UserEvent; timer: ReturnType<typeof setTimeout> }>();
   private readonly rate = new Map<string, { start: number; count: number }>();
   private readonly settleTimers = new Set<ReturnType<typeof setTimeout>>();
   private readonly settleState = new Map<string, { count: number; wildcard: ReturnType<typeof setTimeout> | null }>();
@@ -296,6 +310,8 @@ export class EventsHub {
     this.settleState.clear();
     this.pending.forEach((p) => p.timer && clearTimeout(p.timer));
     this.pending.clear();
+    this.pendingUser.forEach((p) => clearTimeout(p.timer));
+    this.pendingUser.clear();
     for (const client of this.clients) this.close(client, 1001, "shutdown");
     try {
       await this.subscriber?.quit();
@@ -727,6 +743,7 @@ export class EventsHub {
   // ------------------------------------------------------------------ redis
 
   private onRedisMessage(channel: string, raw: string) {
+    if (channel.startsWith(EVENTS_USER_CHANNEL_PREFIX)) return this.onUserMessage(channel, raw);
     try {
       const parsed = redisMessageSchema.safeParse(JSON.parse(raw));
       const channelProject = channel.startsWith(EVENTS_CHANNEL_PREFIX)
@@ -739,6 +756,38 @@ export class EventsHub {
       this.ingest(parsed.data, false);
     } catch {
       this.noteInvalid();
+    }
+  }
+
+  // fork (PLN-106): one frame per user per coalesce window, carrying the newest version
+  private onUserMessage(channel: string, raw: string) {
+    try {
+      const parsed = userEventSchema.safeParse(JSON.parse(raw));
+      if (!parsed.success || parsed.data.user_id !== channel.slice(EVENTS_USER_CHANNEL_PREFIX.length)) {
+        this.noteInvalid();
+        return;
+      }
+      const event = parsed.data;
+      const existing = this.pendingUser.get(event.user_id);
+      if (existing) {
+        if (event.version >= existing.event.version) existing.event = event;
+        return;
+      }
+      const timer = setTimeout(() => this.flushUser(event.user_id), this.config.coalesceMs);
+      this.pendingUser.set(event.user_id, { event, timer });
+    } catch {
+      this.noteInvalid();
+    }
+  }
+
+  private flushUser(userId: string) {
+    const pending = this.pendingUser.get(userId);
+    this.pendingUser.delete(userId);
+    if (!pending) return;
+    const { kind, verb, version } = pending.event;
+    for (const client of this.clients) {
+      if (client.pending || client.userId !== userId) continue;
+      this.send(client, { type: "user_event", kind, verb, version });
     }
   }
 

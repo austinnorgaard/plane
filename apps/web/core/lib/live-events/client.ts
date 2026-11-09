@@ -21,6 +21,8 @@ import { LIVE_BASE_PATH, LIVE_BASE_URL } from "@plane/constants";
  *  - { type: "subscribed", project_ids, denied }
  *  - { type: "unsubscribed", project_ids }
  *  - { type: "revoked", project_ids }       access to these projects was lost
+ *  - { type: "user_event", kind, verb, version }  fork (PLN-106): a change to the current user's own
+ *                                           data (kind "user_settings"); version only, the client refetches
  */
 export type TLiveKind =
   | "issue"
@@ -46,13 +48,19 @@ export type TLiveRevokedFrame = { type: "revoked"; project_id: string };
 export type TLiveEvent = TLiveEventsFrame | TLiveResyncFrame | TLiveRevokedFrame;
 export type TLiveListener = (event: TLiveEvent) => void;
 
+/** fork (PLN-106): user-scoped events. `resync` is emitted locally when anything may have been missed. */
+export type TLiveUserEventFrame = { type: "user_event"; kind: string; verb: string; version: number };
+export type TLiveUserEvent = TLiveUserEventFrame | { type: "resync" };
+export type TLiveUserListener = (event: TLiveUserEvent) => void;
+
 type TServerFrame =
   | TLiveEventsFrame
   | { type: "ping" }
   | { type: "resync" }
   | { type: "subscribed"; project_ids: string[]; denied: string[] }
   | { type: "unsubscribed" }
-  | { type: "revoked"; project_ids: string[] };
+  | { type: "revoked"; project_ids: string[] }
+  | TLiveUserEventFrame;
 
 export const LIVE_CLOSE_BAD_MESSAGE = 4400;
 export const LIVE_CLOSE_UNAUTHENTICATED = 4401;
@@ -134,6 +142,10 @@ export const parseFrame = (raw: unknown): TServerFrame | undefined => {
       return { type: "subscribed", project_ids: stringArray(data.project_ids), denied: stringArray(data.denied) };
     case "revoked":
       return { type: "revoked", project_ids: stringArray(data.project_ids) };
+    case "user_event":
+      if (typeof data.kind !== "string" || typeof data.verb !== "string" || typeof data.version !== "number")
+        return undefined;
+      return { type: "user_event", kind: data.kind, verb: data.verb, version: data.version };
     case "events": {
       if (typeof data.project_id !== "string" || !Array.isArray(data.items)) return undefined;
       const items: TLiveItem[] = [];
@@ -176,6 +188,8 @@ export const buildLiveEventsUrl = (): string | undefined => {
  */
 export class LiveEventsClient {
   private listeners = new Map<string, Set<TLiveListener>>();
+  /** fork (PLN-106): user-scoped listeners. They ride on the project subscriptions' socket and never open one. */
+  private userListeners = new Set<TLiveUserListener>();
   private workspaceSlugs = new Map<string, string>();
   /** projects the hub refused; not re-requested until every subscriber of the project is gone */
   private denied = new Set<string>();
@@ -232,6 +246,28 @@ export class LiveEventsClient {
       this.send({ type: "unsubscribe", project_ids: [projectId] });
       if (this.listeners.size === 0) this.shutdown();
     };
+  }
+
+  /**
+   * fork (PLN-106): listens to events about the current user (sent to every socket of the user).
+   * A user listener does not keep the socket open by itself: it receives events while any project is
+   * subscribed in this tab. Returns the unsubscribe function.
+   */
+  subscribeUser(listener: TLiveUserListener): () => void {
+    this.userListeners.add(listener);
+    return () => {
+      this.userListeners.delete(listener);
+    };
+  }
+
+  private emitUser(event: TLiveUserEvent) {
+    for (const listener of this.userListeners) {
+      try {
+        listener(event);
+      } catch (error) {
+        console.error("live events user listener failed", error);
+      }
+    }
   }
 
   // ---- connection ----
@@ -439,6 +475,10 @@ export class LiveEventsClient {
         return;
       case "unsubscribed":
         return;
+      case "user_event":
+        // a user change is small and idempotent: delivered even while the tab is hidden
+        this.emitUser(frame);
+        return;
     }
   }
 
@@ -497,6 +537,7 @@ export class LiveEventsClient {
 
   private emitResync() {
     for (const projectId of this.listeners.keys()) this.emit({ type: "resync", project_id: projectId });
+    this.emitUser({ type: "resync" });
   }
 
   private bufferHidden(event: TLiveEvent) {

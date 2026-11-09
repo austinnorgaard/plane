@@ -280,7 +280,9 @@ export class LiveWorkItemsApplier {
     // a full refresh may carry a state or label change: the metadata stores follow it
     if (all) {
       refreshes.push(
-        this.deps.refreshProjectMetadata().catch((error: unknown) => console.error("live metadata refresh failed", error))
+        this.deps
+          .refreshProjectMetadata()
+          .catch((error: unknown) => console.error("live metadata refresh failed", error))
       );
     }
     await Promise.all(refreshes);

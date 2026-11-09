@@ -70,6 +70,8 @@ export type EventsConfig = {
 
 export const EVENTS_CHANNEL_PREFIX = "plane:live-events:";
 export const EVENTS_CHANNEL_PATTERN = `${EVENTS_CHANNEL_PREFIX}*`;
+// fork (PLN-106): user-scoped events; matched by EVENTS_CHANNEL_PATTERN as well
+export const EVENTS_USER_CHANNEL_PREFIX = `${EVENTS_CHANNEL_PREFIX}user:`;
 
 export const parseEventsConfig = (source: Record<string, string | undefined> = process.env): EventsConfig => {
   const parsed = eventsEnvSchema.parse(source);
