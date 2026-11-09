@@ -93,7 +93,7 @@ web:
 - `apps/web/core/lib/live-events/use-live-work-items.ts`: the project hook (mounted by the PLN-5 layout patch).
 - `apps/web/core/lib/live-events/filter-match.ts`: PLN-38.
 - `apps/web/core/lib/live-events/metadata.ts`: PLN-36.
-- `apps/web/core/lib/live-events/use-live-workspace-view.ts`: PLN-37.
+- `apps/web/core/lib/live-events/use-live-workspace-view.ts`: PLN-37; PLN-122, beyond 50 joined projects the projects present in the view are subscribed first (a set change settles 3 s).
 - `apps/web/core/lib/live-events/applier-deps.ts`: PLN-119, the applier wiring shared by the two live hooks, and the translated "work item unavailable" toast.
 - `apps/web/core/fork/board-settings/*`: PLN-106 (PLN-107 adds `auto-collapse.ts` and its components; PLN-110 adds `components/drop-preview.tsx`).
 - `apps/web/core/fork/live/local-edits.ts`: PLN-110 fix.
