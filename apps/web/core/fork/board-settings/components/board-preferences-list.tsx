@@ -1,0 +1,19 @@
+/**
+ * Copyright (c) 2023-present Plane Software, Inc. and contributors
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * See the LICENSE file for details.
+ */
+
+// fork (PLN-106, PLN-107): the "Boards" section of Profile settings > Preferences.
+
+import { observer } from "mobx-react";
+// local imports
+import { GlobalBoardPreferenceToggle } from "./global-board-toggle";
+
+export const ForkBoardPreferencesList = observer(function ForkBoardPreferencesList() {
+  return (
+    <div className="flex flex-col gap-y-1">
+      <GlobalBoardPreferenceToggle />
+    </div>
+  );
+});

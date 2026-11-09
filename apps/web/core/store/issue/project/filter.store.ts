@@ -28,10 +28,14 @@ import { IssueFilterHelperStore } from "../helpers/issue-filter-helper.store";
 // types
 import type { IIssueRootStore } from "../root.store";
 import { ProjectService } from "@/services/project";
+// fork (PLN-106): global board template
+import { ForkGlobalBoard } from "@/fork/board-settings/global-board";
 // constants
 // services
 
 export interface IProjectIssuesFilter extends IBaseIssueFilterStore {
+  // fork (PLN-106): global board template
+  forkBoard: ForkGlobalBoard;
   //helper actions
   getFilterParams: (
     options: IssuePaginationOptions,
@@ -63,6 +67,8 @@ export class ProjectIssuesFilter extends IssueFilterHelperStore implements IProj
   rootIssueStore: IIssueRootStore;
   // services
   projectService;
+  // fork (PLN-106): global board template
+  forkBoard: ForkGlobalBoard;
 
   constructor(_rootStore: IIssueRootStore) {
     super();
@@ -81,6 +87,8 @@ export class ProjectIssuesFilter extends IssueFilterHelperStore implements IProj
     this.rootIssueStore = _rootStore;
     // services
     this.projectService = new ProjectService();
+    // fork (PLN-106)
+    this.forkBoard = new ForkGlobalBoard(this);
   }
 
   get issueFilters() {
@@ -137,9 +145,12 @@ export class ProjectIssuesFilter extends IssueFilterHelperStore implements IProj
   fetchFilters = async (workspaceSlug: string, projectId: string) => {
     const _filters = await this.projectService.getProjectUserProperties(workspaceSlug, projectId);
 
-    const richFilters = _filters?.rich_filters;
-    const displayFilters = this.computedDisplayFilters(_filters?.display_filters);
-    const displayProperties = this.computedDisplayProperties(_filters?.display_properties);
+    // fork (PLN-106): with the global board template on, the board shows the template, not the project row
+    const { richFilters, displayFilters, displayProperties } = await this.forkBoard.resolveFetched(projectId, {
+      richFilters: _filters?.rich_filters,
+      displayFilters: this.computedDisplayFilters(_filters?.display_filters),
+      displayProperties: this.computedDisplayProperties(_filters?.display_properties),
+    });
 
     // fetching the kanban toggle helpers in the local storage
     const kanbanFilters = {
@@ -177,11 +188,18 @@ export class ProjectIssuesFilter extends IssueFilterHelperStore implements IProj
     filters
   ) => {
     try {
+      // fork (PLN-106): a template change pushed into the filter instance is already applied
+      if (this.forkBoard.isApplyingRemote) return;
       runInAction(() => {
         set(this.filters, [projectId, "richFilters"], filters);
       });
 
       this.rootIssueStore.projectIssues.fetchIssuesWithExistingPagination(workspaceSlug, projectId, "mutation");
+      // fork (PLN-106): with the global board template on, the change goes to the template
+      if (this.forkBoard.isActive()) {
+        await this.forkBoard.saveRichFilters(projectId, filters);
+        return;
+      }
       await this.projectService.updateProjectUserProperties(workspaceSlug, projectId, {
         rich_filters: filters,
       });
@@ -244,6 +262,11 @@ export class ProjectIssuesFilter extends IssueFilterHelperStore implements IProj
             this.rootIssueStore.projectIssues.fetchIssuesWithExistingPagination(workspaceSlug, projectId, "mutation");
           }
 
+          // fork (PLN-106): with the global board template on, the change goes to the template
+          if (this.forkBoard.isActive()) {
+            await this.forkBoard.saveDisplayFilters(projectId, _filters.displayFilters);
+            break;
+          }
           await this.projectService.updateProjectUserProperties(workspaceSlug, projectId, {
             display_filters: _filters.displayFilters,
           });
@@ -264,6 +287,11 @@ export class ProjectIssuesFilter extends IssueFilterHelperStore implements IProj
             });
           });
 
+          // fork (PLN-106): with the global board template on, the change goes to the template
+          if (this.forkBoard.isActive()) {
+            await this.forkBoard.saveDisplayProperties(projectId, _filters.displayProperties);
+            break;
+          }
           await this.projectService.updateProjectUserProperties(workspaceSlug, projectId, {
             display_properties: _filters.displayProperties,
           });

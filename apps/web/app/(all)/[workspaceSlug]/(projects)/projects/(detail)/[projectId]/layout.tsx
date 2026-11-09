@@ -16,6 +16,8 @@ import { AppSidebarToggleButton } from "@/components/sidebar/sidebar-toggle-butt
 import { useAppTheme } from "@/hooks/store/use-app-theme";
 import { useProjectNavigationPreferences } from "@/hooks/use-navigation-preferences";
 import { useLiveWorkItems } from "@/lib/live-events/use-live-work-items";
+// fork (PLN-106): live per-user settings
+import { useLiveUserSettings } from "@/fork/board-settings/use-live-user-settings";
 // layouts
 import { ProjectAuthWrapper } from "@/layouts/auth-layout/project-wrapper";
 // local imports
@@ -30,6 +32,7 @@ function ProjectLayout({ params }: Route.ComponentProps) {
   const { preferences: projectPreferences } = useProjectNavigationPreferences();
   // live work item updates for this project
   useLiveWorkItems(workspaceSlug, projectId);
+  useLiveUserSettings();
 
   return (
     <>

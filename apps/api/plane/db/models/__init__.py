@@ -90,3 +90,6 @@ from .device import Device, DeviceSession
 from .sticky import Sticky
 
 from .description import Description, DescriptionVersion
+
+# fork (PLN-106): per-user settings record
+from .fork_user_settings import ForkUserSettings

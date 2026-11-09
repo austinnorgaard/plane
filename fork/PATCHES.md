@@ -18,8 +18,17 @@ One line per touched upstream file: ticket id and the reason.
 - `apps/api/plane/app/views/issue/archive.py`: PLN-3, publish after bulk archive.
 - `apps/api/plane/app/views/issue/sub_issue.py`: PLN-28, capture each sub-issue's old parent before the assign update and pass it as `current_instance.parent` (upstream passed the sub-issue id), so the live event covers the old parent; the found-sub-issues iteration PLN-29 added is now upstream's own `scoped_sub_issue_ids` (v1.4.3), and the fork keeps upstream's loop.
 - `apps/api/plane/app/views/issue/base.py` (destroy): PLN-29, capture the issue's `parent_id` before the delete and pass it as `current_instance.parent` (`{}` when there is no parent), so the live event covers the parent's sub-issue count.
+- `apps/api/plane/db/models/__init__.py`: PLN-106, export `ForkUserSettings` (one import at the end).
+- `apps/api/plane/app/urls/user.py`: PLN-106, route `users/me/fork-settings/` (one import, one path).
+- `apps/live/src/events/config.ts`, `apps/live/src/events/hub.ts`: PLN-106, user-scoped events on `plane:live-events:user:<user_id>`, sent as `{type: "user_event", kind, verb, version}` to every authenticated socket of that user (fork-owned files, listed here because they changed contract).
+- `apps/web/core/lib/live-events/client.ts`: PLN-106, parse `user_event` frames, `subscribeUser()` listeners, resync also emitted to user listeners.
+- `apps/web/core/store/issue/project/filter.store.ts`: PLN-106, `forkBoard` (ForkGlobalBoard): fetchFilters resolves the board through it; display filter, display property and rich filter writes go to the global template instead of the project row while it is on.
+- `apps/web/core/components/issues/filters.tsx`: PLN-106, global board indicator at the top of the project board's display menu.
+- `apps/web/core/components/settings/profile/content/pages/preferences/root.tsx`: PLN-106, "Boards" section with the fork board preferences.
+- `apps/web/app/(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/layout.tsx` (PLN-106): also mounts `useLiveUserSettings`.
+- `packages/i18n/src/locales/en/settings.json`: PLN-106, new `account_settings.preferences.*` board keys (en only; other locales fall back).
 
-New files (not upstream): `apps/live/src/controllers/events.controller.ts`, `apps/live/src/events/{config,origin,auth,hub}.ts`; `apps/api/plane/api/{urls,views,serializers}/page.py`, `apps/api/plane/utils/live_pages.py`, `apps/api/plane/utils/live_events.py`, `fork/PAGES.md`, `apps/live/src/fork-pages/*`, `fork/tools/*`.
+New files (not upstream): `apps/live/src/controllers/events.controller.ts`, `apps/live/src/events/{config,origin,auth,hub}.ts`; `apps/api/plane/api/{urls,views,serializers}/page.py`, `apps/api/plane/utils/live_pages.py`, `apps/api/plane/utils/live_events.py`, `fork/PAGES.md`, `apps/live/src/fork-pages/*`, `fork/tools/*`; PLN-106: `apps/api/plane/db/models/fork_user_settings.py`, `apps/api/plane/db/migrations/0123_fork_user_settings.py`, `apps/api/plane/app/views/user/fork_settings.py`, `apps/web/core/fork/board-settings/*`.
 
 ## Drift points (new files that mirror private upstream code)
 
