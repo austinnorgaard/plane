@@ -40,6 +40,9 @@ set -u
 
 BRANCH=live-updates/v1.4.3
 PLACEHOLDER=change-this-key-on-deployment
+# PLN-113: the key rule live and api apply since PLN-99 (fork-pages/auth.ts, utils/live_pages.py)
+EXAMPLE_KEY=secret-key
+MIN_KEY_LENGTH=32
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 env_file=""
@@ -286,11 +289,13 @@ case "$no" in
   *) pass "$name" ;;
 esac
 
-name="LIVE_SERVER_SECRET_KEY is set and not the placeholder"
+name="LIVE_SERVER_SECRET_KEY is set, not an example value and at least $MIN_KEY_LENGTH characters"
 sk="$(cfg LIVE_SERVER_SECRET_KEY)"
 if [ -z "$sk" ]; then fail "$name" "empty or unset"
 elif [ -z "$(printf '%s' "$sk" | tr -d '[:space:]')" ]; then fail "$name" "empty or unset"
 elif [[ "${sk,,}" == *"$PLACEHOLDER"* ]]; then fail "$name" "is or contains the shipped placeholder"
+elif [ "$sk" = "$EXAMPLE_KEY" ]; then fail "$name" "is the .env.example value"
+elif [ "${#sk}" -lt "$MIN_KEY_LENGTH" ]; then fail "$name" "shorter than $MIN_KEY_LENGTH characters (live and api refuse it)"
 else pass "$name"; fi
 sk=""
 
