@@ -57,6 +57,7 @@ One line per touched upstream file: ticket id and the reason.
 - `apps/live/src/controllers/health.controller.ts`: PLN-34, `GET /health/stats` (live event counters) behind the live shared secret (#47; added by PLN-88).
 - `apps/live/src/server.ts`: PLN-97, stop the pages rebase workers on shutdown (#47; added by PLN-88).
 - `apps/live/tsdown.config.ts`: PLN-97, build `src/fork-pages/rebase.worker.ts` as a second entry, `exports: false` (#47; added by PLN-88).
+- `apps/api/plane/app/views/intake/base.py` (`IntakeIssueViewSet.destroy`), `apps/api/plane/api/views/intake.py` (REST v1 `IntakeIssueDetailAPIEndpoint.delete`): PLN-121, publish `intake`/`deleted` for the work item after an intake delete, and `issue`/`deleted` when the not-yet-accepted work item is deleted with it (neither path published before, so the live intake list never saw deletes).
 
 ## New files (not upstream)
 
