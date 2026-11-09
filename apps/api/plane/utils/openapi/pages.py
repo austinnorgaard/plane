@@ -48,6 +48,22 @@ PAGE_UPDATED_AFTER_PARAMETER = OpenApiParameter(
     location=OpenApiParameter.QUERY,
 )
 
+PAGE_CURSOR_PARAMETER = OpenApiParameter(
+    name="cursor",
+    description=(
+        "Keyset cursor (PLN-104): pass the next_cursor or prev_cursor of the previous response unchanged. "
+        "It carries the sort key of the boundary row, so a walk does not skip unchanged pages while others "
+        "change. A cursor made for another order_by, or a malformed one, is a 400. The old offset form "
+        "(per_page:page:is_prev) is still accepted."
+    ),
+    required=False,
+    type=OpenApiTypes.STR,
+    location=OpenApiParameter.QUERY,
+    examples=[
+        OpenApiExample(name="Next page", value="k1.eyJvIjoidXBkYXRlZF9hdCIsImQiOiJuZXh0Iiwia..."),
+    ],
+)
+
 PAGE_ORDER_BY_PARAMETER = OpenApiParameter(
     name="order_by",
     description=(

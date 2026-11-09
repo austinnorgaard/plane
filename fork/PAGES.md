@@ -22,13 +22,19 @@ The URL kwarg is `page_id` because `ProjectPagePermission` reads `view.kwargs["p
 
 ## Listing and incremental sync
 
-Pagination uses the same cursor style as the other `/api/v1` lists: `per_page` (default and maximum 1000) and `cursor`; the
-response carries `next_cursor`, `prev_cursor`, `next_page_results`, `prev_page_results`, `count`, `total_results` and `results`.
-Pass the `next_cursor` of one response as `cursor` of the next until `next_page_results` is false. An invalid `cursor` or
-`per_page` is 400 `{"detail": ...}`.
+Pagination: `per_page` (default and maximum 1000) and `cursor`; the response carries the same fields as the other `/api/v1`
+lists (`next_cursor`, `prev_cursor`, `next_page_results`, `prev_page_results`, `count`, `total_results`, `results`, ...).
+Pass the `next_cursor` of one response as `cursor` of the next until `next_page_results` is false (`prev_cursor` walks back
+the same way). An invalid `cursor` or `per_page` is 400 `{"detail": ...}`, and so is a cursor made for another `order_by`.
 
-- **Stable order.** Every ordering ends with `id`, so rows that tie on the ordering field (equal `updated_at`, equal `name`, ...)
-  keep one fixed order and a walk across pages never skips or repeats a row (while the data does not change).
+- **Keyset cursor (PLN-104).** The cursor is opaque (`k1.` + base64url json, `apps/api/plane/utils/page_cursor.py`) and
+  carries the sort key of the last row of the page, not an offset. The next page is "the rows after that key" in the same
+  total order, so a walk never skips or repeats a page that did not change, whatever is created, edited or deleted meanwhile.
+  A page edited during the walk moves: it can show up once more later in the walk (upsert by `id`), and a deleted page simply
+  stops appearing. An offset cursor of the old form (`<per_page>:<page>:<is_prev>`, from a walk that spans the deploy) is still
+  accepted and paged the old way; every response hands out keyset cursors.
+- **Total order.** Every ordering is `order_by`, then `-created_at` for `name` and `sort_order` (they tie often), then `id` in
+  the direction of `order_by`, so rows that tie on the ordering field keep one fixed order.
 - **`updated_after`** (ISO 8601 date-time). Keeps pages whose `updated_at` is **greater than or equal to** the value
   (inclusive). Without `order_by` the list is ordered by `(updated_at, id)` ascending, oldest change first. An explicit
   `order_by` wins. Forms: `2026-03-01T12:00:00Z`, `2026-03-01T12:00:00.123456+00:00` (url-encode `+` as `%2B`, or use `Z`),
@@ -41,16 +47,19 @@ Pass the `next_cursor` of one response as `cursor` of the next until `next_page_
 Recommended agent loop (incremental sync, safe while pages are being edited):
 
 1. Keep `cursor_ts`, the newest `updated_at` already synced (omit `updated_after` on the very first run).
-2. `GET pages/?updated_after=<cursor_ts>&per_page=100`, upsert every result by `id`.
-3. Set `cursor_ts` to the largest `updated_at` in the response and repeat from step 2 **without** a cursor, until a response
-   returns only rows you already hold (the boundary rows repeat because the filter is inclusive) and `next_page_results` is false.
-4. If one response is full of rows that all share the same `updated_at` and `next_page_results` is true, more than a page of
-   rows tie on that instant: follow `next_cursor` (same `updated_after`) until the timestamp advances, then go back to step 3.
+2. `GET pages/?updated_after=<cursor_ts>&per_page=100`, then follow `next_cursor` until `next_page_results` is false, upserting
+   every result by `id`.
+3. Store the largest `updated_at` seen as the new `cursor_ts` for the next run.
 
-Why not just follow `next_cursor` for the whole walk: the cursor is an offset into the ordered list. A page you already
-fetched and then edit moves to the end of the list, which shifts the rows behind it up by one, so the first row of the next
-page can be skipped. Restarting from the newest `updated_at` (step 3) makes each request independent of any offset, so
-nothing is skipped; only the tie case in step 4 relies on the offset, and only matters if a page is edited at that moment.
+The old workaround (restart from the newest `updated_at` after every page, because the offset cursor skipped a row whenever
+an already fetched page was edited) is no longer needed; it still works.
+
+Index (PLN-104, assessed with EXPLAIN ANALYZE on PostgreSQL 18, scratch data with the Django indexes of pages, project_pages
+and projects: 150000 pages in one workspace, one project with 50000 pages and 500 with 200): a keyset page of 100 in the
+middle of the 50000-page project by `(updated_at, id)` takes about 90 ms without an extra index and about 80 ms with an index
+on `pages (updated_at, id)`; the planner then walks that index across every project and filters the rows of other projects.
+A 200-page project takes about 1 ms either way (project_pages.project_id index, then a small sort). The index is not
+justified, so no migration was added. Revisit only if a single project grows far beyond 50000 pages.
 
 ## MCP client contract (open item)
 

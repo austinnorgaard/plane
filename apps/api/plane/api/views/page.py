@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from datetime import date, timezone as dt_timezone
 
 # Django imports
@@ -43,7 +44,6 @@ from plane.bgtasks.page_version_task import track_page_version
 from plane.db.models import Page, Project, ProjectMember, ProjectPage, UserFavorite
 from plane.utils import live_pages
 from plane.utils.openapi import (
-    CURSOR_PARAMETER,
     EXTERNAL_ID_PARAMETER,
     EXTERNAL_SOURCE_PARAMETER,
     PER_PAGE_PARAMETER,
@@ -55,6 +55,7 @@ from plane.utils.openapi.pages import (
     PAGE_BAD_REQUEST_RESPONSE_DESCRIPTION,
     PAGE_CONFLICT_CREATE_RESPONSE,
     PAGE_CONFLICT_UPDATE_RESPONSE,
+    PAGE_CURSOR_PARAMETER,
     PAGE_ID_PARAMETER,
     PAGE_LIST_BAD_REQUEST_RESPONSE_DESCRIPTION,
     PAGE_LIST_VALIDATION_EXAMPLES,
@@ -66,10 +67,14 @@ from plane.utils.openapi.pages import (
     PAGE_VALIDATION_EXAMPLES,
 )
 from plane.utils.order_queryset import PAGE_ORDER_BY_ALLOWLIST, sanitize_order_by
+from plane.utils.page_cursor import ordering_expressions, ordering_keys, paginate_keyset
 
 from .base import BaseAPIView
 
 logger = logging.getLogger("plane.api")
+
+# the stock offset cursor, "<per_page>:<page>:<is_prev>"
+_OFFSET_CURSOR = re.compile(r"^\d+:\d+:[01]$")
 
 OPEN_IN_EDITOR = {"error": "page is open in an editor; retry later"}
 LIVE_UNAVAILABLE = {"error": "live service unavailable, page not updated"}
@@ -274,7 +279,10 @@ class PageListCreateAPIEndpoint(PageBaseAPIEndpoint):
         description=(
             "List the pages of a project that the caller can see, without the html body. "
             "Archived pages are returned only with archived=true. Results are cursor paginated and the order "
-            "is total: ties on the ordering field are broken by id, so paging never skips or repeats a row. "
+            "is total: ties on the ordering field are broken by id. The cursor is a keyset cursor (opaque, "
+            "pass next_cursor or prev_cursor back unchanged): it carries the sort key of the last row, so a "
+            "walk never skips a page that did not change, even while other pages are created, edited or "
+            "deleted. A page edited during the walk can appear twice; upsert by id. "
             "updated_after keeps pages whose updated_at is greater than or equal to the value (inclusive); "
             "without order_by it lists them oldest change first, by (updated_at, id)."
         ),
@@ -285,7 +293,7 @@ class PageListCreateAPIEndpoint(PageBaseAPIEndpoint):
             EXTERNAL_SOURCE_PARAMETER,
             PAGE_UPDATED_AFTER_PARAMETER,
             PAGE_ORDER_BY_PARAMETER,
-            CURSOR_PARAMETER,
+            PAGE_CURSOR_PARAMETER,
             PER_PAGE_PARAMETER,
         ],
         responses={
@@ -319,16 +327,28 @@ class PageListCreateAPIEndpoint(PageBaseAPIEndpoint):
             queryset = queryset.filter(updated_at__gte=parse_updated_after(updated_after))
             default_order = "updated_at"
         order_by = sanitize_order_by(request.GET.get("order_by"), PAGE_ORDER_BY_ALLOWLIST, default=default_order)
-        # id is the last key, in the direction of the primary key, so the order is total.
-        tie_breaker = "-id" if order_by.startswith("-") else "id"
-        ordering = [order_by]
-        if order_by.lstrip("-") not in ("created_at", "updated_at"):
-            ordering.append("-created_at")
-        ordering.append(tie_breaker)
-        return self.paginate(
-            request=request,
-            queryset=queryset.order_by(*ordering),
-            on_results=lambda pages: PageListAPISerializer(pages, many=True).data,
+        per_page = self.get_per_page(request, 1000, 1000)
+        cursor = request.GET.get("cursor")
+        if cursor and _OFFSET_CURSOR.match(cursor):
+            # PLN-104: an offset cursor issued before the keyset cursor (a walk that spans the deploy)
+            # still works the old way; every response now hands out keyset cursors.
+            keys = ordering_keys(order_by)
+            return self.paginate(
+                request=request,
+                queryset=queryset.order_by(*ordering_expressions(keys)),
+                on_results=lambda pages: PageListAPISerializer(pages, many=True).data,
+            )
+        # PLN-104: keyset cursor; the order is total (order_by, then -created_at for the fields that tie
+        # often, then id in the direction of order_by).
+        return Response(
+            paginate_keyset(
+                queryset,
+                order_by,
+                per_page,
+                cursor,
+                lambda pages: PageListAPISerializer(pages, many=True).data,
+            ),
+            status=status.HTTP_200_OK,
         )
 
     @page_docs(
