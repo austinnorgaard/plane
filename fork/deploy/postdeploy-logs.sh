@@ -18,12 +18,15 @@
 #   http_5xx              access-log lines with a 5xx status
 #   http_503              access-log lines with status 503 (also part of http_5xx)
 #   page_patch_409        PATCH on a pages URL answered 409
-#     unknown_409         lower bound of those where the live presence check failed
-#                         (the api logs one warning per failed check); the rest is
+#     unknown_409         lower bound of those where the live presence check or the
+#                         write lock call failed (the api logs one warning per failed
+#                         call); the rest is
 #                         reported as loaded_409 (upper bound: the api also answers
 #                         409 for a bad presence answer without logging)
 #   page_patch_503        PATCH on a pages URL answered 503
-#   opened_during_update  "page ... was opened in an editor during an api update" warnings
+#   opened_during_update  "live write lock for page ... expired before it was released"
+#                         warnings (PLN-98; before it, "page ... was opened in an editor
+#                         during an api update")
 #   tracebacks            Python tracebacks
 #   error_log_lines       other ERROR or CRITICAL log lines (api, worker, beat-worker)
 #   live_errors           live lines that report an error, fatal, unhandled or uncaught problem
@@ -239,8 +242,10 @@ svc == "" || svc == "END" { next }
     if (line ~ /^[ \t]/ || line == "" || line ~ /^(During handling|The above exception)/) next
     cand("traceback: " line); intb = 0; next
   }
-  if (index(line, "live presence check failed")) unk++
-  if (index(line, "opened in an editor during an api update")) opened++
+  if (index(line, "live presence check failed") || index(line, "live write lock failed")) unk++
+  # PLN-98: the write lock replaced the post-commit "opened in an editor during an api update" warning;
+  # a lock that expired before its release is the remaining lost-update window (old builds: old text)
+  if (index(line, "expired before it was released") || index(line, "opened in an editor during an api update")) opened++
   if (!isacc && lz ~ /rate.?limit|overflow/) rl++
   if (!isacc && svc != "live" && line ~ /(^|[ \[])(ERROR|CRITICAL)([] :\/]|$)/) { errlog++; cand(line) }
   if (svc == "live") {

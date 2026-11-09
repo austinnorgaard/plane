@@ -12,6 +12,8 @@ Files in this directory
                                 restart only the changed services; also rollback and status
   rollback.sh                   one command per rollback level: l1, l2, forward (--dry-run prints
                                 the commands; see RUNBOOK.md section 10)
+  prune-images.sh               image retention for the GHCR fork images (PLN-64): dry run by default,
+                                --apply removes; keeps the current and rollback tags (RUNBOOK.md section 11)
   postdeploy-logs.sh            post-deploy log summary of api, worker, beat-worker and live: counts,
                                 top redacted error lines, exit 0 clean / 1 over threshold / 2 usage /
                                 3 remote failure (see RUNBOOK.md section 7a)
