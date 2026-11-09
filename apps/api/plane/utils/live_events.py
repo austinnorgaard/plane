@@ -62,7 +62,7 @@ SOCKET_TIMEOUT_SECONDS = 1
 ALL_IDS = "*"
 # Kinds of project metadata (state and label definitions; PLN-36: cycle and module definitions, as kinds of
 # their own so they do not mix with the "cycle"/"module" membership kinds), published by publish_metadata_event.
-METADATA_KINDS = frozenset({"state", "label", "cycle_definition", "module_definition"})
+METADATA_KINDS = frozenset({"state", "label", "cycle_definition", "module_definition", "estimate"})  # PLN-120: estimate
 
 _UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 

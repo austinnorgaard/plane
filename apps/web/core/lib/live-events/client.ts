@@ -39,7 +39,8 @@ export type TLiveKind =
   | "state"
   | "label"
   | "cycle_definition"
-  | "module_definition";
+  | "module_definition"
+  | "estimate";
 export type TLiveVerb = "created" | "updated" | "deleted" | "removed" | "archived" | "unarchived" | "restored";
 
 export type TLiveItem = { issue_id: string; kinds: string[]; verbs: string[]; actor_ids: string[] };

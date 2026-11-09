@@ -224,6 +224,8 @@ export interface ILiveApplierDeps {
    */
   isKnownLabel?: (labelId: string) => boolean;
   isKnownState?: (stateId: string) => boolean;
+  /** PLN-120: the same for estimate points */
+  isKnownEstimatePoint?: (pointId: string) => boolean;
   /**
    * PLN-37: the workspace view list (one applier per project of the view feeds it) and its refetch, which
    * the workspace hook shares between those appliers so a burst over several projects costs one request
@@ -409,14 +411,16 @@ export class LiveWorkItemsApplier {
    * label or state id the stores do not know.
    */
   private noteUnknownMetadata(issues: (TIssue | undefined)[]) {
-    const { isKnownLabel, isKnownState, projectId } = this.deps;
-    if (!isKnownLabel && !isKnownState) return;
+    const { isKnownLabel, isKnownState, isKnownEstimatePoint, projectId } = this.deps;
+    if (!isKnownLabel && !isKnownState && !isKnownEstimatePoint) return;
     let found = false;
     for (const issue of issues) {
       if (!issue || issue.project_id !== projectId) continue;
       const unknown: string[] = [];
       if (isKnownLabel) for (const id of issue.label_ids ?? []) if (!isKnownLabel(id)) unknown.push(id);
       if (isKnownState && issue.state_id && !isKnownState(issue.state_id)) unknown.push(issue.state_id);
+      if (isKnownEstimatePoint && issue.estimate_point && !isKnownEstimatePoint(issue.estimate_point))
+        unknown.push(issue.estimate_point);
       for (const id of unknown) {
         if (this.unknownMetadataTried.has(id)) continue;
         this.unknownMetadataTried.add(id);

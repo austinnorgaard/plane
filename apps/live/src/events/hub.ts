@@ -110,6 +110,8 @@ export const EVENT_KINDS = [
   // fork (PLN-36): cycle and module definitions (metadata, published as "*"), apart from the membership kinds
   "cycle_definition",
   "module_definition",
+  // fork (PLN-120): estimate definitions (an estimate and its points), metadata like the above
+  "estimate",
 ] as const;
 export const EVENT_VERBS = ["created", "updated", "deleted", "removed", "archived", "unarchived", "restored"] as const;
 

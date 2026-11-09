@@ -21,6 +21,7 @@ import { ModuleService } from "@/services/module.service";
 // types
 import type { ICycleStore } from "@/store/cycle.store";
 import type { IModuleStore } from "@/store/module.store";
+import type { IProjectEstimateStore } from "@/store/estimates/project-estimate.store";
 
 const cycleService = new CycleService();
 const moduleService = new ModuleService();
@@ -55,5 +56,23 @@ export const refreshCycleAndModuleDefinitions = async (
       if (module.project_id === projectId && !module.archived_at && !moduleIds.has(id)) delete moduleMap[id];
     }
     for (const module of modules) moduleMap[module.id] = { ...moduleMap[module.id], ...module };
+  });
+};
+
+/**
+ * PLN-120: refreshes a project's estimate definitions (the estimate and its points) after a live metadata
+ * event. getProjectEstimates sets its loader only on a project's first load, so a refresh does not flash; it
+ * only upserts, so this project's estimates the server no longer returns (deleted) are dropped here.
+ */
+export const refreshEstimateDefinitions = async (
+  stores: { projectEstimate: IProjectEstimateStore },
+  workspaceSlug: string,
+  projectId: string
+) => {
+  const store = stores.projectEstimate;
+  const estimates = await store.getProjectEstimates(workspaceSlug, projectId, "mutation-loader");
+  runInAction(() => {
+    const ids = new Set((estimates ?? []).map((estimate) => estimate.id));
+    for (const id of store.estimateIdsByProjectId(projectId) ?? []) if (!ids.has(id)) delete store.estimates[id];
   });
 };
