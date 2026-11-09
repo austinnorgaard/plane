@@ -46,22 +46,37 @@ export type OriginInput = {
   origin: string | string[] | undefined;
   host: string | string[] | undefined;
   forwardedHost: string | string[] | undefined;
+  forwardedProto?: string | string[] | undefined;
+};
+
+/** The scheme the browser used, as told by the proxy: X-Forwarded-Proto, else plain http. */
+const requestScheme = (forwardedProto: string | string[] | undefined): "http:" | "https:" | null => {
+  const proto = firstHeaderValue(forwardedProto);
+  if (!proto) return "http:";
+  if (proto === "https" || proto === "wss") return "https:";
+  if (proto === "http" || proto === "ws") return "http:";
+  return null;
 };
 
 /**
- * Accept when the Origin is in the allowlist, or when its host[:port] equals the first
- * X-Forwarded-Host value (Host when that header is absent). The scheme is not compared
- * for the host match because a tunnel may hand the proxy plain http while the browser's
- * Origin is https. A missing Origin or the literal "null" is always rejected.
+ * Accept when the Origin is in the allowlist. With `hostFallback` (PLN-96: opt-in through
+ * LIVE_EVENTS_ORIGIN_HOST_FALLBACK=1) also accept when the Origin's host[:port] equals the first
+ * X-Forwarded-Host value (Host when that header is absent) AND its scheme equals the request
+ * scheme: the first X-Forwarded-Proto value (a tunnel that hands the proxy plain http still sends
+ * X-Forwarded-Proto: https), plain http when that header is absent. A missing Origin or the
+ * literal "null" is always rejected.
  */
-export const isOriginAllowed = (input: OriginInput, allowlist: Set<string>): boolean => {
+export const isOriginAllowed = (input: OriginInput, allowlist: Set<string>, hostFallback = false): boolean => {
   const rawOrigin = Array.isArray(input.origin) ? input.origin[0] : input.origin;
   // the literal "null" is not a URL, so normalizeOrigin rejects it below
   if (!rawOrigin) return false;
   const normalized = normalizeOrigin(rawOrigin);
   if (!normalized) return false;
   if (allowlist.has(normalized)) return true;
+  if (!hostFallback) return false;
 
+  const scheme = requestScheme(input.forwardedProto);
+  if (!scheme || !normalized.startsWith(`${scheme}//`)) return false;
   const requestHost = firstHeaderValue(input.forwardedHost) || firstHeaderValue(input.host);
   if (!requestHost) return false;
   const originHost = normalized.replace(/^https?:\/\//, "");

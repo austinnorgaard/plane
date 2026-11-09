@@ -786,6 +786,14 @@ class BulkDeleteIssuesEndpoint(BaseAPIView):
         total_issues = len(issues)
         # Capture the ids before the rows are gone
         deleted_issue_ids = [str(i) for i in issues.values_list("id", flat=True)]
+        # fork (PLN-93): the parents of deleted sub-issues lose a sub-issue; captured in one query before the
+        # delete and published as updated (not deleted), so other viewers refresh their sub-issue lists and counts
+        deleted_set = set(deleted_issue_ids)
+        parent_ids = [
+            str(pid)
+            for pid in issues.exclude(parent_id__isnull=True).values_list("parent_id", flat=True).distinct()
+            if str(pid) not in deleted_set
+        ]
 
         # First, delete all related cycle issues
         CycleIssue.objects.filter(issue__in=issues).delete()
@@ -797,6 +805,8 @@ class BulkDeleteIssuesEndpoint(BaseAPIView):
         issues.delete()
 
         publish_work_item_event(project_id, deleted_issue_ids, "issue", "deleted", request.user.id)
+        if parent_ids:
+            publish_work_item_event(project_id, parent_ids, "issue", "updated", request.user.id)  # fork (PLN-93)
 
         return Response(
             {"message": f"{total_issues} issues were deleted"},

@@ -10,18 +10,25 @@ import { clone } from "lodash-es";
 import type { TIssue } from "@plane/types";
 // services
 import { IssueService } from "@/services/issue/issue.service";
+import { InboxIssueService } from "@/services/inbox";
 // local imports
 import type { TLiveEvent, TLiveItem } from "./client";
 import type { IProjectIssues } from "@/store/issue/project";
 import type { ICycleIssues } from "@/store/issue/cycle";
 import type { IModuleIssues } from "@/store/issue/module";
 import type { IProjectViewIssues } from "@/store/issue/project-views";
+import type { IArchivedIssues } from "@/store/issue/archived";
+import type { IProjectInboxStore } from "@/store/inbox/project-inbox.store";
+import type { IWorkspaceIssues } from "@/store/issue/workspace";
 import type { IIssueDetail } from "@/store/issue/issue-details/root.store";
 import type { IIssueStore } from "@/store/issue/issue.store";
 import { EIssueGroupedAction } from "@/store/issue/helpers/base-issues.store";
 import type { IBaseIssuesStore } from "@/store/issue/helpers/base-issues.store";
 // fork (PLN-110 fix): the user's own in-flight edits win over live reads that started before them
 import { localEdits } from "@/fork/live/local-edits";
+// PLN-38: filtered lists and saved views evaluate their filter on the fetched work item
+import { compileFilter } from "./filter-match";
+import type { TFilterMatcher } from "./filter-match";
 
 export const APPLY_DEBOUNCE_MS = 300;
 export const APPLY_DEBOUNCE_MAX_MS = 1000;
@@ -66,14 +73,17 @@ export const isIssueInScope = (
  * - in scope and not listed yet: add (local-create semantics, bumps counts)
  * - in scope and listed: update (regroup / resort from the before state)
  * - out of scope and listed: remove
+ * PLN-38: with `matches` (the list's filter), "in scope" also requires the work item to match it.
  */
 export const decideStoreAction = (params: {
   scope: TListScope;
   projectId: string;
-  issue: Pick<TIssue, "project_id" | "cycle_id" | "module_ids">;
+  issue: TIssue;
   inList: boolean;
+  matches?: TFilterMatcher;
 }): TStoreAction => {
-  const inScope = isIssueInScope(params.scope, params.projectId, params.issue);
+  const inScope =
+    isIssueInScope(params.scope, params.projectId, params.issue) && (!params.matches || params.matches(params.issue));
   if (inScope) return params.inList ? "update" : "add";
   return params.inList ? "remove" : "none";
 };
@@ -159,7 +169,24 @@ export const hasCommentChange = (keys: Iterable<string>): boolean => {
 // applier
 // ---------------------------------------------------------------------------
 
-export type TLiveRoute = { cycleId?: string; moduleId?: string; viewId?: string };
+/**
+ * PLN-77: `archived` is the archived work items route (projects/<id>/archives/issues).
+ * PLN-76: `intake` is the intake (triage) route (projects/<id>/intake).
+ */
+export type TLiveRoute = {
+  cycleId?: string;
+  moduleId?: string;
+  viewId?: string;
+  archived?: boolean;
+  intake?: boolean;
+  /** PLN-37: a workspace view (all-issues, assigned, created, subscribed, or a saved workspace view id) */
+  globalViewId?: string;
+};
+
+/** PLN-76: an intake list refresh (new intake items, full refreshes) waits this long, merged across a burst */
+export const INTAKE_LIST_DEBOUNCE_MS = 1000;
+
+const isIntakeKey = (key: string) => key.startsWith("intake:");
 
 export interface ILiveApplierDeps {
   workspaceSlug: string;
@@ -171,9 +198,27 @@ export interface ILiveApplierDeps {
   cycleIssues: ICycleIssues;
   moduleIssues: IModuleIssues;
   viewIssues: IProjectViewIssues;
+  /** PLN-77 */
+  archivedIssues: IArchivedIssues;
+  /** PLN-76: the intake (triage) list */
+  projectInbox: IProjectInboxStore;
+  /** PLN-38: the group of a state, for state_group filters */
+  getStateGroup: (stateId: string) => string | undefined;
+  /**
+   * PLN-37: the workspace view list (one applier per project of the view feeds it) and its refetch, which
+   * the workspace hook shares between those appliers so a burst over several projects costs one request
+   */
+  workspace?: {
+    issues: IWorkspaceIssues;
+    refetch: () => Promise<unknown>;
+    /** the view's stored rich filter */
+    getRichFilters: () => unknown;
+  };
   getFilterExpression: (store: "project" | "cycle" | "module" | "view") => unknown;
   issueDetail: IIssueDetail;
   onIssueMissingFromPeek: () => void;
+  /** PLN-78: the work item shown by the full-page detail route (browse/[workItem]), if that route is open */
+  getPageIssueId?: () => string | undefined;
   /** Refetches the project's state and label definitions (metadata events and full refreshes). */
   refreshProjectMetadata: () => Promise<unknown>;
 }
@@ -182,11 +227,28 @@ type TListTarget = {
   store: IBaseIssuesStore;
   scope: TListScope;
   coarse: boolean;
+  /** PLN-38: the list's filter, evaluated on each fetched work item (absent for an unfiltered list) */
+  matches?: TFilterMatcher;
   refetch: () => Promise<unknown>;
+};
+
+/**
+ * PLN-38: how a list with this filter takes live changes. Unfiltered: per work item. Filtered with a filter
+ * the client can evaluate: per work item, adding or removing it by the filter. Otherwise: a full refetch.
+ */
+const filterMode = (
+  richFilters: unknown,
+  getStateGroup: (stateId: string) => string | undefined
+): { coarse: boolean; matches?: TFilterMatcher } => {
+  if (!isFilterExpressionActive(richFilters)) return { coarse: false };
+  const matches = compileFilter(richFilters, getStateGroup);
+  return matches ? { coarse: false, matches } : { coarse: true };
 };
 
 export class LiveWorkItemsApplier {
   private issueService = new IssueService();
+  private inboxIssueService = new InboxIssueService();
+  private intakeListTimer: ReturnType<typeof setTimeout> | undefined;
   private pending = new Map<string, Set<string>>();
   private debounceTimer: ReturnType<typeof setTimeout> | undefined;
   private debounceStartedAt = 0;
@@ -208,6 +270,7 @@ export class LiveWorkItemsApplier {
     this.disposed = true;
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     if (this.coarseTimer) clearTimeout(this.coarseTimer);
+    if (this.intakeListTimer) clearTimeout(this.intakeListTimer);
     this.ownActorTimers.forEach((timer) => clearTimeout(timer));
     this.deferTimers.forEach((timer) => clearTimeout(timer));
     this.peekTrailingTimers.forEach((timer) => clearTimeout(timer));
@@ -222,14 +285,15 @@ export class LiveWorkItemsApplier {
     if (this.disposed || event.project_id !== this.deps.projectId) return;
 
     if (event.type === "revoked") {
-      // access lost: close an open peek, the lists follow through the coarse refresh
-      if (this.getOpenIssueIds().length > 0) this.closePeek();
+      // access lost: close an open peek (and tell a full-page detail), the lists follow through the coarse refresh
+      this.closeOpenIssues(this.getOpenIssueIds());
       this.scheduleCoarse(true);
       return;
     }
 
     if (event.type === "resync" || event.full_refresh) {
       this.scheduleCoarse(true);
+      this.scheduleIntakeList(); // PLN-76
       // an open peek is not part of any list, refresh it too
       const peeked = this.getOpenIssueIds();
       if (peeked.length > 0) this.enqueue(peeked, [changeKey("issue", "updated")]);
@@ -317,6 +381,60 @@ export class LiveWorkItemsApplier {
     }, COARSE_RETRY_MS);
   }
 
+  // ---- PLN-76: intake (triage) list ----
+
+  /** The intake store holds this project's list (it is loaded only while the intake route is or was open). */
+  private intakeOnScreen(): boolean {
+    return !!this.deps.getRoute().intake && this.deps.projectInbox.currentInboxProjectId === this.deps.projectId;
+  }
+
+  /**
+   * Known intake items are read one by one (status, snooze, duplicate, the work item fields) and merged into
+   * the store, so they move between the open and closed tabs through the store's own filters. An event for
+   * an intake item the list does not hold yet (a new submission) refreshes the list instead.
+   */
+  private async refreshIntake(batch: Map<string, Set<string>>) {
+    if (!this.intakeOnScreen()) return;
+    const { workspaceSlug, projectId, projectInbox } = this.deps;
+    const known: string[] = [];
+    let listNeeded = false;
+    for (const [id, keys] of batch) {
+      if (projectInbox.inboxIssues[id]) known.push(id);
+      else if ([...keys].some(isIntakeKey)) listNeeded = true;
+    }
+    if (listNeeded) this.scheduleIntakeList();
+    await Promise.all(
+      known.map(async (id) => {
+        try {
+          const inboxIssue = await this.inboxIssueService.retrieve(workspaceSlug, projectId, id);
+          if (this.disposed || !this.intakeOnScreen()) return;
+          runInAction(() => projectInbox.createOrUpdateInboxIssue([inboxIssue], workspaceSlug, projectId));
+        } catch (error) {
+          if (!isNotFoundError(error)) throw error;
+          // deleted, or no longer an intake item: it leaves the list
+          if (this.disposed || !this.intakeOnScreen()) return;
+          runInAction(() => {
+            projectInbox.inboxIssueIds = projectInbox.inboxIssueIds.filter((value) => value !== id);
+            delete projectInbox.inboxIssues[id];
+          });
+        }
+      })
+    );
+  }
+
+  /** Refetches the first page of the intake list in place ("mutation-loading" shows no loader). */
+  private scheduleIntakeList() {
+    if (this.intakeListTimer || !this.intakeOnScreen()) return;
+    this.intakeListTimer = setTimeout(() => {
+      this.intakeListTimer = undefined;
+      if (this.disposed || !this.intakeOnScreen()) return;
+      const { workspaceSlug, projectId, projectInbox } = this.deps;
+      projectInbox
+        .fetchInboxIssues(workspaceSlug, projectId, "mutation-loading")
+        .catch((error: unknown) => console.error("live intake list refresh failed", error));
+    }, INTAKE_LIST_DEBOUNCE_MS);
+  }
+
   /** fork (PLN-110 fix): re-enqueues work items whose live read lost to a newer local edit. */
   private deferLocal(ids: string[], batch: Map<string, Set<string>>) {
     if (ids.length === 0) return;
@@ -327,10 +445,33 @@ export class LiveWorkItemsApplier {
     this.deferTimers.add(timer);
   }
 
+  /** The work items open in a detail view: the peek, and (PLN-78) the full-page detail route. */
   private getOpenIssueIds(): string[] {
+    const ids: string[] = [];
     const peek = this.deps.issueDetail.peekIssue;
-    if (!peek || peek.projectId !== this.deps.projectId) return [];
-    return [peek.issueId];
+    if (peek && peek.projectId === this.deps.projectId) ids.push(peek.issueId);
+    const pageIssueId = this.deps.getPageIssueId?.();
+    if (pageIssueId && !ids.includes(pageIssueId)) ids.push(pageIssueId);
+    return ids;
+  }
+
+  /**
+   * PLN-37: a workspace view's filter is its rich filter plus, for the built-in views, the condition the
+   * store adds to the request (getFilterConditionBasedOnViews): assigned = assignee is me, created = created by
+   * me. "subscribed" needs subscriber data the work item does not carry, so that view refetches as a whole.
+   */
+  private workspaceFilterMode(viewId: string, richFilters: unknown): { coarse: boolean; matches?: TFilterMatcher } {
+    if (viewId === "subscribed") return { coarse: true };
+    const mode = filterMode(richFilters, this.deps.getStateGroup);
+    if (mode.coarse || (viewId !== "assigned" && viewId !== "created")) return mode;
+    const userId = this.deps.getCurrentUserId();
+    if (!userId) return { coarse: true };
+    const fixed: TFilterMatcher =
+      viewId === "assigned"
+        ? (issue) => (issue.assignee_ids ?? []).includes(userId)
+        : (issue) => issue.created_by === userId;
+    const rich = mode.matches;
+    return { coarse: false, matches: rich ? (issue) => fixed(issue) && rich(issue) : fixed };
   }
 
   /** The list stores that are on screen for the current route. */
@@ -338,13 +479,32 @@ export class LiveWorkItemsApplier {
     const { workspaceSlug, projectId } = this.deps;
     const route = this.deps.getRoute();
     const targets: TListTarget[] = [];
-    if (route.cycleId) {
+    if (route.globalViewId && this.deps.workspace) {
+      // PLN-37: the workspace view holds work items of many projects; this applier handles its own project's
+      const workspace = this.deps.workspace;
+      targets.push({
+        store: workspace.issues,
+        scope: { kind: "project" },
+        ...this.workspaceFilterMode(route.globalViewId, workspace.getRichFilters()),
+        refetch: workspace.refetch,
+      });
+    } else if (route.archived) {
+      // PLN-77: the per-item read (retrieveIssues) leaves archived work items out, so the archived list is
+      // always refreshed as a whole (in place, after the user's own edits have settled; see liveRefetch)
+      const store = this.deps.archivedIssues;
+      targets.push({
+        store,
+        scope: { kind: "project" },
+        coarse: true,
+        refetch: () => store.fetchIssuesWithExistingPagination(workspaceSlug, projectId, "mutation"),
+      });
+    } else if (route.cycleId) {
       const cycleId = route.cycleId;
       const store = this.deps.cycleIssues;
       targets.push({
         store,
         scope: { kind: "cycle", cycleId },
-        coarse: isFilterExpressionActive(this.deps.getFilterExpression("cycle")),
+        ...filterMode(this.deps.getFilterExpression("cycle"), this.deps.getStateGroup),
         refetch: () => store.fetchIssuesWithExistingPagination(workspaceSlug, projectId, "mutation", cycleId),
       });
     } else if (route.moduleId) {
@@ -353,7 +513,7 @@ export class LiveWorkItemsApplier {
       targets.push({
         store,
         scope: { kind: "module", moduleId },
-        coarse: isFilterExpressionActive(this.deps.getFilterExpression("module")),
+        ...filterMode(this.deps.getFilterExpression("module"), this.deps.getStateGroup),
         refetch: () => store.fetchIssuesWithExistingPagination(workspaceSlug, projectId, "mutation", moduleId),
       });
     } else if (route.viewId) {
@@ -362,8 +522,8 @@ export class LiveWorkItemsApplier {
       targets.push({
         store,
         scope: { kind: "project" },
-        // a saved view is always a filtered list
-        coarse: true,
+        // a saved view is a filtered list: per work item when its filter can be evaluated (PLN-38)
+        ...filterMode(this.deps.getFilterExpression("view"), this.deps.getStateGroup),
         refetch: () => store.fetchIssuesWithExistingPagination(workspaceSlug, projectId, viewId, "mutation"),
       });
     } else {
@@ -371,7 +531,7 @@ export class LiveWorkItemsApplier {
       targets.push({
         store,
         scope: { kind: "project" },
-        coarse: isFilterExpressionActive(this.deps.getFilterExpression("project")),
+        ...filterMode(this.deps.getFilterExpression("project"), this.deps.getStateGroup),
         refetch: () => store.fetchIssuesWithExistingPagination(workspaceSlug, projectId, "mutation"),
       });
     }
@@ -390,6 +550,10 @@ export class LiveWorkItemsApplier {
 
     const fetched = new Map<string, TIssue>();
     const missing: string[] = [];
+    // PLN-76: the intake list is updated from its own endpoint, alongside the work item lists
+    const intake = this.refreshIntake(batch).catch((error: unknown) =>
+      console.error("live intake refresh failed", error)
+    );
     try {
       const responses = await Promise.all(
         chunkIds([...batch.keys()]).map(async (chunk) => ({
@@ -450,6 +614,7 @@ export class LiveWorkItemsApplier {
               projectId,
               issue: after,
               inList: listContainsIssue(target.store.groupedIssueIds, id),
+              matches: target.matches,
             });
             if (action === "add") target.store.addIssueToList(id);
             else if (action === "update") target.store.updateIssueList(after, beforeState);
@@ -468,6 +633,7 @@ export class LiveWorkItemsApplier {
     );
 
     if (coarseNeeded) this.scheduleCoarse(false);
+    await intake;
     await this.refreshOpenIssues(batch, new Set(missing.filter((id) => hasIssueDeleted(batch.get(id) ?? []))));
   }
 
@@ -485,7 +651,7 @@ export class LiveWorkItemsApplier {
       }
       if (deleted.has(issueId)) {
         // deleted: never fetchIssue on it
-        this.closePeek();
+        this.closeOpenIssues([issueId]);
         continue;
       }
       refreshes.push(this.refreshIssueDetail(issueId, kinds));
@@ -493,8 +659,14 @@ export class LiveWorkItemsApplier {
     await Promise.all(refreshes);
   }
 
-  private closePeek() {
-    this.deps.issueDetail.setPeekIssue(undefined);
+  /**
+   * The work items are gone or no longer visible: close the peek if it shows one of them, and say so once.
+   * PLN-78: a full-page detail is not closed (it is a route); the toast tells the user.
+   */
+  private closeOpenIssues(issueIds: string[]) {
+    if (issueIds.length === 0) return;
+    const peek = this.deps.issueDetail.peekIssue;
+    if (peek && issueIds.includes(peek.issueId)) this.deps.issueDetail.setPeekIssue(undefined);
     this.deps.onIssueMissingFromPeek();
   }
 
@@ -528,7 +700,7 @@ export class LiveWorkItemsApplier {
     const { workspaceSlug, projectId, issueDetail } = this.deps;
     issueDetail.fetchIssue(workspaceSlug, projectId, issueId).catch((error: unknown) => {
       // gone or no longer visible: close the peek, anything else is transient
-      if (isNotFoundError(error) && this.getOpenIssueIds().includes(issueId)) this.closePeek();
+      if (isNotFoundError(error) && this.getOpenIssueIds().includes(issueId)) this.closeOpenIssues([issueId]);
       else console.error("live detail fetch failed", error);
     });
   }
