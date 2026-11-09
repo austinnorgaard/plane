@@ -22,6 +22,8 @@ import { env } from "@/env";
 // hocuspocus server
 import { HocusPocusServerManager } from "@/hocuspocus";
 import { drainCollaborationServer, withinShutdownDeadline } from "@/lib/drain-server";
+// pages API
+import { stopRebaseWorkers } from "@/pages-api/rebase-runner";
 // redis
 import { redisManager } from "@/redis";
 
@@ -127,6 +129,7 @@ export class Server {
         if (httpError) logger.error("SERVER: HTTP server close failed during shutdown:", httpError);
       }, SHUTDOWN_TIMEOUT_MS);
     } finally {
+      await stopRebaseWorkers();
       await redisManager.disconnect();
     }
     logger.info("SERVER: HTTP, collaboration, and Redis stopped after document persistence completed.");

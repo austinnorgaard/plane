@@ -143,6 +143,21 @@ SPECTACULAR_SETTINGS = {
         },
         # Core Project Management
         {
+            "name": "Pages",
+            "description": (
+                "**Project Pages**\n\n"
+                "List, create, bulk import, retrieve, update, archive and unarchive the pages of a project, "
+                "and read their saved versions. The endpoints are available only when the deployment sets "
+                "PAGES_API_ENABLED=1.\n\n"
+                "*Key Features:*\n"
+                "- Create pages with HTML content, nesting and external identifiers, one at a time or in bulk\n"
+                "- Update the name and HTML content of a page that is not open in an editor\n"
+                "- Archive and unarchive pages together with their descendants\n"
+                "- List with a keyset cursor and an updated_after filter for incremental sync\n\n"
+                "*Use Cases:* Syncing documentation from other systems, automated page updates."
+            ),
+        },
+        {
             "name": "Projects",
             "description": (
                 "**Project Management**\n\n"
@@ -272,5 +287,7 @@ SPECTACULAR_SETTINGS = {
     "ENUM_NAME_OVERRIDES": {
         "ModuleStatusEnum": "plane.db.models.module.ModuleStatus",
         "IntakeWorkItemStatusEnum": "plane.db.models.intake.IntakeIssueStatus",
+        "IssueCommentAccessEnum": "plane.utils.openapi.pages.COMMENT_ACCESS_CHOICES",
+        "PageAccessEnum": "plane.utils.openapi.pages.PAGE_ACCESS_CHOICES",
     },
 }

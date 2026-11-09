@@ -1,0 +1,893 @@
+# Copyright (c) 2023-present Plane Software, Inc. and contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+# See the LICENSE file for details.
+
+# Python imports
+import base64
+import hashlib
+import json
+import logging
+import os
+from datetime import date, timezone as dt_timezone
+
+# Django imports
+from django.conf import settings
+from django.core.exceptions import RequestDataTooBig
+from django.db import connection, transaction
+from django.db.models import Q, UUIDField, Value
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
+
+# Third party imports
+from drf_spectacular.utils import OpenApiResponse
+from rest_framework import status
+from rest_framework.exceptions import NotFound, ParseError
+from rest_framework.response import Response
+
+# Module imports
+from plane.api.serializers.page import (
+    PageAPISerializer,
+    PageBulkCreateAPISerializer,
+    PageBulkErrorAPISerializer,
+    PageBulkResultAPISerializer,
+    PageArchiveResultAPISerializer,
+    PageConflictAPISerializer,
+    PageCreateAPISerializer,
+    PageErrorAPISerializer,
+    PageListAPISerializer,
+    PageListErrorAPISerializer,
+    PageTooLargeAPISerializer,
+    PageUpdateAPISerializer,
+    PageValidationErrorAPISerializer,
+    PageVersionAPISerializer,
+    PageVersionDetailAPISerializer,
+)
+from plane.app.permissions import ROLE
+from plane.app.permissions.page import ProjectPagePermission
+from plane.app.serializers import PageBinaryUpdateSerializer
+from plane.bgtasks.page_transaction_task import page_transaction
+from plane.bgtasks.page_version_task import track_page_version
+from plane.db.models import Page, PageVersion, Project, ProjectMember, ProjectPage, UserFavorite
+from plane.utils import live_pages
+from plane.utils.openapi import (
+    EXTERNAL_ID_PARAMETER,
+    EXTERNAL_SOURCE_PARAMETER,
+    PER_PAGE_PARAMETER,
+    create_paginated_response,
+)
+from plane.utils.openapi.decorators import page_docs
+from plane.utils.openapi.pages import (
+    PAGE_ARCHIVED_PARAMETER,
+    PAGE_BAD_REQUEST_RESPONSE_DESCRIPTION,
+    PAGE_CONFLICT_CREATE_RESPONSE,
+    PAGE_CONFLICT_UPDATE_RESPONSE,
+    PAGE_CURSOR_PARAMETER,
+    PAGE_ID_PARAMETER,
+    PAGE_LIST_BAD_REQUEST_RESPONSE_DESCRIPTION,
+    PAGE_LIST_VALIDATION_EXAMPLES,
+    PAGE_LIVE_UNAVAILABLE_RESPONSE,
+    PAGE_ORDER_BY_PARAMETER,
+    PAGE_PARENT_ID_PARAMETER,
+    PAGE_TOO_LARGE_RESPONSE,
+    PAGE_UPDATED_AFTER_PARAMETER,
+    PAGE_VALIDATION_EXAMPLES,
+    PAGE_VERSION_ID_PARAMETER,
+)
+from plane.utils.order_queryset import PAGE_ORDER_BY_ALLOWLIST, sanitize_order_by
+from plane.utils.page_cursor import paginate_keyset
+
+from .base import BaseAPIView
+
+logger = logging.getLogger("plane.api")
+
+OPEN_IN_EDITOR = {"error": "page is open in an editor; retry later"}
+LIVE_UNAVAILABLE = {"error": "live service unavailable, page not updated"}
+PAGE_CHANGED = {"error": "page changed during the update; retry"}
+DUPLICATE_EXTERNAL = "Page with the same external id and external source already exists"
+PAGE_BUSY = {"error": "page is being updated by another request; retry"}
+
+
+def _pages_api_enabled():
+    return os.environ.get("PAGES_API_ENABLED") == "1"
+
+
+DEFAULT_MAX_HTML_BYTES = 262144
+
+
+def _max_html_bytes():
+    """Cap on description_html in bytes (PAGES_API_MAX_HTML_BYTES), read per call. The live service
+    converts the html on a rebase, and that cost grows faster than linearly with its size."""
+    try:
+        value = int(os.environ.get("PAGES_API_MAX_HTML_BYTES", ""))
+    except ValueError:
+        return DEFAULT_MAX_HTML_BYTES
+    return value if value > 0 else DEFAULT_MAX_HTML_BYTES
+
+
+def _get_retry_after_seconds():
+    """Get the Retry-After header value in seconds (PAGES_API_RETRY_AFTER_SECONDS), read per call.
+    Defaults to 60 seconds, minimum 1, maximum 3600."""
+    try:
+        value = int(os.environ.get("PAGES_API_RETRY_AFTER_SECONDS", ""))
+    except ValueError:
+        return 60
+    if value < 1:
+        return 60
+    if value > 3600:
+        return 3600
+    return value
+
+
+def parse_updated_after(raw):
+    """Parse the updated_after query value (ISO 8601) into an aware UTC datetime.
+
+    A value without a UTC offset is read as UTC. Anything else that is not a valid date-time,
+    including an empty value, is a 400 with the usual {"detail": ...} body."""
+    invalid = ParseError(detail="Invalid updated_after parameter. Use an ISO 8601 date-time.")
+    # A '+' offset must be url-encoded (%2B); a literal '+' reaches the server as a space and is rejected.
+    value = raw.strip() if raw is not None else ""
+    if not value:
+        raise invalid
+    try:
+        parsed = parse_datetime(value)
+        if parsed is None:
+            # A bare date (2026-01-31) means midnight UTC.
+            parsed = parse_datetime(f"{value}T00:00:00") if len(value) == 10 else None
+        if parsed is None:
+            raise invalid
+        if timezone.is_naive(parsed):
+            parsed = parsed.replace(tzinfo=dt_timezone.utc)
+        return parsed.astimezone(dt_timezone.utc)
+    except (ValueError, OverflowError):
+        raise invalid
+
+
+def _has_binary(page):
+    return bool(page.description_binary)
+
+
+def _external_lock_key(project_id, external_source, external_id):
+    digest = hashlib.sha256(f"{project_id}:{external_source}:{external_id}".encode()).digest()
+    return int.from_bytes(digest[:8], "big", signed=True)
+
+
+def _request_body_size(request):
+    """The body size in bytes: Content-Length when present, otherwise the size of the spooled body.
+    0 when neither is known (a WSGI request without Content-Length has an empty body in Django)."""
+    raw = getattr(request, "_request", request)
+    try:
+        return int(raw.META.get("CONTENT_LENGTH") or "")
+    except ValueError:
+        pass
+    stream = getattr(raw, "_stream", None)
+    try:
+        position = stream.tell()
+        stream.seek(0, os.SEEK_END)
+        size = stream.tell()
+        stream.seek(position)
+        return size
+    except (AttributeError, OSError, ValueError):
+        return 0
+
+
+def _has_external_pair(data):
+    return bool(data.get("external_id") and data.get("external_source"))
+
+
+DEFAULT_BULK_MAX_PAGES = 100
+MAX_BULK_MAX_PAGES = 1000
+
+
+def _bulk_max_pages():
+    """Most pages per bulk import call (PAGES_API_BULK_MAX_PAGES, default 100, at most 1000), read per call."""
+    try:
+        value = int(os.environ.get("PAGES_API_BULK_MAX_PAGES", ""))
+    except ValueError:
+        return DEFAULT_BULK_MAX_PAGES
+    if value < 1:
+        return DEFAULT_BULK_MAX_PAGES
+    return min(value, MAX_BULK_MAX_PAGES)
+
+
+def _open_in_editor():
+    response = Response(OPEN_IN_EDITOR, status=status.HTTP_409_CONFLICT)
+    response["Retry-After"] = _get_retry_after_seconds()
+    return response
+
+
+def _page_changed(body=PAGE_CHANGED):
+    """409 for a conflict with another writer: short Retry-After, the page is not held open."""
+    response = Response(body, status=status.HTTP_409_CONFLICT)
+    response["Retry-After"] = 1
+    return response
+
+
+def _page_version(page):
+    """What the PATCH version check compares: every field an editor store or another writer
+    changes. updated_at alone is not enough, because some writers update rows without save()."""
+    binary = page.description_binary
+    binary_digest = hashlib.sha256(bytes(binary)).hexdigest() if binary else None
+    return (
+        page.updated_at,
+        binary_digest,
+        page.description_html,
+        page.name,
+        page.is_locked,
+        page.archived_at,
+    )
+
+
+class HtmlTooLarge(Exception):
+    def __init__(self, limit):
+        super().__init__("description_html too large")
+        self.limit = limit
+
+
+class PageBaseAPIEndpoint(BaseAPIView):
+    permission_classes = [ProjectPagePermission]
+
+    def initial(self, request, *args, **kwargs):
+        # The whole surface is invisible unless the deployment switches it on.
+        if not _pages_api_enabled():
+            raise NotFound()
+        super().initial(request, *args, **kwargs)
+
+    def handle_exception(self, exc):
+        if isinstance(exc, RequestDataTooBig):
+            return Response({"error": "request body too large"}, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+        if isinstance(exc, HtmlTooLarge):
+            return Response(
+                {"error": "description_html too large", "max_bytes": exc.limit},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+        return super().handle_exception(exc)
+
+    def check_body_size(self, request):
+        """Django's memory limit does not apply to streamed json bodies, so cap explicitly.
+
+        a body without Content-Length (chunked) is capped too. Under ASGI Django has
+        already spooled it to a temporary file before the view runs, so its size is read from that file
+        (seek to the end, no read into memory) before DRF parses it."""
+        if _request_body_size(request) > settings.FILE_SIZE_LIMIT:
+            raise RequestDataTooBig()
+
+    def check_html_size(self, request):
+        """Cap description_html by its decoded size in bytes, before the sanitiser or live see it
+        (the Content-Length check above does not bound it: it is only the whole body)."""
+        data = request.data
+        html = data.get("description_html") if hasattr(data, "get") else None
+        limit = _max_html_bytes()
+        if isinstance(html, str) and len(html.encode("utf-8")) > limit:
+            raise HtmlTooLarge(limit)
+
+    def base_queryset(self, slug, project_id):
+        """Pages of the project in the url that the caller may see (design 2.2)."""
+        user = self.request.user
+        queryset = (
+            Page.objects.filter(
+                workspace__slug=slug,
+                project_pages__project_id=project_id,
+                project_pages__deleted_at__isnull=True,
+                project_pages__project__archived_at__isnull=True,
+            )
+            .filter(Q(owned_by=user) | Q(access=Page.PUBLIC_ACCESS))
+            .annotate(project_id=Value(project_id, output_field=UUIDField()))
+        )
+        project = Project.objects.filter(pk=project_id).first()
+        is_guest = ProjectMember.objects.filter(
+            project_id=project_id, member=user, role=ROLE.GUEST.value, is_active=True
+        ).exists()
+        if is_guest and project is not None and not project.guest_view_all_features:
+            queryset = queryset.filter(owned_by=user)
+        return queryset.distinct()
+
+    def get_page(self, slug, project_id, page_id):
+        page = self.base_queryset(slug, project_id).filter(pk=page_id).first()
+        if page is None:
+            raise NotFound()
+        return page
+
+    # ---- create helpers, shared by single create and bulk import
+
+    def lock_external_pairs(self, project, items):
+        """Transaction-scoped advisory locks for the external pairs of `items`, taken in key order so two
+        concurrent requests with overlapping pairs cannot deadlock."""
+        keys = sorted(
+            {
+                _external_lock_key(project.id, d["external_source"], d["external_id"])
+                for d in items
+                if _has_external_pair(d)
+            }
+        )
+        with connection.cursor() as cursor:
+            for key in keys:
+                cursor.execute("SELECT pg_advisory_xact_lock(%s)", [key])
+
+    def duplicate_conflict(self, slug, project_id, project, data):
+        """The 409 body when the external pair already exists in the project, else None. The pair is unique
+        in the project, but the id is only given for a page the caller can see."""
+        existing = (
+            Page.objects.filter(
+                workspace_id=project.workspace_id,
+                external_id=data["external_id"],
+                external_source=data["external_source"],
+                project_pages__project_id=project.id,
+                project_pages__deleted_at__isnull=True,
+            )
+            .values_list("id", flat=True)
+            .first()
+        )
+        if existing is None:
+            return None
+        body = {"error": DUPLICATE_EXTERNAL}
+        if self.base_queryset(slug, project_id).filter(pk=existing).exists():
+            body["id"] = str(existing)
+        return body
+
+    @staticmethod
+    def create_page(project, data, user_id):
+        """Create the page and its project link; page_transaction is queued on commit."""
+        page = Page.objects.create(
+            workspace_id=project.workspace_id,
+            name=data["name"],
+            description_html=data["description_html"],
+            description_binary=None,
+            description_json={},
+            access=data["access"],
+            color=data["color"],
+            parent_id=data["parent"],
+            external_id=data["external_id"],
+            external_source=data["external_source"],
+            owned_by_id=user_id,
+        )
+        ProjectPage.objects.create(
+            workspace_id=project.workspace_id,
+            project_id=project.id,
+            page_id=page.id,
+        )
+        stored_html, page_pk = page.description_html, page.id
+        transaction.on_commit(
+            lambda: page_transaction.delay(
+                new_description_html=stored_html,
+                old_description_html=None,
+                page_id=page_pk,
+            )
+        )
+        return page
+
+    def get_project(self, slug, project_id):
+        project = Project.objects.filter(pk=project_id, workspace__slug=slug, archived_at__isnull=True).first()
+        if project is None:
+            raise NotFound()
+        return project
+
+
+class PageListCreateAPIEndpoint(PageBaseAPIEndpoint):
+    """List and create pages of a project."""
+
+    @page_docs(
+        operation_id="list_pages",
+        summary="List pages",
+        description=(
+            "List the pages of a project that the caller can see, without the html body. "
+            "Archived pages are returned only with archived=true. Results are cursor paginated and the order "
+            "is total: ties on the ordering field are broken by id. The cursor is a keyset cursor (opaque, "
+            "pass next_cursor or prev_cursor back unchanged): it carries the sort key of the last row, so a "
+            "walk never skips a page that did not change, even while other pages are created, edited or "
+            "deleted. A page edited during the walk can appear twice; upsert by id. "
+            "updated_after keeps pages whose updated_at is greater than or equal to the value (inclusive); "
+            "without order_by it lists them oldest change first, by (updated_at, id)."
+        ),
+        parameters=[
+            PAGE_ARCHIVED_PARAMETER,
+            PAGE_PARENT_ID_PARAMETER,
+            EXTERNAL_ID_PARAMETER,
+            EXTERNAL_SOURCE_PARAMETER,
+            PAGE_UPDATED_AFTER_PARAMETER,
+            PAGE_ORDER_BY_PARAMETER,
+            PAGE_CURSOR_PARAMETER,
+            PER_PAGE_PARAMETER,
+        ],
+        responses={
+            200: create_paginated_response(PageListAPISerializer, "Page", "List of pages", "List of pages"),
+            400: OpenApiResponse(
+                response=PageListErrorAPISerializer,
+                description=PAGE_LIST_BAD_REQUEST_RESPONSE_DESCRIPTION,
+                examples=PAGE_LIST_VALIDATION_EXAMPLES,
+            ),
+        },
+    )
+    def get(self, request, slug, project_id):
+        queryset = self.base_queryset(slug, project_id)
+        if request.GET.get("archived", "false").lower() == "true":
+            queryset = queryset.filter(archived_at__isnull=False)
+        else:
+            queryset = queryset.filter(archived_at__isnull=True)
+        for param, field in (
+            ("parent_id", "parent_id"),
+            ("external_source", "external_source"),
+            ("external_id", "external_id"),
+        ):
+            value = request.GET.get(param)
+            if value:
+                queryset = queryset.filter(**{field: value})
+        updated_after = request.GET.get("updated_after")
+        default_order = "-created_at"
+        if updated_after is not None:
+            # Inclusive on purpose: a client resuming from the newest updated_at it has seen
+            # cannot miss a page that shares that timestamp.
+            queryset = queryset.filter(updated_at__gte=parse_updated_after(updated_after))
+            default_order = "updated_at"
+        order_by = sanitize_order_by(request.GET.get("order_by"), PAGE_ORDER_BY_ALLOWLIST, default=default_order)
+        per_page = self.get_per_page(request, 1000, 1000)
+        cursor = request.GET.get("cursor")
+        # keyset cursor; the order is total (order_by, then -created_at for the fields that tie
+        # often, then id in the direction of order_by).
+        return Response(
+            paginate_keyset(
+                queryset,
+                order_by,
+                per_page,
+                cursor,
+                lambda pages: PageListAPISerializer(pages, many=True).data,
+            ),
+            status=status.HTTP_200_OK,
+        )
+
+    @page_docs(
+        operation_id="create_page",
+        summary="Create a page",
+        description=(
+            "Create a page in the project. When external_id and external_source are both given and a page "
+            "with that pair already exists in the project, nothing is created and the response is 409."
+        ),
+        request=PageCreateAPISerializer,
+        responses={
+            201: OpenApiResponse(response=PageAPISerializer, description="Page created"),
+            400: OpenApiResponse(
+                response=PageValidationErrorAPISerializer,
+                description=PAGE_BAD_REQUEST_RESPONSE_DESCRIPTION,
+                examples=PAGE_VALIDATION_EXAMPLES,
+            ),
+            409: OpenApiResponse(
+                response=PageConflictAPISerializer,
+                description=PAGE_CONFLICT_CREATE_RESPONSE.description,
+                examples=PAGE_CONFLICT_CREATE_RESPONSE.examples,
+            ),
+            413: OpenApiResponse(
+                response=PageTooLargeAPISerializer,
+                description=PAGE_TOO_LARGE_RESPONSE.description,
+                examples=PAGE_TOO_LARGE_RESPONSE.examples,
+            ),
+        },
+    )
+    def post(self, request, slug, project_id):
+        self.check_body_size(request)
+        self.check_html_size(request)
+        project = self.get_project(slug, project_id)
+        if not project.page_view:
+            return Response({"error": "Pages are disabled for this project"}, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = PageCreateAPISerializer(
+            data=request.data,
+            context={"project": project, "visible_pages": self.base_queryset(slug, project_id)},
+        )
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        data = serializer.validated_data
+
+        with transaction.atomic():
+            if _has_external_pair(data):
+                self.lock_external_pairs(project, [data])
+                conflict = self.duplicate_conflict(slug, project_id, project, data)
+                if conflict is not None:
+                    return Response(conflict, status=status.HTTP_409_CONFLICT)
+            page = self.create_page(project, data, request.user.id)
+
+        page = self.get_page(slug, project_id, page.id)
+        return Response(PageAPISerializer(page).data, status=status.HTTP_201_CREATED)
+
+
+class PageBulkCreateAPIEndpoint(PageBaseAPIEndpoint):
+    """Create many pages in one call."""
+
+    @page_docs(
+        operation_id="bulk_create_pages",
+        summary="Bulk import pages",
+        description=(
+            'Create up to PAGES_API_BULK_MAX_PAGES pages (default 100) in one call. Body: {"pages": [...]}, each '
+            "item shaped like the create body. Every item is validated and sanitised exactly like a single "
+            "create, with the same size caps; if any item is invalid nothing is created (400 with the item "
+            "index), and an item over the description_html cap is a 413 with its index. Items whose "
+            "external_id and external_source already exist in the project are not created and are reported "
+            "as conflicts (the id only for a page the caller can see); a pair repeated inside the request is "
+            "a 400. The others are created in one transaction. 201 when every item was created, 200 when at "
+            "least one was a conflict; results lists every item in request order."
+        ),
+        request=PageBulkCreateAPISerializer,
+        responses={
+            200: OpenApiResponse(response=PageBulkResultAPISerializer, description="Created, with conflicts"),
+            201: OpenApiResponse(response=PageBulkResultAPISerializer, description="All pages created"),
+            400: OpenApiResponse(
+                response=PageBulkErrorAPISerializer,
+                description="The body is not {pages: [...]}, has too many or no items, or an item is invalid.",
+            ),
+            413: OpenApiResponse(
+                response=PageTooLargeAPISerializer,
+                description=PAGE_TOO_LARGE_RESPONSE.description,
+                examples=PAGE_TOO_LARGE_RESPONSE.examples,
+            ),
+        },
+    )
+    def post(self, request, slug, project_id):
+        self.check_body_size(request)
+        project = self.get_project(slug, project_id)
+        if not project.page_view:
+            return Response({"error": "Pages are disabled for this project"}, status=status.HTTP_400_BAD_REQUEST)
+
+        body = request.data
+        items = body.get("pages") if hasattr(body, "get") else None
+        limit = _bulk_max_pages()
+        if not isinstance(items, list) or not items:
+            return Response(
+                {"error": 'Body must be {"pages": [...]} with at least one page'}, status=status.HTTP_400_BAD_REQUEST
+            )
+        if len(items) > limit:
+            return Response(
+                {"error": f"At most {limit} pages per call", "max_pages": limit}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        html_limit = _max_html_bytes()
+        visible = self.base_queryset(slug, project_id)
+        errors, validated = [], []
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                errors.append({"index": index, "errors": {"error": "Each page must be an object"}})
+                continue
+            html = item.get("description_html")
+            if isinstance(html, str) and len(html.encode("utf-8")) > html_limit:
+                return Response(
+                    {"error": "description_html too large", "max_bytes": html_limit, "index": index},
+                    status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                )
+            serializer = PageCreateAPISerializer(data=item, context={"project": project, "visible_pages": visible})
+            if serializer.is_valid():
+                validated.append((index, serializer.validated_data))
+            else:
+                errors.append({"index": index, "errors": serializer.errors})
+        seen = {}
+        for index, data in validated:
+            if _has_external_pair(data):
+                pair = (data["external_source"], data["external_id"])
+                if pair in seen:
+                    errors.append(
+                        {"index": index, "errors": {"error": f"Same external id and source as item {seen[pair]}"}}
+                    )
+                seen.setdefault(pair, index)
+        if errors:
+            return Response({"errors": sorted(errors, key=lambda e: e["index"])}, status=status.HTTP_400_BAD_REQUEST)
+
+        results = []
+        with transaction.atomic():
+            self.lock_external_pairs(project, [data for _, data in validated])
+            for index, data in validated:
+                conflict = (
+                    self.duplicate_conflict(slug, project_id, project, data) if _has_external_pair(data) else None
+                )
+                if conflict is not None:
+                    results.append({"index": index, "status": "conflict", **conflict})
+                    continue
+                page = self.create_page(project, data, request.user.id)
+                results.append({"index": index, "status": "created", "id": page.id})
+
+        created_ids = [r["id"] for r in results if r["status"] == "created"]
+        pages = {p.id: p for p in self.base_queryset(slug, project_id).filter(pk__in=created_ids)}
+        for result in results:
+            if result["status"] == "created":
+                page_id = result.pop("id")
+                result["page"] = PageAPISerializer(pages[page_id]).data
+        conflicts = len(results) - len(created_ids)
+        return Response(
+            {"created": len(created_ids), "conflicts": conflicts, "results": results},
+            status=status.HTTP_200_OK if conflicts else status.HTTP_201_CREATED,
+        )
+
+
+class PageDetailAPIEndpoint(PageBaseAPIEndpoint):
+    """Retrieve a page, or update its name and html while it is not open in an editor."""
+
+    @page_docs(
+        operation_id="retrieve_page",
+        summary="Retrieve a page",
+        description="Retrieve a page of the project, including its html body.",
+        parameters=[PAGE_ID_PARAMETER],
+        responses={200: OpenApiResponse(response=PageAPISerializer, description="The page")},
+    )
+    def get(self, request, slug, project_id, page_id):
+        page = self.get_page(slug, project_id, page_id)
+        return Response(PageAPISerializer(page).data, status=status.HTTP_200_OK)
+
+    @page_docs(
+        operation_id="update_page",
+        summary="Update a page",
+        description=(
+            "Update the name and/or description_html of a page. Any other field is rejected. "
+            "A page that is open in an editor cannot be updated (409); a page that changed while the update "
+            "was being prepared is not updated either (409, retry); an oversized body or html is rejected (413); "
+            "and when the page has a stored document and the live collaboration service fails the page is "
+            "left unchanged (503)."
+        ),
+        parameters=[PAGE_ID_PARAMETER],
+        request=PageUpdateAPISerializer,
+        responses={
+            200: OpenApiResponse(response=PageAPISerializer, description="Page updated"),
+            400: OpenApiResponse(
+                response=PageValidationErrorAPISerializer,
+                description=PAGE_BAD_REQUEST_RESPONSE_DESCRIPTION,
+                examples=PAGE_VALIDATION_EXAMPLES,
+            ),
+            409: OpenApiResponse(
+                response=PageConflictAPISerializer,
+                description=PAGE_CONFLICT_UPDATE_RESPONSE.description,
+                examples=PAGE_CONFLICT_UPDATE_RESPONSE.examples,
+            ),
+            413: OpenApiResponse(
+                response=PageTooLargeAPISerializer,
+                description=PAGE_TOO_LARGE_RESPONSE.description,
+                examples=PAGE_TOO_LARGE_RESPONSE.examples,
+            ),
+            503: OpenApiResponse(
+                response=PageErrorAPISerializer,
+                description=PAGE_LIVE_UNAVAILABLE_RESPONSE.description,
+                examples=PAGE_LIVE_UNAVAILABLE_RESPONSE.examples,
+            ),
+        },
+    )
+    def patch(self, request, slug, project_id, page_id):
+        self.check_body_size(request)
+        self.check_html_size(request)
+        page = self.get_page(slug, project_id, page_id)
+
+        # Guards: unknown key, empty body, locked, archived.
+        if not hasattr(request.data, "keys"):
+            return Response({"error": "Body must be an object"}, status=status.HTTP_400_BAD_REQUEST)
+        serializer = PageUpdateAPISerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        data = serializer.validated_data
+        if page.is_locked:
+            return Response({"error": "Page is locked"}, status=status.HTTP_400_BAD_REQUEST)
+        if page.archived_at:
+            return Response({"error": "Page is archived"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Write ordering: (1) every slow live call runs with no transaction and no row lock;
+        # (2) the live document write lock is taken (granted only while no editor has the page loaded,
+        # and it holds back any new load); (3) a short transaction locks the row, checks that the page
+        # is still the version read in (1) (409 otherwise) and saves; (4) the lock is released after the
+        # commit, so an editor that opens the page meanwhile loads the committed state.
+        base_version = _page_version(page)
+        old_html = page.description_html
+        has_html = "description_html" in data
+        changes = {}
+        if not _has_binary(page):
+            # (a) No stored document: live rebuilds it from the html on the next open, so the html
+            # is written directly.
+            if "name" in data:
+                changes["name"] = data["name"]
+            if has_html:
+                changes["description_html"] = data["description_html"]
+        else:
+            # (b) Stored document: fold the change (html and/or name) into it through the live
+            # service; the title lives in the binary too, so a name-only change rebases as well.
+            try:
+                result = live_pages.rebase_page(
+                    page.id,
+                    base64.b64encode(bytes(page.description_binary)).decode(),
+                    data.get("description_html"),
+                    data.get("name"),
+                )
+            except live_pages.LiveServiceError as exc:
+                if getattr(exc, "too_large", False) is True:
+                    # live refused the size: not retryable, and nothing internal is revealed
+                    if getattr(exc, "too_large_kind", None) == "body":
+                        # the stored document plus the html exceed live's raw body cap
+                        return Response(
+                            {"error": "page document too large to update through the API"},
+                            status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        )
+                    return Response(
+                        {"error": "description_html too large"}, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+                    )
+                return Response(LIVE_UNAVAILABLE, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            rebased = PageBinaryUpdateSerializer(data=result)
+            if not rebased.is_valid() or not rebased.validated_data.get("description_binary"):
+                return Response(LIVE_UNAVAILABLE, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            validated = rebased.validated_data
+            changes["description_binary"] = validated["description_binary"]
+            if "name" in data:
+                changes["name"] = data["name"]
+            if "description_html" in validated:
+                changes["description_html"] = validated["description_html"] or "<p></p>"
+            elif data.get("description_html"):
+                changes["description_html"] = data["description_html"]
+            if validated.get("description_json") is not None:
+                changes["description_json"] = validated["description_json"]
+
+        lock_state, lock_token = live_pages.acquire_write_lock(page.id)
+        if lock_state == live_pages.LOCK_UNSUPPORTED:
+            # live predates the lock route (rolling deploy) or refused the request: the presence check,
+            # which fails closed on a refusal
+            logger.warning("live answered 404 to the write lock; page %s falls back to the presence check", page.id)
+            if live_pages.is_page_loaded(page.id) is not False:
+                return _open_in_editor()
+        elif lock_state == live_pages.LOCK_BUSY:
+            # another api write of this page holds the lock
+            return _page_changed(PAGE_BUSY)
+        elif lock_state != live_pages.LOCK_ACQUIRED:
+            # loaded in an editor, or live could not answer
+            return _open_in_editor()
+
+        try:
+            with transaction.atomic():
+                page = Page.objects.select_for_update().get(pk=page.id)
+                if page.is_locked:
+                    return Response({"error": "Page is locked"}, status=status.HTTP_400_BAD_REQUEST)
+                if page.archived_at:
+                    return Response({"error": "Page is archived"}, status=status.HTTP_400_BAD_REQUEST)
+                if _page_version(page) != base_version:
+                    # an editor or another writer changed the page while live was rebasing
+                    return _page_changed()
+                for field, value in changes.items():
+                    setattr(page, field, value)
+                page.save(update_fields=[*changes.keys(), "description_stripped", "updated_at", "updated_by"])
+                stored_html = page.description_html
+                page_pk = page.id
+                user_id = request.user.id
+                html_changed = has_html
+                transaction.on_commit(lambda: self._after_commit(page_pk, old_html, stored_html, user_id, html_changed))
+        finally:
+            if lock_token:
+                live_pages.release_write_lock(page.id, lock_token)
+
+        page = self.get_page(slug, project_id, page_id)
+        return Response(PageAPISerializer(page).data, status=status.HTTP_200_OK)
+
+    @staticmethod
+    def _after_commit(page_id, old_html, stored_html, user_id, html_changed):
+        if html_changed:
+            page_transaction.delay(
+                new_description_html=stored_html,
+                old_description_html=old_html,
+                page_id=page_id,
+            )
+        track_page_version.delay(
+            page_id=page_id,
+            existing_instance=json.dumps({"description_html": old_html}),
+            user_id=user_id,
+        )
+
+
+class PageArchiveAPIEndpoint(PageBaseAPIEndpoint):
+    """Archive (POST) and unarchive (DELETE) a page; owner or project admin only."""
+
+    def _check_owner_or_admin(self, request, project_id, page):
+        if request.user.id == page.owned_by_id:
+            return True
+        return ProjectMember.objects.filter(
+            project_id=project_id, member=request.user, is_active=True, role=ROLE.ADMIN.value
+        ).exists()
+
+    @page_docs(
+        operation_id="archive_page",
+        summary="Archive a page",
+        description="Archive a page and its descendants. Only the page owner or a project admin may do this.",
+        parameters=[PAGE_ID_PARAMETER],
+        request=None,
+        responses={
+            200: OpenApiResponse(response=PageArchiveResultAPISerializer, description="Page archived"),
+            400: OpenApiResponse(
+                response=PageErrorAPISerializer,
+                description="The caller is neither the page owner nor a project admin.",
+            ),
+        },
+    )
+    def post(self, request, slug, project_id, page_id):
+        from plane.app.views.page.base import unarchive_archive_page_and_descendants
+
+        page = self.get_page(slug, project_id, page_id)
+        if not self._check_owner_or_admin(request, project_id, page):
+            return Response(
+                {"error": "Only the owner or admin can archive the page"}, status=status.HTTP_400_BAD_REQUEST
+            )
+        UserFavorite.objects.filter(
+            entity_type="page", entity_identifier=page.id, project_id=project_id, workspace__slug=slug
+        ).delete()
+        unarchive_archive_page_and_descendants(page.id, date.today())
+        return Response({"archived_at": str(date.today())}, status=status.HTTP_200_OK)
+
+    @page_docs(
+        operation_id="unarchive_page",
+        summary="Unarchive a page",
+        description=(
+            "Unarchive a page and its descendants. Only the page owner or a project admin may do this. "
+            "An archived parent is detached from the page."
+        ),
+        parameters=[PAGE_ID_PARAMETER],
+        request=None,
+        responses={204: OpenApiResponse(description="Page unarchived")},
+    )
+    def delete(self, request, slug, project_id, page_id):
+        from plane.app.views.page.base import unarchive_archive_page_and_descendants
+
+        page = self.get_page(slug, project_id, page_id)
+        if not self._check_owner_or_admin(request, project_id, page):
+            return Response(
+                {"error": "Only the owner or admin can unarchive the page"}, status=status.HTTP_403_FORBIDDEN
+            )
+        # An archived parent would break the hierarchy, so detach the page from it.
+        if page.parent_id and page.parent.archived_at:
+            page.parent = None
+            page.save(update_fields=["parent"])
+        unarchive_archive_page_and_descendants(page.id, None)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PageVersionListAPIEndpoint(PageBaseAPIEndpoint):
+    """List the saved versions of a page."""
+
+    @page_docs(
+        operation_id="list_page_versions",
+        summary="List page versions",
+        description=(
+            "List the saved versions of a page the caller can see, newest first, without content. "
+            "Keyset cursor paginated like the pages list (per_page default 100, maximum 1000). "
+            "A page the caller cannot see answers 404 (403 when the permission check refuses first)."
+        ),
+        parameters=[PAGE_ID_PARAMETER, PAGE_CURSOR_PARAMETER, PER_PAGE_PARAMETER],
+        responses={
+            200: create_paginated_response(
+                PageVersionAPISerializer, "PageVersion", "List of page versions", "List of page versions"
+            ),
+            400: OpenApiResponse(
+                response=PageListErrorAPISerializer,
+                description=PAGE_LIST_BAD_REQUEST_RESPONSE_DESCRIPTION,
+                examples=PAGE_LIST_VALIDATION_EXAMPLES,
+            ),
+        },
+    )
+    def get(self, request, slug, project_id, page_id):
+        page = self.get_page(slug, project_id, page_id)
+        queryset = PageVersion.objects.filter(page_id=page.id, workspace_id=page.workspace_id)
+        per_page = self.get_per_page(request, 100, 1000)
+        return Response(
+            paginate_keyset(
+                queryset,
+                "-created_at",
+                per_page,
+                request.GET.get("cursor"),
+                lambda versions: PageVersionAPISerializer(versions, many=True).data,
+            ),
+            status=status.HTTP_200_OK,
+        )
+
+
+class PageVersionDetailAPIEndpoint(PageBaseAPIEndpoint):
+    """Retrieve one saved version of a page, with its html."""
+
+    @page_docs(
+        operation_id="retrieve_page_version",
+        summary="Retrieve a page version",
+        description=(
+            "Retrieve one saved version of a page the caller can see, including its description_html "
+            "(sanitised on output with the same rules as on write). The binary and json forms are not "
+            "returned. An unknown version, or a version of another page, answers 404."
+        ),
+        parameters=[PAGE_ID_PARAMETER, PAGE_VERSION_ID_PARAMETER],
+        responses={200: OpenApiResponse(response=PageVersionDetailAPISerializer, description="The page version")},
+    )
+    def get(self, request, slug, project_id, page_id, version_id):
+        page = self.get_page(slug, project_id, page_id)
+        version = PageVersion.objects.filter(pk=version_id, page_id=page.id, workspace_id=page.workspace_id).first()
+        if version is None:
+            raise NotFound()
+        return Response(PageVersionDetailAPISerializer(version).data, status=status.HTTP_200_OK)
