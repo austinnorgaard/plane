@@ -190,6 +190,8 @@ export type TLiveRoute = {
   viewId?: string;
   archived?: boolean;
   intake?: boolean;
+  /** PLN-123: the intake item open in the intake detail pane (the inboxIssueId query parameter) */
+  intakeIssueId?: string;
   /** PLN-37: a workspace view (all-issues, assigned, created, subscribed, or a saved workspace view id) */
   globalViewId?: string;
 };
@@ -321,6 +323,9 @@ export class LiveWorkItemsApplier {
       this.scheduleIntakeList(); // PLN-76
       // an open peek is not part of any list, refresh it too
       const peeked = this.getOpenIssueIds();
+      // PLN-123: and the intake item open in the intake detail pane
+      const intakeOpen = this.openIntakeIssueId();
+      if (intakeOpen && !peeked.includes(intakeOpen)) peeked.push(intakeOpen);
       if (peeked.length > 0) this.enqueue(peeked, [changeKey("issue", "updated")]);
       return;
     }
@@ -451,6 +456,12 @@ export class LiveWorkItemsApplier {
     return !!this.deps.getRoute().intake && this.deps.projectInbox.currentInboxProjectId === this.deps.projectId;
   }
 
+  /** PLN-123: the intake item shown in the intake detail pane, while the intake route is on screen. */
+  private openIntakeIssueId(): string | undefined {
+    if (!this.intakeOnScreen()) return undefined;
+    return this.deps.getRoute().intakeIssueId || undefined;
+  }
+
   /**
    * Known intake items are read one by one (status, snooze, duplicate, the work item fields) and merged into
    * the store, so they move between the open and closed tabs through the store's own filters. An event for
@@ -466,12 +477,17 @@ export class LiveWorkItemsApplier {
       else if ([...keys].some(isIntakeKey)) listNeeded = true;
     }
     if (listNeeded) this.scheduleIntakeList();
+    const openId = this.openIntakeIssueId();
     await Promise.all(
       known.map(async (id) => {
         try {
           const inboxIssue = await this.inboxIssueService.retrieve(workspaceSlug, projectId, id);
           if (this.disposed || !this.intakeOnScreen()) return;
           runInAction(() => projectInbox.createOrUpdateInboxIssue([inboxIssue], workspaceSlug, projectId));
+          // PLN-123: the open detail pane also shows the item's comments and activity, which the intake
+          // read does not carry; they are refetched like an open peek's (no fetchIssue: the item, name and
+          // description included, comes from the intake read above)
+          if (id === openId && openId === this.openIntakeIssueId()) await this.refreshIntakeDetail(id, batch.get(id));
         } catch (error) {
           if (!isNotFoundError(error)) throw error;
           // deleted, or no longer an intake item: it leaves the list
@@ -483,6 +499,22 @@ export class LiveWorkItemsApplier {
         }
       })
     );
+  }
+
+  /** PLN-123: comments (on a comment event) and activity of the intake item open in the detail pane. */
+  private async refreshIntakeDetail(issueId: string, keys: Set<string> | undefined) {
+    const { workspaceSlug, projectId, issueDetail } = this.deps;
+    const kinds = keys ?? new Set<string>();
+    try {
+      if (hasCommentChange(kinds)) {
+        if (shouldResetComments(kinds)) this.resetComments(issueId);
+        await issueDetail.fetchComments(workspaceSlug, projectId, issueId, "mutate");
+      }
+      if (this.disposed) return;
+      await issueDetail.fetchActivities(workspaceSlug, projectId, issueId, "mutate");
+    } catch (error) {
+      console.error("live intake detail refresh failed", error);
+    }
   }
 
   /** Refetches the first page of the intake list in place ("mutation-loading" shows no loader). */
