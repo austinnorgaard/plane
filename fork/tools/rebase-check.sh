@@ -99,7 +99,8 @@ import sys
 text = open(sys.argv[1], encoding="utf-8").read()
 files = [ln.rstrip("\n") for ln in open(sys.argv[2], encoding="utf-8")]
 known = set(files)
-text = text.split("\nNew files", 1)[0]
+# the upstream part ends where the new files start: a plain line before PLN-115, a heading since
+text = re.split(r"\n(?:## )?New files", text, maxsplit=1)[0]
 
 
 def expand(tok):
