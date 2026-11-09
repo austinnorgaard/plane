@@ -17,7 +17,7 @@
 #                   changed call sites, not the ones that only moved).
 #   --write         also save the regenerated snapshot as fork/tools/callsites.<tag>.txt.
 #
-# Output, in three parts:
+# Output, in four parts:
 #   1. every upstream file listed in fork/PATCHES.md, with its state against the tag:
 #      CONFLICT (the trial merge conflicts in it), CHANGED (upstream changed it, the
 #      merge is clean: re-read the fork patch anyway), same (upstream did not touch it),
@@ -26,6 +26,7 @@
 #      or a fork-only file collides with a new upstream file).
 #   3. the issue_activity call-site snapshot regenerated from the tag, as a diff against
 #      the current snapshot (fork/tools/CALLSITES.md says what to do with each change).
+#   4. fork/tools/fork_checks.py all: PATCHES.md coverage and the REST v1 publish parity (PLN-118).
 #
 # Exit status: 0 nothing to do, 1 conflicts or a call-site diff, 2 usage or setup error.
 # Needs git >= 2.38 (merge-tree --write-tree) and python3.
@@ -88,47 +89,10 @@ echo "upstream:   $tag ($(git rev-parse --short "$tag_sha"))"
 echo "merge base: $(git describe --tags --always "$merge_base" 2>/dev/null) ($(git rev-parse --short "$merge_base"))"
 echo
 
-# The upstream files PATCHES.md lists: backticked repo paths in the part above "New files".
-# Brace lists (a/{b,c}.ts) are expanded; a ".../name" path is matched by suffix against the
-# files of the fork commit.
-git ls-tree -r --name-only "$base_sha" >"$tmp/files"
-"$py" - "$patches" "$tmp/files" <<'PY' | tr -d '\r' >"$tmp/patched"
-import re
-import sys
-
-text = open(sys.argv[1], encoding="utf-8").read()
-files = [ln.rstrip("\n") for ln in open(sys.argv[2], encoding="utf-8")]
-known = set(files)
-# the upstream part ends where the new files start: a plain line before PLN-115, a heading since
-text = re.split(r"\n(?:## )?New files", text, maxsplit=1)[0]
-
-
-def expand(tok):
-    m = re.search(r"\{([^{}]*)\}", tok)
-    if not m:
-        return [tok]
-    out = []
-    for part in m.group(1).split(","):
-        out.extend(expand(tok[: m.start()] + part + tok[m.end() :]))
-    return out
-
-
-seen = []
-for tok in re.findall(r"`([^`\s]+)`", text):
-    for path in expand(tok):
-        if path.startswith(".../"):
-            tail = path[3:]
-            hits = [f for f in files if f.endswith(tail)]
-            if len(hits) == 1:
-                path = hits[0]
-        if "/" not in path or path.startswith(("http", "plane:")):
-            continue
-        if path in known or re.match(r"^[\w.()\[\]-]+(/[\w.()\[\]-]+)+$", path):
-            if path not in seen:
-                seen.append(path)
-for path in seen:
-    print(path)
-PY
+# The upstream files PATCHES.md lists, parsed by fork_checks.py (PLN-118; one parser for both tools):
+# backticked repo paths above "## New files", brace lists expanded, ".../name" resolved by suffix.
+"$py" fork/tools/fork_checks.py list --head "$base_sha" | tr -d '\r' >"$tmp/patched" ||
+  die "fork/tools/fork_checks.py list failed"
 
 # Trial merge of the tag into the fork commit. Exit 1 means conflicts, which is expected.
 set +e
@@ -204,5 +168,17 @@ if [ "$write" -eq 1 ]; then
   cp "$tmp/snapshot" "$out"
   echo "  wrote $out"
 fi
+
+echo
+
+# PLN-118: PATCHES.md covers every upstream file the fork changes, and every app metadata publish has a
+# REST v1 counterpart (against the current merge base, so it judges the fork as it is now).
+echo "== 4. fork checks (fork/tools/fork_checks.py)"
+set +e
+"$py" fork/tools/fork_checks.py all --base "$merge_base" --head "$base_sha" >"$tmp/checks" 2>&1
+checks_rc=$?
+set -e
+tr -d '\r' <"$tmp/checks" | sed 's/^/  /'
+[ "$checks_rc" -eq 0 ] || status=1
 
 exit "$status"

@@ -39,7 +39,8 @@ One line per touched upstream file: ticket id and the reason.
 - `apps/web/core/lib/live-events/client.ts`: PLN-106, parse `user_event` frames, `subscribeUser()` listeners, resync also emitted to user listeners.
 - `apps/web/core/lib/live-events/client.ts` (fork-owned, PLN-47): connection state (`idle`, `connecting`, `connected`, `reconnecting`, `offline` with a reason) through `getConnectionStatus()` and `subscribeConnectionStatus()`, derived from the client's fields at each transition.
 - `apps/web/core/components/issues/header.tsx`: PLN-47, the live connection indicator (`LiveConnectionStatus`, one import, one element) at the start of the right side of the project work items header.
-- `packages/i18n/src/locales/en/common.json`: PLN-47, `live_updates.status.*` keys for the indicator (en only; other locales fall back to en).
+- `packages/i18n/src/locales/en/common.json`: PLN-47, `live_updates.status.*` keys for the indicator.
+- `packages/i18n/src/locales/{cs,de,es,fr,id,it,ja,ko,pl,pt-BR,ro,ru,sk,tr-TR,ua,vi-VN,zh-CN,zh-TW}/common.json`: PLN-116, the same `live_updates.status.*` keys, added at the end (machine translated).
 - `apps/web/core/store/issue/project/filter.store.ts`: PLN-106, `forkBoard` (ForkGlobalBoard): fetchFilters resolves the board through it; display filter, display property and rich filter writes go to the global template instead of the project row while it is on.
 - `apps/web/core/components/issues/filters.tsx`: PLN-106, global board indicator at the top of the project board's display menu.
 - `apps/web/core/components/settings/profile/content/pages/preferences/root.tsx`: PLN-106, "Boards" section with the fork board preferences.
@@ -99,6 +100,7 @@ web:
 ci, build and ops:
 
 - `.github/workflows/fork-images.yml`: PLN-109, CI images.
+- `.github/workflows/fork-checks.yml`: PLN-118, `fork/tools/fork_checks.py` on pull requests and pushes.
 - `fork/build/*`: archive build scripts (`build.sh`, `build.ps1`, `measure.sh`, `verify-load.sh`); PLN-109 adds `service-paths.sh`.
 - `fork/docker/Dockerfile.fork-api`: the api image overlay.
 - `fork/deploy/*`: deploy files (`update.sh` PLN-109, `prune-images.sh` PLN-64, `rollback.sh`, `inspect.sh`, `gate.sh`, `fetch-images.sh`, `postdeploy-logs.sh`, `docker-compose.override.yaml`, `RUNBOOK.md`, `README.fork`).
