@@ -69,6 +69,8 @@ interface Props {
   loadMoreIssues: (groupId?: string) => void;
   selectionHelpers: TSelectionHelper;
   handleCollapsedGroups: (value: string) => void;
+  /** fork (PLN-108): opens a collapsed group after a drop onto it (never a toggle) */
+  handleExpandGroup?: (value: string) => void;
   collapsedGroups: TIssueKanbanFilters;
   isEpic?: boolean;
 }
@@ -96,6 +98,7 @@ export const ListGroup = observer(function ListGroup(props: Props) {
     loadMoreIssues,
     selectionHelpers,
     handleCollapsedGroups,
+    handleExpandGroup,
     collapsedGroups,
     isEpic = false,
   } = props;
@@ -231,9 +234,10 @@ export const ListGroup = observer(function ListGroup(props: Props) {
 
           highlightIssueOnDrop(getIssueBlockId(source.id, destination?.groupId), orderBy !== "sort_order");
 
-          if (!isExpanded) {
-            handleCollapsedGroups(group.id);
-          }
+          // fork (PLN-108): open the group without toggling it (the drop above already counted the item in, so
+          // with auto-collapse on a toggle would collapse the group it just moved into)
+          if (handleExpandGroup) handleExpandGroup(group.id);
+          else if (!isExpanded) handleCollapsedGroups(group.id);
         },
       })
     );

@@ -157,7 +157,11 @@ export const BaseListRoot = observer(function BaseListRoot(props: IBaseListRoot)
   );
 
   // fork (PLN-107): with auto-collapse on, a group is collapsed iff its count is 0 (clicks are session overrides)
-  const { collapsedGroups, handleToggle: handleCollapsedGroupsToggle } = useAutoCollapseGroups({
+  const {
+    collapsedGroups,
+    handleToggle: handleCollapsedGroupsToggle,
+    expandGroup,
+  } = useAutoCollapseGroups({
     storeType,
     groupBy: group_by,
     subGroupBy: null,
@@ -172,6 +176,7 @@ export const BaseListRoot = observer(function BaseListRoot(props: IBaseListRoot)
     (groupId: string) => handleCollapsedGroupsToggle("group_by", groupId),
     [handleCollapsedGroupsToggle]
   );
+  const handleListExpandGroup = useCallback((groupId: string) => expandGroup("group_by", groupId), [expandGroup]);
 
   return (
     <IssueLayoutHOC layout={EIssueLayoutTypes.LIST}>
@@ -194,6 +199,7 @@ export const BaseListRoot = observer(function BaseListRoot(props: IBaseListRoot)
           isCompletedCycle={isCompletedCycle}
           handleOnDrop={handleOnDrop}
           handleCollapsedGroups={handleListCollapsedGroups}
+          handleExpandGroup={handleListExpandGroup}
           collapsedGroups={collapsedGroups}
           isEpic={isEpic}
         />

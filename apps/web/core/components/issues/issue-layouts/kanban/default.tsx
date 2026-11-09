@@ -59,6 +59,8 @@ export interface IKanBan {
   quickActions: TRenderQuickActions;
   collapsedGroups: TIssueKanbanFilters;
   handleCollapsedGroups: (toggle: "group_by" | "sub_group_by", value: string) => void;
+  /** fork (PLN-108): opens a collapsed group after a drop onto it (never a toggle) */
+  handleExpandGroup?: (toggle: "group_by" | "sub_group_by", value: string) => void;
   loadMoreIssues: (groupId?: string, subGroupId?: string) => void;
   enableQuickIssueCreate?: boolean;
   quickAddCallback?: (projectId: string | null | undefined, data: TIssue) => Promise<TIssue | undefined>;
@@ -85,6 +87,7 @@ export const KanBan = observer(function KanBan(props: IKanBan) {
     quickActions,
     collapsedGroups,
     handleCollapsedGroups,
+    handleExpandGroup,
     enableQuickIssueCreate,
     quickAddCallback,
     loadMoreIssues,
@@ -180,7 +183,7 @@ export const KanBan = observer(function KanBan(props: IKanBan) {
                     isDropDisabled={!!subList.isDropDisabled || !!isDropDisabled}
                     dropErrorMessage={subList.dropErrorMessage ?? dropErrorMessage}
                     handleOnDrop={handleOnDrop}
-                    onDropped={() => handleCollapsedGroups("group_by", subList.id)}
+                    onDropped={() => handleExpandGroup?.("group_by", subList.id)}
                   >
                     <HeaderGroupByCard
                       sub_group_by={sub_group_by}

@@ -237,7 +237,11 @@ export const BaseKanBanRoot = observer(function BaseKanBanRoot(props: IBaseKanBa
 
   const storedCollapsedGroups = issuesFilter?.issueFilters?.kanbanFilters || { group_by: [], sub_group_by: [] };
   // fork (PLN-107): with auto-collapse on, a group is collapsed iff its count is 0 (clicks are session overrides)
-  const { collapsedGroups, handleToggle: handleCollapsedGroupsToggle } = useAutoCollapseGroups({
+  const {
+    collapsedGroups,
+    handleToggle: handleCollapsedGroupsToggle,
+    expandGroup,
+  } = useAutoCollapseGroups({
     storeType,
     groupBy: group_by,
     subGroupBy: sub_group_by,
@@ -293,6 +297,7 @@ export const BaseKanBanRoot = observer(function BaseKanBanRoot(props: IBaseKanBa
                 updateIssue={updateIssue}
                 quickActions={renderQuickActions}
                 handleCollapsedGroups={handleCollapsedGroupsToggle}
+                handleExpandGroup={expandGroup}
                 collapsedGroups={collapsedGroups}
                 enableQuickIssueCreate={enableQuickAdd}
                 showEmptyGroup={userDisplayFilters?.show_empty_groups ?? true}
