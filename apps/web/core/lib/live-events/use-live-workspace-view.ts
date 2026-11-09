@@ -6,19 +6,14 @@
 
 import { useContext, useEffect, useRef } from "react";
 import { sortBy } from "lodash-es";
-// plane imports
-import { EIssuesStoreType } from "@plane/types";
-import { TOAST_TYPE, setToast } from "@plane/propel/toast";
 // hooks
-import { useIssueDetail } from "@/hooks/store/use-issue-detail";
-import { useIssues } from "@/hooks/store/use-issues";
 import { useProject } from "@/hooks/store/use-project";
 import { useUser } from "@/hooks/store/user";
 import { StoreContext } from "@/lib/store-context";
 // local imports
 import { LiveWorkItemsApplier } from "./apply";
+import { buildApplierDeps, useWorkItemUnavailableNotice } from "./applier-deps";
 import { getLiveEventsClient } from "./client";
-import { refreshCycleAndModuleDefinitions } from "./metadata";
 
 /**
  * PLN-37: at most this many projects are subscribed for a workspace view (the hub allows 100 per socket). The
@@ -37,60 +32,36 @@ export const MAX_WORKSPACE_VIEW_PROJECTS = 50;
  * list refetch, so a full refresh or a coarse view over several projects costs one request.
  */
 export const useLiveWorkspaceView = (workspaceSlug: string | undefined, globalViewId: string | undefined) => {
-  const storeContext = useContext(StoreContext);
+  const root = useContext(StoreContext);
   const { data: currentUser } = useUser();
-  const issueDetail = useIssueDetail();
   const { joinedProjectIds } = useProject();
-  const projectStore = useIssues(EIssuesStoreType.PROJECT);
-  const cycleStore = useIssues(EIssuesStoreType.CYCLE);
-  const moduleStore = useIssues(EIssuesStoreType.MODULE);
-  const viewStore = useIssues(EIssuesStoreType.PROJECT_VIEW);
-  const archivedStore = useIssues(EIssuesStoreType.ARCHIVED);
-  const workspaceStore = useIssues(EIssuesStoreType.GLOBAL);
+  // PLN-119: translated, and stable across renders
+  const notifyUnavailable = useWorkItemUnavailableNotice();
 
   // read by the appliers without recreating them when the view changes
   const latest = useRef({ globalViewId, userId: currentUser?.id });
   latest.current = { globalViewId, userId: currentUser?.id };
-  const stores = useRef({
-    storeContext,
-    issueDetail,
-    projectStore,
-    cycleStore,
-    moduleStore,
-    viewStore,
-    archivedStore,
-    workspaceStore,
-  });
-  stores.current = {
-    storeContext,
-    issueDetail,
-    projectStore,
-    cycleStore,
-    moduleStore,
-    viewStore,
-    archivedStore,
-    workspaceStore,
-  };
+  const stores = useRef({ root, notifyUnavailable });
+  stores.current = { root, notifyUnavailable };
 
   // the subscription follows the set of projects only (sorted, so a reorder does not resubscribe)
   const projectKey = sortBy(joinedProjectIds.slice(0, MAX_WORKSPACE_VIEW_PROJECTS)).join(",");
 
   useEffect(() => {
-    const s = stores.current;
-    const root = s.storeContext;
+    const { root: rootStore, notifyUnavailable: notify } = stores.current;
     const projectIds = projectKey ? projectKey.split(",") : [];
-    if (!workspaceSlug || !root || projectIds.length === 0) return;
+    if (!workspaceSlug || !rootStore || projectIds.length === 0) return;
+    const workspaceIssues = rootStore.issue.workspaceIssues;
+    const workspaceFilter = rootStore.issue.workspaceIssuesFilter;
 
     // one list refetch at a time for the whole view, shared by the per-project appliers
     let inflight: Promise<unknown> | null = null;
     const refetch = () => {
       const viewId = latest.current.globalViewId;
       if (!viewId) return Promise.resolve();
-      inflight ??= s.workspaceStore.issues
-        .fetchIssuesWithExistingPagination(workspaceSlug, viewId, "mutation")
-        .finally(() => {
-          inflight = null;
-        });
+      inflight ??= workspaceIssues.fetchIssuesWithExistingPagination(workspaceSlug, viewId, "mutation").finally(() => {
+        inflight = null;
+      });
       return inflight;
     };
 
@@ -98,50 +69,20 @@ export const useLiveWorkspaceView = (workspaceSlug: string | undefined, globalVi
     for (const projectId of projectIds) {
       appliers.set(
         projectId,
-        new LiveWorkItemsApplier({
-          workspaceSlug,
-          projectId,
-          getRoute: () => ({ globalViewId: latest.current.globalViewId }),
-          getCurrentUserId: () => latest.current.userId,
-          issueMap: root.issue.issues,
-          projectIssues: s.projectStore.issues,
-          cycleIssues: s.cycleStore.issues,
-          moduleIssues: s.moduleStore.issues,
-          viewIssues: s.viewStore.issues,
-          archivedIssues: s.archivedStore.issues,
-          projectInbox: root.projectInbox,
-          getStateGroup: (stateId) => root.state.stateMap?.[stateId]?.group,
-          // PLN-111: unknown ids make the applier refresh the project's metadata once
-          isKnownLabel: (labelId) => !!root.label.labelMap?.[labelId],
-          isKnownState: (stateId) => !!root.state.stateMap?.[stateId],
-          getFilterExpression: (which) => {
-            const filters = { project: s.projectStore, cycle: s.cycleStore, module: s.moduleStore, view: s.viewStore }[
-              which
-            ].issuesFilter.issueFilters;
-            return filters?.richFilters;
-          },
-          workspace: {
-            issues: s.workspaceStore.issues,
-            refetch,
-            getRichFilters: () =>
-              s.workspaceStore.issuesFilter.getIssueFilters(latest.current.globalViewId)?.richFilters,
-          },
-          issueDetail: s.issueDetail,
-          refreshProjectMetadata: () =>
-            Promise.all([
-              root.state.fetchProjectStates(workspaceSlug, projectId),
-              root.label.fetchProjectLabels(workspaceSlug, projectId),
-              // PLN-36: cycle and module definitions (quiet: no loader, deleted ones are dropped)
-              refreshCycleAndModuleDefinitions(root, workspaceSlug, projectId),
-            ]),
-          // TODO: move the text to i18n keys (needs packages/i18n locale entries)
-          onIssueMissingFromPeek: () =>
-            setToast({
-              type: TOAST_TYPE.INFO,
-              title: "Work item unavailable",
-              message: "This work item was deleted or you no longer have access to it.",
-            }),
-        })
+        new LiveWorkItemsApplier(
+          buildApplierDeps(rootStore, {
+            workspaceSlug,
+            projectId,
+            getRoute: () => ({ globalViewId: latest.current.globalViewId }),
+            getCurrentUserId: () => latest.current.userId,
+            workspace: {
+              issues: workspaceIssues,
+              refetch,
+              getRichFilters: () => workspaceFilter.getIssueFilters(latest.current.globalViewId)?.richFilters,
+            },
+            onIssueUnavailable: notify,
+          })
+        )
       );
     }
 

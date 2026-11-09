@@ -880,6 +880,10 @@
       "offline_network_tooltip": "Sie sind offline. Live-Updates werden fortgesetzt, sobald das Netzwerk wieder verfügbar ist.",
       "offline_unauthenticated_tooltip": "Live-Updates pausiert. Die Sitzung konnte nicht überprüft werden. Klicken Sie auf die Seite, um es erneut zu versuchen, oder melden Sie sich erneut an.",
       "offline_stopped_tooltip": "Live-Updates sind für diesen Tab deaktiviert. Laden Sie die Seite neu, um sie wieder zu aktivieren."
+    },
+    "work_item_unavailable": {
+      "title": "Arbeitselement nicht verfügbar",
+      "message": "Dieses Arbeitselement wurde gelöscht oder Sie haben keinen Zugriff mehr darauf."
     }
   }
 }

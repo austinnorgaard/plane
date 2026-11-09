@@ -39,8 +39,8 @@ One line per touched upstream file: ticket id and the reason.
 - `apps/web/core/lib/live-events/client.ts`: PLN-106, parse `user_event` frames, `subscribeUser()` listeners, resync also emitted to user listeners.
 - `apps/web/core/lib/live-events/client.ts` (fork-owned, PLN-47): connection state (`idle`, `connecting`, `connected`, `reconnecting`, `offline` with a reason) through `getConnectionStatus()` and `subscribeConnectionStatus()`, derived from the client's fields at each transition.
 - `apps/web/core/components/issues/header.tsx`: PLN-47, the live connection indicator (`LiveConnectionStatus`, one import, one element) at the start of the right side of the project work items header.
-- `packages/i18n/src/locales/en/common.json`: PLN-47, `live_updates.status.*` keys for the indicator.
-- `packages/i18n/src/locales/{cs,de,es,fr,id,it,ja,ko,pl,pt-BR,ro,ru,sk,tr-TR,ua,vi-VN,zh-CN,zh-TW}/common.json`: PLN-116, the same `live_updates.status.*` keys, added at the end (machine translated).
+- `packages/i18n/src/locales/en/common.json`: PLN-47, `live_updates.status.*` keys for the indicator; PLN-119, `live_updates.work_item_unavailable.{title,message}` (the live applier's toast).
+- `packages/i18n/src/locales/{cs,de,es,fr,id,it,ja,ko,pl,pt-BR,ro,ru,sk,tr-TR,ua,vi-VN,zh-CN,zh-TW}/common.json`: PLN-116, the same `live_updates.status.*` keys, added at the end (machine translated). PLN-119: `live_updates.work_item_unavailable.*` in every locale (machine translated, per the translate skill).
 - `apps/web/core/store/issue/project/filter.store.ts`: PLN-106, `forkBoard` (ForkGlobalBoard): fetchFilters resolves the board through it; display filter, display property and rich filter writes go to the global template instead of the project row while it is on.
 - `apps/web/core/components/issues/filters.tsx`: PLN-106, global board indicator at the top of the project board's display menu.
 - `apps/web/core/components/settings/profile/content/pages/preferences/root.tsx`: PLN-106, "Boards" section with the fork board preferences.
@@ -91,6 +91,7 @@ web:
 - `apps/web/core/lib/live-events/filter-match.ts`: PLN-38.
 - `apps/web/core/lib/live-events/metadata.ts`: PLN-36.
 - `apps/web/core/lib/live-events/use-live-workspace-view.ts`: PLN-37.
+- `apps/web/core/lib/live-events/applier-deps.ts`: PLN-119, the applier wiring shared by the two live hooks, and the translated "work item unavailable" toast.
 - `apps/web/core/fork/board-settings/*`: PLN-106 (PLN-107 adds `auto-collapse.ts` and its components; PLN-110 adds `components/drop-preview.tsx`).
 - `apps/web/core/fork/live/local-edits.ts`: PLN-110 fix.
 - `apps/web/core/fork/live/issue-sync-queue.ts`: PLN-110 fix.
