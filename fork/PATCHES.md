@@ -16,6 +16,7 @@ One line per touched upstream file: ticket id and the reason.
 - `apps/web/core/store/issue/helpers/base-issues.store.ts`, PLN-110 fix (2): `issueUpdate` sends its PATCH through `fork/live/issue-sync-queue.ts` (one request per work item at a time, later edits merged, rollback to the last confirmed server state via `rollbackIssue`); `addCycleToIssue` and `changeModulesInIssue` mark the work item in flight while their requests run.
 - `apps/live/src/events/hub.ts` (fork-owned, PLN-110 fix): over the project rate the window keeps merging per work item; only 10x the rate (or a `"*"` event, or the item cap) is a full refresh; `fullRefreshes` stats by cause.
 - `apps/web/core/lib/live-events/apply.ts` (fork-owned, PLN-110 fix): full refreshes go through `liveRefetch` and are retried while the user's edits are in flight; per-item and peek reads that lost to a newer local edit are retried later; the applier's own applies do not count as local edits.
+- `apps/live/src/extensions/index.ts`: PLN-98, register `PageWriteLockExtension` (`apps/live/src/fork-pages/write-lock.ts`) first in the list (one import, one entry); its priority 1000 runs its `onLoadDocument` before the Database fetch.
 - `apps/api/plane/bgtasks/issue_activities_task.py`: PLN-3, publish an ids-only live event from a finally block after each activity.
 - `apps/api/plane/app/views/issue/base.py`: PLN-3, publish after bulk delete (ids captured first) and after bulk date update.
 - `apps/api/plane/app/views/issue/archive.py`: PLN-3, publish after bulk archive.

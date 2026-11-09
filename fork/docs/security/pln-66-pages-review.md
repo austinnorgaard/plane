@@ -64,12 +64,14 @@ Only F1 should block the deploy. F3 and F4 should be scheduled right after. Upst
 - Where: `apps/api/plane/api/views/page.py:232-271` (`transaction.atomic` plus `select_for_update`, then `rebase_page` with a 10 s timeout and `is_page_loaded` with a 3 s timeout).
 - Scenario: each PATCH of a binary page can hold a database row lock, a transaction and a gunicorn worker for up to about 13 s while live is slow (which F1 makes easy to cause). Concurrent PATCHes of the same page queue on the lock; many pages exhaust workers and connections.
 - Recommended fix: do the live calls before opening the transaction (read binary, call live, then lock and re-verify `updated_at` or a version before saving; return 409 on change), or lower the timeouts and add the F1 concurrency limit. Prefer an optimistic version check.
+- Resolution (PLN-98): the rebase and the lock request run before the transaction; the transaction only locks the row, compares the version read before the rebase (`updated_at`, binary digest, html, name, locked, archived) and saves, answering 409 "page changed during the update; retry" on a mismatch. No live call runs under the row lock.
 
 ### F4 Medium: presence check is best effort
 
 - Where: `apps/api/plane/api/views/page.py:245` and `:270` (check), `:288-293` (save and commit), `:311-316` (post-commit warning only); `apps/live/src/fork-pages/pages.controller.ts:73`.
 - Scenario: the check and the database commit are not atomic with the live service. An editor can load the page (reading the old binary) after the check and before the commit. The API write is then silently superseded or merged inconsistently when the editor saves. The code only logs a warning afterwards.
 - Recommended fix: make live the writer (live endpoint that takes a per-document lock, rebases, stores and refuses if the document loaded meanwhile), or have the live load path refuse or re-read when a write lock is set for the page. At minimum document the window and return a response field telling the client the write may be superseded.
+- Resolution (PLN-98): **document write lock** (not live as the single writer, which would move the page save and its side effects into live). Before the commit the API takes `POST fork/pages/<id>/write-lock`; live grants it only while the page is not loaded (check and set in one synchronous step) and holds every new load of the page in the `PageWriteLock` extension (`onLoadDocument`, before the Database fetch) until the API releases the lock after the commit, or the lock expires (`PAGES_WRITE_LOCK_TTL_MS`, default 15 s). The remaining window is a commit slower than the TTL, which the API logs. Details in `fork/PAGES.md` ("Write ordering").
 
 ### F5 Low: external id 409 discloses ids of private pages
 

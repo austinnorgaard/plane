@@ -6,11 +6,12 @@ import type { Hocuspocus } from "@hocuspocus/server";
 import express from "express";
 import type { NextFunction, Request, RequestHandler, Response } from "express";
 import { z } from "zod";
-import { Controller, Get, Middleware, Post } from "@plane/decorators";
+import { Controller, Delete, Get, Middleware, Post } from "@plane/decorators";
 import { logger } from "@plane/logger";
 import { requirePagesApiAccess } from "./auth";
 import { InvalidBaseStateError } from "./rebase";
 import { prewarmRebaseWorker, RebaseBusyError, RebaseTimeoutError, runRebase } from "./rebase-runner";
+import { acquireWriteLock, releaseWriteLock } from "./write-lock";
 
 export const REBASE_CONTENT_TYPE = "application/vnd.plane-fork.rebase+json";
 const MAX_BASE_BINARY_BYTES = 10 * 1024 * 1024;
@@ -19,6 +20,8 @@ const MAX_BASE_BINARY_CHARS = Math.ceil(MAX_BASE_BINARY_BYTES / 3) * 4;
 const BASE64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
 
 const pageIdSchema = z.string().uuid();
+const lockTokenSchema = z.string().uuid();
+export const WRITE_LOCK_TOKEN_HEADER = "x-fork-write-lock-token";
 
 const rebaseBodySchema = z
   .object({
@@ -89,6 +92,39 @@ export class PagesController {
     const id = parsed.data;
     const loaded = this.hocusPocusServer.documents.has(id) || this.hocusPocusServer.loadingDocuments.has(id);
     return res.status(200).json({ loaded });
+  }
+
+  // fork (PLN-98): the document write lock (see write-lock.ts). Granted only while the page is not
+  // loaded; the presence check and the lock are one synchronous step, so no load can start in between.
+  // Answers 200 {acquired: true, token, ttl_ms} or 200 {acquired: false, reason: "loaded" | "busy"}.
+  @Post("/:page_id/write-lock")
+  @Middleware(requirePagesApiAccess)
+  lock(req: Request, res: Response) {
+    const parsed = pageIdSchema.safeParse(req.params.page_id);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "page_id must be a UUID" });
+    }
+    const id = parsed.data;
+    if (this.hocusPocusServer.documents.has(id) || this.hocusPocusServer.loadingDocuments.has(id)) {
+      return res.status(200).json({ acquired: false, reason: "loaded" });
+    }
+    const result = acquireWriteLock(id);
+    if (!result.acquired) return res.status(200).json({ acquired: false, reason: result.reason });
+    return res.status(200).json({ acquired: true, token: result.token, ttl_ms: result.ttlMs });
+  }
+
+  // fork (PLN-98): release after the api commit. 204 when released, 404 when the lock was not held
+  // (expired, or a wrong token).
+  @Delete("/:page_id/write-lock")
+  @Middleware(requirePagesApiAccess)
+  unlock(req: Request, res: Response) {
+    const id = pageIdSchema.safeParse(req.params.page_id);
+    const token = lockTokenSchema.safeParse(req.headers[WRITE_LOCK_TOKEN_HEADER]);
+    if (!id.success || !token.success) {
+      return res.status(400).json({ error: "page_id and the lock token must be UUIDs" });
+    }
+    if (!releaseWriteLock(id.data, token.data)) return res.status(404).json({ error: "lock not held" });
+    return res.status(204).end();
   }
 
   // Middleware run bottom-up: access check first, so unauthenticated callers never get a body read.

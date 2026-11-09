@@ -123,6 +123,9 @@ Optional pages API size and time limits (defaults shown; leave unset to use them
   live service:
   PAGES_REBASE_MAX_HTML_BYTES           524288  largest description_html the rebase route converts;
                                                 larger answers 413, which the api passes on
+  PAGES_WRITE_LOCK_TTL_MS               15000   PLN-98: how long a pages API write lock holds back the
+                                                editor load of a page if the api never releases it
+                                                (at most 60000)
                                                 as 413. Keep it at or above the api value
   PAGES_REBASE_TIMEOUT_MS               8000    time budget of one conversion; on expiry the worker thread
                                                 is stopped and the route answers 503 (keep it below the api
