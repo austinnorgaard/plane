@@ -101,6 +101,9 @@ Never run `$C config` without `-q` on the server: it prints every secret.
 
 ## 0. Plan and window
 
+Sections 0 to 12 are the full first-install procedure with an image archive (`fork/build/build.sh`, offline path). For a
+normal update of a running fork deployment use "Updates (normal path)" above; sections 7, 7a, 10 and 11 still apply after it.
+
 One maintenance window covers: deploy, the post-deploy health checks, and a rehearsal of rollback L1 and L2 followed by a roll-forward. Rollback L3 is described but not rehearsed. Budget about 60 to 90 minutes, dominated by the image transfer.
 
 Do not use the community installer (`setup.sh`) at any point. It starts the stack with an explicit `-f` and silently reverts to stock images. See `README.fork`.
@@ -372,7 +375,7 @@ After the health checks, and again 15 minutes later, run from a workstation (sam
 fork/deploy/postdeploy-logs.sh --window 15m
 ```
 
-It reads `docker compose logs --since` for api, worker, beat-worker and live and prints counts (5xx, 503, page PATCH 409 loaded versus unknown (loaded is an upper bound and unknown a lower bound: unknown counts only the presence checks the api logged as failed), "opened during an api update" warnings, tracebacks, live errors, close codes 4401, 4403, 4429, 1013, rate-limit overflows) plus the top distinct error lines with emails, addresses, ids and credentials redacted. Exit 0 is clean, 1 is over a threshold (investigate, and consider rollback L1), 2 is a usage or validation error, 3 means the logs could not be read, which is not a pass. Thresholds are options (`--help`); `--dry-run` prints the command. Needs GNU sed 4.x (the script checks and exits 2 if it is missing), GNU `timeout` and `mktemp` on the workstation; awk was tested with mawk. The overall limit uses `timeout --foreground`, so Ctrl-C stops the run. A quiet counter line such as `errors=0` is not counted. Tests: `fork/deploy/test_postdeploy-logs.sh` (stubbed ssh, pct and docker; `--self-mutate`).
+It reads `docker compose logs --since` for api, worker, beat-worker and live and prints counts (5xx, 503, page PATCH 409 loaded versus unknown (loaded is an upper bound and unknown a lower bound: unknown counts only the presence checks the api logged as failed), "live write lock ... expired before it was released" warnings (PLN-98; older builds logged "opened in an editor during an api update"), tracebacks, live errors, close codes 4401, 4403, 4429, 1013, rate-limit overflows) plus the top distinct error lines with emails, addresses, ids and credentials redacted. Exit 0 is clean, 1 is over a threshold (investigate, and consider rollback L1), 2 is a usage or validation error, 3 means the logs could not be read, which is not a pass. Thresholds are options (`--help`); `--dry-run` prints the command. Needs GNU sed 4.x (the script checks and exits 2 if it is missing), GNU `timeout` and `mktemp` on the workstation; awk was tested with mawk. The overall limit uses `timeout --foreground`, so Ctrl-C stops the run. A quiet counter line such as `errors=0` is not counted.
 
 ## 8. Rehearsal of rollback L1 and L2, then roll forward
 

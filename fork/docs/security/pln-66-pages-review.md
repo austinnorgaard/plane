@@ -193,6 +193,8 @@ Upstream items are documented only and get no fix ticket.
 
 ## Tests run for this review
 
+These ran on 2026-10 against the v1.4.2 base, with the fork's test scripts and suites that were removed on 2026-11-08 (the fork keeps no tests since). They are kept as the record of what the review verified.
+
 - `fork/test/cloud-node-tests.sh install build-libs live-test`: 170 passed (live suite, including the `fork-pages` auth, endpoint and rebase tests).
 - `fork/test/cloud-api-tests.sh --services apt plane/tests/contract/api/test_pages.py` plus six temporary probe tests (not committed): 200 passed, so all 194 existing pages tests pass and the probes behaved as described in F2, F5, F6, F7 and F11.
 - Temporary live probe (not committed) timing `rebase()` for F1.
