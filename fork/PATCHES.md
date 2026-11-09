@@ -52,7 +52,55 @@ One line per touched upstream file: ticket id and the reason.
 - `apps/web/core/components/issues/issue-layouts/filters/header/display-filters/display-filters-selection.tsx`: PLN-107, the auto-collapse option under the extra options of grouped layouts.
 - `.github/workflows/build-branch.yml` (job `branch_build_setup`; every other job needs it), `.github/workflows/codeql.yml` (job `analyze`), `.github/workflows/react-doctor.yml` (job `react-doctor`): PLN-109, `if: github.repository == 'makeplane/plane'` in a marked fork block. The first two run on pushes to `preview`/`canary`/`master`, which the fork syncs from upstream (build-branch would fail without upstream's registry secrets). react-doctor runs on every pull request to any branch, so it ran on the fork's PRs. The other upstream workflows trigger only on PRs to `preview`/`master` or by hand, and are unchanged.
 
-New files (not upstream): `apps/live/src/controllers/events.controller.ts`, `apps/live/src/events/{config,origin,auth,hub}.ts`; `apps/api/plane/api/{urls,views,serializers}/page.py`, `apps/api/plane/utils/live_pages.py`, `apps/api/plane/utils/page_cursor.py` (PLN-104), `apps/api/plane/utils/live_events.py`, `fork/PAGES.md`, `apps/live/src/fork-pages/*`, `fork/tools/*`; PLN-106: `apps/api/plane/db/models/fork_user_settings.py`, `apps/api/plane/db/migrations/0123_fork_user_settings.py`, `apps/api/plane/app/views/user/fork_settings.py`, `apps/web/core/fork/board-settings/*` (PLN-107 adds `auto-collapse.ts` and its components there; PLN-110 adds `components/drop-preview.tsx`); PLN-110 fix: `apps/web/core/fork/live/local-edits.ts`, `apps/web/core/fork/live/issue-sync-queue.ts`; PLN-47: `apps/web/core/fork/live/connection-status.tsx`; PLN-109: `.github/workflows/fork-images.yml`, `fork/build/service-paths.sh`, `fork/deploy/update.sh` (and fork-owned changes to `fork/deploy/{docker-compose.override.yaml,rollback.sh,inspect.sh,RUNBOOK.md,README.fork}` and `fork/build/build.sh`).
+## New files (not upstream)
+
+One bullet per file or fork-owned directory, so parallel PRs add lines instead of editing one shared line (PLN-115). Add
+yours in its group; keep the path first.
+
+api:
+
+- `apps/api/plane/api/urls/page.py`, `apps/api/plane/api/views/page.py`, `apps/api/plane/api/serializers/page.py`: PLN-8 pages API (later PLN-81, 82, 98, 99, 104).
+- `apps/api/plane/utils/live_pages.py`: PLN-8, client of the live pages endpoints (PLN-98 write lock, PLN-99 key rule).
+- `apps/api/plane/utils/page_cursor.py`: PLN-104, keyset cursor of the pages list.
+- `apps/api/plane/utils/openapi/pages.py`: OpenAPI parameters, responses and examples of the pages API.
+- `apps/api/plane/utils/live_events.py`: the ids-only live event publisher (called from the PLN-3 activity hook).
+- `apps/api/plane/db/models/fork_user_settings.py`: PLN-106.
+- `apps/api/plane/db/migrations/0123_fork_user_settings.py`: PLN-106.
+- `apps/api/plane/app/views/user/fork_settings.py`: PLN-106.
+
+live:
+
+- `apps/live/src/controllers/events.controller.ts`: PLN-4, events socket controller.
+- `apps/live/src/events/config.ts`, `origin.ts`, `auth.ts`, `hub.ts`: PLN-4 live events hub (later PLN-96, 106, 110).
+- `apps/live/src/events/address.ts`: client address and trusted proxies (PLN-96).
+- `apps/live/src/events/stats.ts`: live events counters endpoint.
+- `apps/live/src/fork-pages/*`: PLN-9 pages support (presence, rebase, PLN-98 write lock, PLN-99 guard).
+
+web:
+
+- `apps/web/core/lib/live-events/client.ts`: the shared events socket (PLN-47 connection state, PLN-106 user events).
+- `apps/web/core/lib/live-events/apply.ts`: the event applier (PLN-110 fix).
+- `apps/web/core/lib/live-events/use-live-work-items.ts`: the project hook (mounted by the PLN-5 layout patch).
+- `apps/web/core/lib/live-events/filter-match.ts`: PLN-38.
+- `apps/web/core/lib/live-events/metadata.ts`: PLN-36.
+- `apps/web/core/lib/live-events/use-live-workspace-view.ts`: PLN-37.
+- `apps/web/core/fork/board-settings/*`: PLN-106 (PLN-107 adds `auto-collapse.ts` and its components; PLN-110 adds `components/drop-preview.tsx`).
+- `apps/web/core/fork/live/local-edits.ts`: PLN-110 fix.
+- `apps/web/core/fork/live/issue-sync-queue.ts`: PLN-110 fix.
+- `apps/web/core/fork/live/connection-status.tsx`: PLN-47.
+
+ci, build and ops:
+
+- `.github/workflows/fork-images.yml`: PLN-109, CI images.
+- `fork/build/*`: archive build scripts (`build.sh`, `build.ps1`, `measure.sh`, `verify-load.sh`); PLN-109 adds `service-paths.sh`.
+- `fork/docker/Dockerfile.fork-api`: the api image overlay.
+- `fork/deploy/*`: deploy files (`update.sh` PLN-109, `prune-images.sh` PLN-64, `rollback.sh`, `inspect.sh`, `gate.sh`, `fetch-images.sh`, `postdeploy-logs.sh`, `docker-compose.override.yaml`, `RUNBOOK.md`, `README.fork`).
+- `fork/tools/*`: `callsites.py` and its snapshot, `rebase-check.sh` (PLN-46), `upstream-watch.sh` (PLN-73).
+
+docs:
+
+- `fork/PAGES.md`, `fork/PATCHES.md`, `fork/README.md`, `fork/SPIKE.md`: fork documentation.
+- `fork/docs/security/pln-66-pages-review.md`: PLN-66 security review.
 
 ## Drift points (new files that mirror private upstream code)
 
