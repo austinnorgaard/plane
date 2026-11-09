@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-only
+# shellcheck disable=SC2015  # "isnum && range || die" is intended: die exits on any failure
 #
 # postdeploy-logs.sh - objective post-deploy check of the api, worker,
 # beat-worker and live logs (RUNBOOK section 7a).
@@ -76,7 +77,7 @@ redact() {
     -e "s/((proxy-)?authorization)[\"']?[[:space:]]*[:=][[:space:]]*[\"']?[^\"',]*/\\1: [REDACTED]/Ig" \
     -e "s/Bearer[[:space:]]+[A-Za-z0-9._~+\\/=-]+/Bearer [REDACTED]/Ig" \
     -e "s/Basic[[:space:]]+[A-Za-z0-9+\\/=]{8,}/Basic [REDACTED]/Ig" \
-    -e "s/([A-Za-z0-9_.-]*(secret|passw(or)?d|pass|pwd|token|key|signature|credentials?|session[_-]?id|session|sid|auth))[\"']?[[:space:]]*[:=][[:space:]]*(\"[^\"]*\"|'[^']*'|\"[^\"]*\$|'[^']*\$|[^[:space:]\"',;\&}]+)/\\1=[REDACTED]/Ig" \
+    -e "s/([A-Za-z0-9_.-]*(secret|passw(or)?d|passphrase|passw0rd|pass|pwd|token|key|signature|credentials?|session[_-]?id|session|sid|auth|bearer|otp|pin))[\"']?[[:space:]]*([:=]|%3[Dd])[[:space:]]*(\"([^\"\\\\]|\\\\.)*\"|'([^'\\\\]|\\\\.)*'|\"[^\"]*\$|'[^']*\$|[^[:space:]\"',;\&}]+)/\\1=[REDACTED]/Ig" \
     -e "s/(^|[^A-Za-z0-9_])((oauth_)?code)=[^\&[:space:]\"']+/\\1\\2=[REDACTED]/Ig" \
     -e "s/plane_api_[A-Za-z0-9_]+/[APIKEY]/Ig" \
     -e "s/(xox[abposr]-[A-Za-z0-9-]+|gh[pousr]_[A-Za-z0-9]{8,}|sk-[A-Za-z0-9_-]{8,}|AKIA[A-Z0-9]{12,})/[VENDORTOKEN]/g" \
