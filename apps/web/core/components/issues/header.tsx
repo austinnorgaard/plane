@@ -37,6 +37,8 @@ import { useAppRouter } from "@/hooks/use-app-router";
 import { usePlatformOS } from "@/hooks/use-platform-os";
 // plane web imports
 import { CommonProjectBreadcrumbs } from "@/components/breadcrumbs/common";
+// fork (PLN-47): live updates connection indicator
+import { LiveConnectionStatus } from "@/fork/live/connection-status";
 
 export const IssuesHeader = observer(function IssuesHeader() {
   // router
@@ -110,6 +112,8 @@ export const IssuesHeader = observer(function IssuesHeader() {
         )}
       </Header.LeftItem>
       <Header.RightItem>
+        {/* fork (PLN-47) */}
+        <LiveConnectionStatus isMobile={isMobile} />
         <div className="hidden gap-2 md:flex">
           <HeaderFilters
             projectId={projectId}
