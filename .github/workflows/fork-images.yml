@@ -1,0 +1,272 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# fork (PLN-109): build the fork images in CI and push them to GHCR, so a deploy is
+# `fork/deploy/update.sh <sha>` (pull and restart only the changed services) instead of
+# a 50-minute source build on the production box.
+#
+# Images: ghcr.io/austinnorgaard/plane-fork-<web|live|api>. They are PRIVATE packages;
+# this workflow never changes package visibility.
+# Tags:   sha-<40-hex sha>, plus the moving tag live-updates-v1.4.3 when the sha is the
+#         branch head.
+# Same Dockerfiles, contexts and build args as fork/build/build.sh (no build args, repo
+# root as context); build.sh stays as the offline/fallback path.
+#
+# Which images: fork/build/service-paths.sh maps the changed paths to images. On a push
+# the diff is the pushed range (before..sha; for a squash merge that is the whole PR),
+# falling back to sha^..sha. On a manual run the `services` input decides.
+
+name: Fork images
+
+on:
+  push:
+    branches:
+      - live-updates/v1.4.3
+  workflow_dispatch:
+    inputs:
+      services:
+        description: "Images to build: comma list of web,live,api, or all"
+        required: true
+        default: all
+        type: string
+      sha:
+        description: "Full 40-hex sha on live-updates/v1.4.3 (default: the branch head)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: fork-images-${{ inputs.sha || github.sha }}
+  cancel-in-progress: false
+
+env:
+  BRANCH: live-updates/v1.4.3
+  IMAGE_PREFIX: ghcr.io/austinnorgaard/plane-fork
+  MOVING_TAG: live-updates-v1.4.3
+
+jobs:
+  plan:
+    name: Decide which images to build
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.plan.outputs.sha }}
+      services: ${{ steps.plan.outputs.services }}
+      move: ${{ steps.plan.outputs.move }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: plan
+        name: Plan
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_SERVICES: ${{ inputs.services }}
+          INPUT_SHA: ${{ inputs.sha }}
+          PUSH_SHA: ${{ github.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = workflow_dispatch ]; then
+            sha="${INPUT_SHA:-$(git rev-parse HEAD)}"
+          else
+            sha="$PUSH_SHA"
+          fi
+          sha="$(printf '%s' "$sha" | tr 'A-F' 'a-f')"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be 40 hex digits"; exit 1; }
+          git merge-base --is-ancestor "$sha" "origin/$BRANCH" ||
+            { echo "::error::$sha is not on $BRANCH"; exit 1; }
+          head="$(git rev-parse "origin/$BRANCH")"
+          move=false
+          [ "$sha" = "$head" ] && move=true
+
+          if [ "$EVENT" = workflow_dispatch ]; then
+            how="manual run, services input '$INPUT_SERVICES'"
+            list="$(printf '%s' "$INPUT_SERVICES" | tr -d ' ' | tr ',' '\n' | sed '/^$/d')"
+            if [ "$list" = all ]; then list="$(printf 'web\nlive\napi\n')"; fi
+            while IFS= read -r s; do
+              case "$s" in web|live|api) ;; *) echo "::error::unknown service '$s' (use web,live,api or all)"; exit 1 ;; esac
+            done <<< "$list"
+            services="$(for s in web live api; do grep -qx "$s" <<< "$list" && echo "$s"; done || true)"
+          else
+            base=""
+            if [ -n "${PUSH_BEFORE:-}" ] && ! [[ "$PUSH_BEFORE" =~ ^0+$ ]] &&
+              git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null &&
+              git merge-base --is-ancestor "$PUSH_BEFORE" "$sha"; then
+              base="$PUSH_BEFORE"
+            elif git rev-parse -q --verify "$sha^" >/dev/null; then
+              base="$sha^"
+            fi
+            if [ -n "$base" ]; then
+              how="push, diff $(git rev-parse --short "$base")..$(git rev-parse --short "$sha")"
+              services="$(git diff --name-only "$base" "$sha" | bash fork/build/service-paths.sh classify)"
+            else
+              how="push of a root commit, all images"
+              services="$(printf 'web\nlive\napi\n')"
+            fi
+          fi
+
+          json="$(printf '%s\n' "$services" | sed '/^$/d' | jq -R . | jq -sc .)"
+          {
+            echo "sha=$sha"
+            echo "services=$json"
+            echo "move=$move"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Fork images: plan"
+            echo
+            echo "- sha: \`$sha\`"
+            echo "- decided by: $how"
+            echo "- images to build: $( [ "$json" = "[]" ] && echo none || jq -r 'join(", ")' <<< "$json")"
+            echo "- moving tag \`$MOVING_TAG\`: $( [ "$move" = true ] && echo "updated (sha is the branch head)" || echo "not moved (sha is not the branch head)")"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build ${{ matrix.service }}
+    needs: plan
+    if: needs.plan.outputs.services != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.plan.outputs.services) }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+
+      - id: meta
+        name: Image settings
+        env:
+          SERVICE: ${{ matrix.service }}
+          SHA: ${{ needs.plan.outputs.sha }}
+          MOVE: ${{ needs.plan.outputs.move }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # The same Dockerfiles as fork/build/build.sh.
+          case "$SERVICE" in
+            web) file=apps/web/Dockerfile.web ;;
+            live) file=apps/live/Dockerfile.live ;;
+            api) file=fork/docker/Dockerfile.fork-api ;;
+            *) echo "::error::unknown service $SERVICE"; exit 1 ;;
+          esac
+          image="$IMAGE_PREFIX-$SERVICE"
+          {
+            echo "file=$file"
+            echo "image=$image"
+            echo "tags<<EOF"
+            echo "$image:sha-$SHA"
+            if [ "$MOVE" = true ]; then echo "$image:$MOVING_TAG"; fi
+            echo "EOF"
+            echo "labels<<EOF"
+            echo "plane-fork-build=$SHA"
+            echo "org.opencontainers.image.source=$REPO_URL"
+            echo "org.opencontainers.image.revision=$SHA"
+            echo "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "org.opencontainers.image.title=plane-fork-$SERVICE"
+            echo "org.opencontainers.image.version=sha-$SHA"
+            echo "org.opencontainers.image.licenses=AGPL-3.0-only"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ steps.meta.outputs.file }}
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=fork-${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=fork-${{ matrix.service }}
+
+      - name: Record digest
+        env:
+          SERVICE: ${{ matrix.service }}
+          IMAGE: ${{ steps.meta.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p digests
+          jq -n --arg s "$SERVICE" --arg i "$IMAGE" --arg t "sha-$SHA" --arg d "$DIGEST" \
+            '{service: $s, image: $i, tag: $t, digest: $d}' > "digests/$SERVICE.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.service }}
+          path: digests/${{ matrix.service }}.json
+          retention-days: 90
+
+  manifest:
+    name: Manifest
+    needs: [plan, build]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        if: needs.plan.outputs.services != '[]'
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+
+      - name: Write manifest
+        env:
+          SHA: ${{ needs.plan.outputs.sha }}
+          MOVE: ${{ needs.plan.outputs.move }}
+          PLANNED: ${{ needs.plan.outputs.services }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p digests
+          shopt -s nullglob
+          files=(digests/*.json)
+          if [ "${#files[@]}" -gt 0 ]; then images="$(jq -s 'map({(.service): {image, tag, digest}}) | add' "${files[@]}")"; else images='{}'; fi
+          jq -n --arg sha "$SHA" --argjson planned "$PLANNED" --argjson images "$images" \
+            --arg run "$RUN_ID" --arg move "$MOVE" --arg moving "$MOVING_TAG" \
+            '{sha: $sha, run_id: $run, planned: $planned,
+              built: ([$images | keys[]] | sort_by({"web":0,"live":1,"api":2}[.])),
+              moving_tag: (if $move == "true" then $moving else null end), images: $images}' \
+            > fork-images-manifest.json
+          {
+            echo "## Fork images: manifest"
+            echo
+            echo "sha \`$SHA\`, build result: ${BUILD_RESULT}"
+            echo
+            echo "| service | image | tag | digest |"
+            echo "| --- | --- | --- | --- |"
+            jq -r '.images | to_entries[] | "| \(.key) | \(.value.image) | \(.value.tag) | `\(.value.digest)` |"' fork-images-manifest.json
+            if [ "$(jq '.built | length' fork-images-manifest.json)" = 0 ]; then echo "| (none) | | | |"; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat fork-images-manifest.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fork-images-manifest
+          path: fork-images-manifest.json
+          retention-days: 90
+
+      - name: Fail when a planned build failed
+        if: needs.build.result == 'failure' || needs.build.result == 'cancelled'
+        run: |
+          echo "::error::one or more image builds failed; the manifest lists only the images that were pushed"
+          exit 1

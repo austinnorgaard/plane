@@ -18,16 +18,18 @@
 #            proxy: every image that uses APP_RELEASE) exist locally, then
 #            `up -d --pull never --wait --wait-timeout 60` from the upstream
 #            compose file alone, lists services and images, and exits 2 if any
-#            still shows a localhost/plane-fork- image.
+#            still shows a plane-fork- image (from GHCR or localhost).
 #   forward  roll forward: `up -d` with the normal override, check that the five
-#            fork services run the fork tag for FORK_N, then delete the L1 file.
+#            fork services run the images plane.env names (FORK_REGISTRY, default
+#            ghcr.io/austinnorgaard, with FORK_WEB_TAG, FORK_LIVE_TAG and
+#            FORK_API_TAG; api, worker and beat-worker share FORK_API_TAG), then
+#            delete the L1 file. PLN-109: these per-service tags replaced FORK_N.
 #
 # Required environment (operator supplied, no defaults):
 #   PVE_HOST        ssh target of the hypervisor
 #   PLANE_CTID      container id on the hypervisor (numeric)
 #   PLANE_APP_DIR   absolute path of the plane-app directory in the container
 #   STOCK_RELEASE   (l2 only) tag of the stock images running before the deploy
-#   FORK_N          (forward only) fork build number
 #
 # Usage: rollback.sh [--dry-run] l1|l2|forward
 #   --dry-run  print every command that would run; change nothing, connect nowhere.
@@ -46,7 +48,7 @@ MODE=
 for a in "$@"; do
   case "$a" in
     --dry-run) DRY=1 ;;
-    -h|--help) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     l1|l2|forward) [ -z "$MODE" ] || usage; MODE=$a ;;
     *) usage ;;
   esac
@@ -54,7 +56,7 @@ done
 [ -n "$MODE" ] || usage
 
 die() { echo "error: $*" >&2; exit 1; }
-: "${PVE_HOST:=}" "${PLANE_CTID:=}" "${PLANE_APP_DIR:=}" "${STOCK_RELEASE:=}" "${FORK_N:=}"
+: "${PVE_HOST:=}" "${PLANE_CTID:=}" "${PLANE_APP_DIR:=}" "${STOCK_RELEASE:=}"
 [ -n "$PVE_HOST" ] && [ -n "$PLANE_CTID" ] && [ -n "$PLANE_APP_DIR" ] || die "set PVE_HOST, PLANE_CTID and PLANE_APP_DIR"
 case "$PVE_HOST" in -*|*[!A-Za-z0-9._@:-]*) die "PVE_HOST has unexpected characters" ;; esac
 case "$PLANE_CTID" in *[!0-9]*) die "PLANE_CTID must be numeric" ;; esac
@@ -64,11 +66,6 @@ if [ "$MODE" = l2 ]; then
   [ -n "$STOCK_RELEASE" ] || die "l2 needs STOCK_RELEASE (tag of the stock images, from the inspection)"
   case "$STOCK_RELEASE" in *[!A-Za-z0-9._-]*) die "STOCK_RELEASE has unexpected characters" ;; esac
 fi
-if [ "$MODE" = forward ]; then
-  [ -n "$FORK_N" ] || die "forward needs FORK_N"
-  case "$FORK_N" in *[!0-9]*) die "FORK_N must be numeric" ;; esac
-fi
-
 # Remote scripts (POSIX sh, run in the container, cwd = PLANE_APP_DIR).
 read -r -d '' S_L1_GEN <<'EOF'
 cd "$APP_DIR" || { echo "STOP: cannot enter the app dir"; exit 2; }
@@ -125,6 +122,20 @@ EOF
 read -r -d '' S_FWD_PS <<'EOF'
 cd "$APP_DIR" || exit 2
 docker compose -f docker-compose.yaml -f docker-compose.override.yaml --env-file plane.env ps --format '{{.Service}} {{.Image}}'
+EOF
+
+# The images plane.env names for the fork services (only the FORK_* lines are read).
+read -r -d '' S_FWD_WANT <<'EOF'
+cd "$APP_DIR" || exit 2
+val() {
+  v=$(sed -n "s/^$1=//p" plane.env | tail -n 1 | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/")
+  case "$v" in *[!A-Za-z0-9._/:-]*) echo "<invalid>" ;; *) echo "$v" ;; esac
+}
+r=$(val FORK_REGISTRY)
+echo "want.registry=${r:-ghcr.io/austinnorgaard}"
+echo "want.web=$(val FORK_WEB_TAG)"
+echo "want.live=$(val FORK_LIVE_TAG)"
+echo "want.api=$(val FORK_API_TAG)"
 EOF
 
 read -r -d '' S_FWD_RM <<'EOF'
@@ -203,8 +214,8 @@ case "$MODE" in
     fi
     step "list services and images" "$S_L2_PS"
     if [ "$DRY" = 1 ]; then
-      echo "[dry-run] l2: check that no service shows a localhost/plane-fork- image"
-    elif printf '%s\n' "$OUT" | grep -q 'localhost/plane-fork-'; then
+      echo "[dry-run] l2: check that no service shows a plane-fork- image"
+    elif printf '%s\n' "$OUT" | grep -q '/plane-fork-'; then
       echo "STOP: a service still runs a fork image after L2; do not report L2 done, escalate (RUNBOOK L3)" >&2
       exit 2
     else
@@ -213,22 +224,33 @@ case "$MODE" in
     echo "NEXT: ask users to hard-reload (RUNBOOK section 9)"
     ;;
   forward)
+    step "read the fork image tags from plane.env" "$S_FWD_WANT"
+    WANT=$OUT
+    want() { printf '%s\n' "$WANT" | sed -n "s/^want\.$1=//p" | tail -n 1; }
+    if [ "$DRY" = 0 ]; then
+      for k in registry web live api; do
+        case "$(want "$k")" in
+          ''|'<invalid>') echo "STOP: plane.env has no usable value for the $k image (FORK_REGISTRY or FORK_*_TAG); nothing was started" >&2; exit 2 ;;
+        esac
+      done
+    fi
     step "up -d with the normal override" "$S_FWD_UP"
     step "list services and images" "$S_FWD_PS"
     if [ "$DRY" = 1 ]; then
-      echo "[dry-run] forward: check web, live, api, worker, beat-worker run localhost/plane-fork-*:v1.4.3-live.$FORK_N"
+      echo "[dry-run] forward: check web, live, api, worker, beat-worker run \$FORK_REGISTRY/plane-fork-<web|live|api>:\$FORK_<WEB|LIVE|API>_TAG from plane.env"
     else
       bad=
+      reg=$(want registry)
       for pair in web:web live:live api:api worker:api beat-worker:api; do
         svc=${pair%%:*}
         img=${pair##*:}
-        printf '%s\n' "$OUT" | grep -qxF "$svc localhost/plane-fork-$img:v1.4.3-live.$FORK_N" || bad="$bad $svc"
+        printf '%s\n' "$OUT" | grep -qxF "$svc $reg/plane-fork-$img:$(want "$img")" || bad="$bad $svc"
       done
       if [ -n "$bad" ]; then
-        echo "STOP: not on the fork tag v1.4.3-live.$FORK_N:$bad. The L1 file was kept; rerun forward once the override is in place (never use setup.sh)." >&2
+        echo "STOP: not on the images plane.env names:$bad. The L1 file was kept; rerun forward once the override is in place (never use setup.sh)." >&2
         exit 2
       fi
-      echo "image check ok: five services on v1.4.3-live.$FORK_N"
+      echo "image check ok: five services on the plane.env tags (web $(want web), live $(want live), api $(want api))"
     fi
     step "delete the L1 file" "$S_FWD_RM"
     echo "NEXT: smoke tests (RUNBOOK section 7)"

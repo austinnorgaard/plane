@@ -4,6 +4,13 @@
 # build.sh - build the fork images v1.4.3-live.N on a Linux host and save them
 # to a docker-archive tar. Linux counterpart of build.ps1, same contract.
 #
+# OFFLINE / FALLBACK PATH (PLN-109). Normal deploys use the images CI builds
+# (.github/workflows/fork-images.yml, same Dockerfiles and contexts) and
+# fork/deploy/update.sh; see fork/deploy/RUNBOOK.md "Updates". Use this script
+# only when CI or GHCR is unavailable. To run its images, set FORK_REGISTRY=localhost
+# and FORK_WEB_TAG / FORK_LIVE_TAG / FORK_API_TAG=v1.4.3-live.<N> in plane.env.
+# Keep the Dockerfiles, contexts and build args here and in the workflow the same.
+#
 # Usage:
 #   build.sh --sha <40-hex> --n <int> [--out-dir DIR] [--engine docker|podman]
 #                [--ca-bundle FILE] [--build-proxy|--no-build-proxy] [--dry-run]
@@ -55,7 +62,7 @@ die() {
 }
 
 usage() {
-  sed -n '4,44p' "$0" | sed 's/^# \{0,1\}//' >&2
+  sed -n '4,51p' "$0" | sed 's/^# \{0,1\}//' >&2
 }
 
 # Check if a proxy URL (scheme://[userinfo@]host[:port][/path?query#fragment]) has a loopback host.
