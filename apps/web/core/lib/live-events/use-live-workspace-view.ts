@@ -4,23 +4,36 @@
  * See the LICENSE file for details.
  */
 
-import { useContext, useEffect, useRef } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import { sortBy } from "lodash-es";
 // hooks
 import { useProject } from "@/hooks/store/use-project";
 import { useUser } from "@/hooks/store/user";
 import { StoreContext } from "@/lib/store-context";
 // local imports
-import { LiveWorkItemsApplier } from "./apply";
+import { LiveWorkItemsApplier, listedIssueIds } from "./apply";
 import { buildApplierDeps, useWorkItemUnavailableNotice } from "./applier-deps";
 import { getLiveEventsClient } from "./client";
 
 /**
- * PLN-37: at most this many projects are subscribed for a workspace view (the hub allows 100 per socket). The
- * user's joined projects are taken in their sidebar order; work items of other projects in the view update on
- * the next load.
+ * PLN-37: at most this many projects are subscribed for a workspace view (the hub allows 100 per socket).
+ * PLN-122: beyond it, the projects whose work items are in the view come first (pickWorkspaceViewProjects);
+ * work items of projects left out still update on the next load.
  */
 export const MAX_WORKSPACE_VIEW_PROJECTS = 50;
+
+/** PLN-122: a change of the subscribed project set waits this long, so loading or paging a view does not churn */
+export const PROJECT_SET_SETTLE_MS = 3000;
+
+/**
+ * PLN-122: the projects a workspace view subscribes to. Up to the cap, every joined project (sidebar order).
+ * Beyond it, the joined projects whose work items are in the loaded view come first, then the rest in sidebar
+ * order, so the projects the user is looking at are live.
+ */
+export const pickWorkspaceViewProjects = (joined: string[], present: Set<string>, max: number): string[] => {
+  if (joined.length <= max) return joined;
+  return [...joined.filter((id) => present.has(id)), ...joined.filter((id) => !present.has(id))].slice(0, max);
+};
 
 /**
  * PLN-37: keeps a workspace view (all, assigned, created, subscribed, or a saved workspace view) live.
@@ -44,8 +57,29 @@ export const useLiveWorkspaceView = (workspaceSlug: string | undefined, globalVi
   const stores = useRef({ root, notifyUnavailable });
   stores.current = { root, notifyUnavailable };
 
-  // the subscription follows the set of projects only (sorted, so a reorder does not resubscribe)
-  const projectKey = sortBy(joinedProjectIds.slice(0, MAX_WORKSPACE_VIEW_PROJECTS)).join(",");
+  // PLN-122: beyond the cap, the projects present in the loaded view are subscribed first
+  const present = new Set<string>();
+  if (root && joinedProjectIds.length > MAX_WORKSPACE_VIEW_PROJECTS) {
+    for (const id of listedIssueIds(root.issue.workspaceIssues.groupedIssueIds)) {
+      const issueProjectId = root.issue.issues.getIssueById(id)?.project_id;
+      if (issueProjectId) present.add(issueProjectId);
+    }
+  }
+  // the subscription follows the set of projects only (sorted, so a reorder does not resubscribe); the first set
+  // applies at once, later changes after PROJECT_SET_SETTLE_MS (the hub rate-limits subscribe frames per user)
+  const candidateKey = sortBy(pickWorkspaceViewProjects(joinedProjectIds, present, MAX_WORKSPACE_VIEW_PROJECTS)).join(
+    ","
+  );
+  const [projectKey, setProjectKey] = useState(candidateKey);
+  useEffect(() => {
+    if (candidateKey === projectKey) return;
+    if (!projectKey) {
+      setProjectKey(candidateKey);
+      return;
+    }
+    const timer = setTimeout(() => setProjectKey(candidateKey), PROJECT_SET_SETTLE_MS);
+    return () => clearTimeout(timer);
+  }, [candidateKey, projectKey]);
 
   useEffect(() => {
     const { root: rootStore, notifyUnavailable: notify } = stores.current;
