@@ -31,6 +31,9 @@ import { getGroupByColumns, isWorkspaceLevel } from "../utils";
 import { KanBan } from "./default";
 import { HeaderGroupByCard } from "./headers/group-by-card";
 import { HeaderSubGroupByCard } from "./headers/sub-group-by-card";
+// fork (PLN-108): a collapsed sub-group row accepts drops while auto-collapse is on
+import { useAutoCollapseEnabled } from "@/fork/board-settings/auto-collapse";
+import { CollapsedRowDropTarget } from "@/fork/board-settings/components/collapsed-column-drop-target";
 
 interface ISubGroupSwimlaneHeader {
   collapsedGroups: TIssueKanbanFilters;
@@ -118,6 +121,8 @@ interface ISubGroupSwimlane extends ISubGroupSwimlaneHeader {
   ) => number | undefined;
   groupedIssueIds: TGroupedIssues | TSubGroupedIssues;
   handleCollapsedGroups: (toggle: "group_by" | "sub_group_by", value: string) => void;
+  /** fork (PLN-108): opens a collapsed group after a drop onto it (never a toggle) */
+  handleExpandGroup?: (toggle: "group_by" | "sub_group_by", value: string) => void;
   handleOnDrop: (source: GroupDropLocation, destination: GroupDropLocation) => Promise<void>;
   isEpic?: boolean;
   issuesMap: IIssueMap;
@@ -142,6 +147,7 @@ const SubGroupSwimlane = observer(function SubGroupSwimlane(props: ISubGroupSwim
     group_by,
     groupedIssueIds,
     handleCollapsedGroups,
+    handleExpandGroup,
     handleOnDrop,
     isEpic = false,
     issuesMap,
@@ -155,6 +161,7 @@ const SubGroupSwimlane = observer(function SubGroupSwimlane(props: ISubGroupSwim
     sub_group_by,
     updateIssue,
   } = props;
+  const autoCollapse = useAutoCollapseEnabled();
 
   const visibilitySubGroupBy = (
     _list: IGroupByColumn,
@@ -185,15 +192,24 @@ const SubGroupSwimlane = observer(function SubGroupSwimlane(props: ISubGroupSwim
             <div key={_list.id} className="flex flex-shrink-0 flex-col">
               <div className="sticky top-[50px] z-[3] flex w-full items-center border-y-[0.5px] border-subtle bg-layer-1 py-1">
                 <Row className="sticky left-0 flex-shrink-0">
-                  <HeaderSubGroupByCard
-                    column_id={_list.id}
-                    icon={_list.icon}
-                    title={_list.name}
-                    count={issueCount}
-                    collapsedGroups={collapsedGroups}
-                    handleCollapsedGroups={handleCollapsedGroups}
-                    sub_group_by={sub_group_by}
-                  />
+                  <CollapsedRowDropTarget
+                    enabled={autoCollapse && !subGroupByVisibilityToggle.showIssues}
+                    subGroupId={_list.id}
+                    isDropDisabled={!!_list.isDropDisabled}
+                    dropErrorMessage={_list.dropErrorMessage}
+                    handleOnDrop={handleOnDrop}
+                    onDropped={() => handleExpandGroup?.("sub_group_by", _list.id)}
+                  >
+                    <HeaderSubGroupByCard
+                      column_id={_list.id}
+                      icon={_list.icon}
+                      title={_list.name}
+                      count={issueCount}
+                      collapsedGroups={collapsedGroups}
+                      handleCollapsedGroups={handleCollapsedGroups}
+                      sub_group_by={sub_group_by}
+                    />
+                  </CollapsedRowDropTarget>
                 </Row>
               </div>
 
@@ -212,6 +228,7 @@ const SubGroupSwimlane = observer(function SubGroupSwimlane(props: ISubGroupSwim
                     quickActions={quickActions}
                     collapsedGroups={collapsedGroups}
                     handleCollapsedGroups={handleCollapsedGroups}
+                    handleExpandGroup={handleExpandGroup}
                     showEmptyGroup={showEmptyGroup}
                     enableQuickIssueCreate={enableQuickIssueCreate}
                     disableIssueCreation={disableIssueCreation}
@@ -250,6 +267,8 @@ export interface IKanBanSwimLanes {
   group_by: TIssueGroupByOptions | undefined;
   groupedIssueIds: TGroupedIssues | TSubGroupedIssues;
   handleCollapsedGroups: (toggle: "group_by" | "sub_group_by", value: string) => void;
+  /** fork (PLN-108): opens a collapsed group after a drop onto it (never a toggle) */
+  handleExpandGroup?: (toggle: "group_by" | "sub_group_by", value: string) => void;
   handleOnDrop: (source: GroupDropLocation, destination: GroupDropLocation) => Promise<void>;
   isEpic?: boolean;
   issuesMap: IIssueMap;
@@ -276,6 +295,7 @@ export const KanBanSwimLanes = observer(function KanBanSwimLanes(props: IKanBanS
     quickActions,
     collapsedGroups,
     handleCollapsedGroups,
+    handleExpandGroup,
     loadMoreIssues,
     showEmptyGroup,
     handleOnDrop,
@@ -334,6 +354,7 @@ export const KanBanSwimLanes = observer(function KanBanSwimLanes(props: IKanBanS
           quickActions={quickActions}
           collapsedGroups={collapsedGroups}
           handleCollapsedGroups={handleCollapsedGroups}
+          handleExpandGroup={handleExpandGroup}
           loadMoreIssues={loadMoreIssues}
           showEmptyGroup={showEmptyGroup}
           handleOnDrop={handleOnDrop}

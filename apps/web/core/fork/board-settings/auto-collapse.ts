@@ -17,9 +17,15 @@
  * automatic state applies again. Overrides are never stored in the kanban_filters collapse list.
  *
  * With the setting off, the stored collapse list and its toggle are passed through unchanged.
+ *
+ * fork (PLN-108): a drop onto a collapsed group must open it, so drops call expandGroup, never the toggle.
+ * The drop updates the board store before the drop handler returns, so by the time a toggle ran the group was
+ * already non-empty, and the toggle recorded an override that inverted the new automatic state: the group the
+ * ticket moved into stayed collapsed. expandGroup clears the group's override instead, so the group follows
+ * its count (open as soon as it holds the ticket; collapsed again if the move is refused or reverted).
  */
 
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { action, observable } from "mobx";
 // plane imports
 import type { EIssuesStoreType, GroupByColumnTypes, TIssueKanbanFilters } from "@plane/types";
@@ -44,6 +50,10 @@ export const isGroupCollapsed = (empty: boolean, override: boolean | undefined):
 const toggleOverride = action((key: string, empty: boolean) => {
   if (overrides.get(key) === empty) overrides.delete(key);
   else overrides.set(key, empty);
+});
+
+const clearOverride = action((key: string) => {
+  overrides.delete(key);
 });
 
 const dropStaleOverrides = action((keys: Map<string, boolean>) => {
@@ -131,8 +141,20 @@ export const useAutoCollapseGroups = (params: TParams) => {
     [enabled, onStoredToggle, scope, isEmpty]
   );
 
-  if (!enabled) return { autoCollapse: false, collapsedGroups: stored, handleToggle };
-  if (!loaded) return { autoCollapse: true, collapsedGroups: { group_by: [], sub_group_by: [] }, handleToggle };
+  // latest values for expandGroup, which drop targets capture once (their effects do not re-subscribe on every render)
+  const latest = useRef({ enabled, scope, stored, onStoredToggle });
+  latest.current = { enabled, scope, stored, onStoredToggle };
+
+  /** Opens a group after a drop: auto mode drops its override; off, it opens a group the stored list collapses. */
+  const expandGroup = useCallback((toggle: TToggle, groupId: string) => {
+    const current = latest.current;
+    if (current.enabled) return clearOverride(overrideKey(current.scope, toggle, groupId));
+    if (current.stored[toggle]?.includes(groupId)) current.onStoredToggle(toggle, groupId);
+  }, []);
+
+  if (!enabled) return { autoCollapse: false, collapsedGroups: stored, handleToggle, expandGroup };
+  if (!loaded)
+    return { autoCollapse: true, collapsedGroups: { group_by: [], sub_group_by: [] }, handleToggle, expandGroup };
 
   const collapsed = (toggle: TToggle, ids: string[]) =>
     ids.filter((id) => {
@@ -143,5 +165,5 @@ export const useAutoCollapseGroups = (params: TParams) => {
     group_by: collapsed("group_by", groupIds),
     sub_group_by: collapsed("sub_group_by", subGroupIds),
   };
-  return { autoCollapse: true, collapsedGroups, handleToggle };
+  return { autoCollapse: true, collapsedGroups, handleToggle, expandGroup };
 };
