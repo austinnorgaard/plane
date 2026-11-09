@@ -9,7 +9,7 @@ import type { IncomingHttpHeaders } from "http";
 import type { BlockList } from "net";
 import { z } from "zod";
 import { logger } from "@plane/logger";
-import { buildTrustedProxies, isPrivateAddress, resolveClientAddress } from "./address";
+import { buildTrustedProxies, isPrivateAddress, isTrustedPeer, resolveClientAddress } from "./address";
 import type { EventsAuthApi } from "./auth";
 import {
   CLOSE_AUTH,
@@ -67,10 +67,21 @@ export type HubStats = {
   sockets: { open: number; authenticated: number; pending: number };
   accepted: number;
   authenticated: number;
-  rejected: { pendingCap: number; addressCap: number; authFail: number; authTimeout: number; other: number };
+  rejected: {
+    pendingCap: number;
+    addressCap: number;
+    authFail: number;
+    authTimeout: number;
+    /** fork (PLN-96): authenticated sockets closed for sending no subscribe in time */
+    noSubscribe: number;
+    other: number;
+  };
   framesSent: number;
   invalid: { redisDropped: number; clientMessages: number };
-  rateLimitOverflows: { inboundMessages: number; projectEvents: number };
+  /** userSubscribes (PLN-96): 4429 closes for the per-user subscribe rate */
+  rateLimitOverflows: { inboundMessages: number; projectEvents: number; userSubscribes: number };
+  /** fork (PLN-96): project roles lookups: answered from the cache, joined an in-flight call, or sent upstream */
+  rolesLookups: { cached: number; shared: number; upstream: number };
   /** fork (PLN-110 fix): frames sent as a full refresh, by cause */
   fullRefreshes: { hardOverflow: number; wildcard: number; itemCap: number };
   revalidationCloses: { auth4401: number; unavailable1013: number };
@@ -81,6 +92,7 @@ export type WarnLog = { warn: (message: string) => unknown };
 const INVALID_WARN_INTERVAL_MS = 60_000;
 const AUTH_FAIL_WARN_INTERVAL_MS = 60_000;
 const MAX_NEGATIVE_CACHE_ENTRIES = 10_000;
+const MAX_ROLES_CACHE_ENTRIES = 5000;
 
 export const EVENT_KINDS = [
   "issue",
@@ -95,6 +107,9 @@ export const EVENT_KINDS = [
   "intake",
   "state",
   "label",
+  // fork (PLN-36): cycle and module definitions (metadata, published as "*"), apart from the membership kinds
+  "cycle_definition",
+  "module_definition",
 ] as const;
 export const EVENT_VERBS = ["created", "updated", "deleted", "removed", "archived", "unarchived", "restored"] as const;
 
@@ -157,6 +172,8 @@ type RejectCounter =
   | "rejectedAuthTimeout"
   | "rejectedOther";
 
+type RolesEntry = { expires: number; roles?: Record<string, number>; flight?: Promise<Record<string, number>> };
+
 type Item = { issue_id: string; kinds: Set<string>; verbs: Set<string>; actor_ids: Set<string> };
 type Pending = { items: Map<string, Item>; full: boolean; timer: ReturnType<typeof setTimeout> | null };
 
@@ -177,6 +194,8 @@ type Client = {
   inboundStart: number;
   inboundCount: number;
   deadline: ReturnType<typeof setTimeout> | null;
+  /** fork (PLN-96): set at authentication, cleared by the first subscribe */
+  subscribeDeadline: ReturnType<typeof setTimeout> | null;
   revalTimer: ReturnType<typeof setTimeout> | null;
   revalFailures: number;
   closed: boolean;
@@ -211,7 +230,14 @@ export class EventsHub {
   private readonly cacheKey = randomBytes(32);
   private readonly failedCookies = new Map<string, number>(); // keyed digest -> expiry (ms)
   private readonly perAddress = new Map<string, number>();
+  // fork (PLN-96): project roles per user and workspace, short-lived, one upstream call at a time
+  private readonly rolesCache = new Map<string, RolesEntry>();
+  // fork (PLN-96): subscribe messages per user in the current second, across the user's sockets
+  private readonly userSubscribeRate = new Map<string, { start: number; count: number }>();
   private readonly proxiesConfigured: boolean;
+  private trustedPeerSeen = false;
+  private untrustedPeers = 0;
+  private warnedProxiesNeverMatch = false;
   private warnedCapInactive = false;
   private pendingCount = 0;
   private authFailures = 0;
@@ -230,11 +256,16 @@ export class EventsHub {
     rejectedAddressCap: 0,
     rejectedAuthFail: 0,
     rejectedAuthTimeout: 0,
+    rejectedNoSubscribe: 0,
     rejectedOther: 0,
     framesSent: 0,
     invalidClientMessages: 0,
     overflowInbound: 0,
     overflowProject: 0,
+    overflowUserSubscribes: 0,
+    rolesCached: 0,
+    rolesShared: 0,
+    rolesUpstream: 0,
     fullHardOverflow: 0,
     fullWildcard: 0,
     fullItemCap: 0,
@@ -280,11 +311,17 @@ export class EventsHub {
         addressCap: c.rejectedAddressCap,
         authFail: c.rejectedAuthFail,
         authTimeout: c.rejectedAuthTimeout,
+        noSubscribe: c.rejectedNoSubscribe,
         other: c.rejectedOther,
       },
       framesSent: c.framesSent,
       invalid: { redisDropped: this.invalidDropped, clientMessages: c.invalidClientMessages },
-      rateLimitOverflows: { inboundMessages: c.overflowInbound, projectEvents: c.overflowProject },
+      rateLimitOverflows: {
+        inboundMessages: c.overflowInbound,
+        projectEvents: c.overflowProject,
+        userSubscribes: c.overflowUserSubscribes,
+      },
+      rolesLookups: { cached: c.rolesCached, shared: c.rolesShared, upstream: c.rolesUpstream },
       fullRefreshes: { hardOverflow: c.fullHardOverflow, wildcard: c.fullWildcard, itemCap: c.fullItemCap },
       revalidationCloses: { auth4401: c.revalAuth, unavailable1013: c.revalUnavailable },
     };
@@ -322,6 +359,8 @@ export class EventsHub {
     this.pending.clear();
     this.pendingUser.forEach((p) => clearTimeout(p.timer));
     this.pendingUser.clear();
+    this.rolesCache.clear();
+    this.userSubscribeRate.clear();
     for (const client of this.clients) this.close(client, 1001, "shutdown");
     try {
       await this.subscriber?.quit();
@@ -353,8 +392,14 @@ export class EventsHub {
     const headers = req.headers;
     if (
       !isOriginAllowed(
-        { origin: headers.origin, host: headers.host, forwardedHost: headers["x-forwarded-host"] },
-        this.allowlist
+        {
+          origin: headers.origin,
+          host: headers.host,
+          forwardedHost: headers["x-forwarded-host"],
+          forwardedProto: headers["x-forwarded-proto"],
+        },
+        this.allowlist,
+        this.config.originHostFallback
       )
     ) {
       return reject(CLOSE_ORIGIN, "origin not allowed");
@@ -363,6 +408,7 @@ export class EventsHub {
     if (!cookie) return reject(CLOSE_AUTH, "unauthenticated", "rejectedAuthFail");
     // a cookie that was just refused is refused again without any upstream work
     if (this.isCookieFailed(cookie)) return reject(CLOSE_AUTH, "unauthenticated", "rejectedAuthFail");
+    this.noteProxyMatch(req.socket?.remoteAddress);
     const address = resolveClientAddress(req.socket?.remoteAddress, headers["x-forwarded-for"], this.trusted);
     // Without a trusted proxy list a private direct peer is most likely the reverse proxy itself, so
     // every user would share one address: the per-address cap is skipped for it (with a warning).
@@ -395,6 +441,7 @@ export class EventsHub {
       inboundStart: Date.now(),
       inboundCount: 0,
       deadline: null,
+      subscribeDeadline: null,
       revalTimer: null,
       revalFailures: 0,
       closed: false,
@@ -434,7 +481,7 @@ export class EventsHub {
         }
         this.counters.authenticated++;
         this.markAuthenticated(client);
-        this.scheduleRevalidation(client);
+        this.scheduleRevalidation(client, true);
         return true;
       })
       .catch((error) => {
@@ -447,7 +494,7 @@ export class EventsHub {
         return false;
       });
 
-    ws.on("message", (data: unknown, isBinary?: boolean) => this.onClientMessage(client, data, isBinary));
+    ws.on("message", (data: unknown) => this.onClientMessage(client, data));
     ws.on("pong", () => {
       client.missedPongs = 0;
     });
@@ -455,7 +502,7 @@ export class EventsHub {
     ws.on("error", () => this.close(client, 1011, "socket error"));
   }
 
-  private onClientMessage(client: Client, data: unknown, isBinary?: boolean): void {
+  private onClientMessage(client: Client, data: unknown): void {
     if (client.closed) return;
     // The first-message deadline keeps running until authentication has succeeded.
     client.gotMessage = true;
@@ -473,10 +520,6 @@ export class EventsHub {
       ? data.reduce((n: number, b: Buffer) => n + b.length, 0)
       : ((data as { byteLength?: number })?.byteLength ?? String(data).length);
     if (size > this.config.maxMessageBytes) return this.close(client, CLOSE_TOO_LARGE, "message too large");
-    if (isBinary) {
-      this.counters.invalidClientMessages++;
-      return this.close(client, CLOSE_BAD_MESSAGE, "text frames only");
-    }
 
     const text = Array.isArray(data) ? Buffer.concat(data as Buffer[]).toString("utf8") : String(data);
     let message: z.infer<typeof clientMessageSchema>;
@@ -508,6 +551,14 @@ export class EventsHub {
     if (!isValidWorkspaceSlug(message.workspace_slug)) {
       return this.close(client, CLOSE_BAD_MESSAGE, "invalid workspace");
     }
+    // fork (PLN-96): the socket has subscribed; and one user's sockets together get a bounded subscribe rate,
+    // because every subscribe may cost a roles lookup upstream
+    if (client.subscribeDeadline) clearTimeout(client.subscribeDeadline);
+    client.subscribeDeadline = null;
+    if (!this.allowUserSubscribe(client)) {
+      this.counters.overflowUserSubscribes++;
+      return this.close(client, CLOSE_LIMIT, "subscribe rate exceeded");
+    }
     const requested = [...new Set(message.project_ids)];
     // a fresh subscribe re-evaluates anything that was waiting for a retry
     for (const id of requested) client.retry.delete(id);
@@ -516,7 +567,7 @@ export class EventsHub {
 
     let roles: Record<string, number>;
     try {
-      roles = await this.auth.projectRoles(client.cookie, message.workspace_slug);
+      roles = await this.projectRoles(client, message.workspace_slug);
     } catch (error) {
       const failure = classifyRolesError(error);
       if (failure === "session") return this.close(client, CLOSE_AUTH, "session ended");
@@ -557,6 +608,83 @@ export class EventsHub {
     }
   }
 
+  // ------------------------------------------------------ roles cache (PLN-96)
+
+  /**
+   * Project roles of the client's user in a workspace. A successful answer is cached per user and
+   * workspace for rolesCacheMs, and concurrent lookups for the same key share one upstream call. A
+   * caller that joined another socket's call and saw it fail asks again with its own cookie, so one
+   * dead session cannot close a sibling socket. Failures are never cached.
+   */
+  private async projectRoles(client: Client, slug: string): Promise<Record<string, number>> {
+    if (!client.userId || this.config.rolesCacheMs <= 0) {
+      this.counters.rolesUpstream++;
+      return this.auth.projectRoles(client.cookie, slug);
+    }
+    const key = `${client.userId}\n${slug}`;
+    const now = Date.now();
+    const entry = this.rolesCache.get(key);
+    if (entry?.roles && entry.expires > now) {
+      this.counters.rolesCached++;
+      return entry.roles;
+    }
+    if (entry?.flight) {
+      this.counters.rolesShared++;
+      try {
+        return await entry.flight;
+      } catch {
+        this.counters.rolesUpstream++;
+        return this.auth.projectRoles(client.cookie, slug);
+      }
+    }
+    this.counters.rolesUpstream++;
+    this.pruneRolesCache(now);
+    const flight = this.auth.projectRoles(client.cookie, slug);
+    const pending: RolesEntry = { expires: 0, flight };
+    this.rolesCache.set(key, pending);
+    try {
+      const roles = await flight;
+      if (this.rolesCache.get(key) === pending) {
+        this.rolesCache.set(key, { expires: Date.now() + this.config.rolesCacheMs, roles });
+      }
+      return roles;
+    } catch (error) {
+      if (this.rolesCache.get(key) === pending) this.rolesCache.delete(key);
+      throw error;
+    }
+  }
+
+  private pruneRolesCache(now: number) {
+    if (this.rolesCache.size < MAX_ROLES_CACHE_ENTRIES) return;
+    for (const [key, entry] of this.rolesCache) if (!entry.flight && entry.expires <= now) this.rolesCache.delete(key);
+    for (const key of this.rolesCache.keys()) {
+      if (this.rolesCache.size < MAX_ROLES_CACHE_ENTRIES) break;
+      this.rolesCache.delete(key);
+    }
+  }
+
+  private allowUserSubscribe(client: Client): boolean {
+    if (!client.userId) return true;
+    const now = Date.now();
+    let rate = this.userSubscribeRate.get(client.userId);
+    if (!rate || now - rate.start >= 1000) this.userSubscribeRate.set(client.userId, (rate = { start: now, count: 0 }));
+    return ++rate.count <= this.config.maxUserSubscribesPerSec;
+  }
+
+  /** One warning when LIVE_EVENTS_TRUSTED_PROXIES is set but no connection ever comes from one of them. */
+  private noteProxyMatch(peer: string | undefined) {
+    if (!this.proxiesConfigured || this.trustedPeerSeen || this.warnedProxiesNeverMatch) return;
+    if (isTrustedPeer(peer, this.trusted)) {
+      this.trustedPeerSeen = true;
+      return;
+    }
+    if (++this.untrustedPeers < this.config.trustedProxyWarnAfter) return;
+    this.warnedProxiesNeverMatch = true;
+    this.log.warn(
+      `LIVE_EVENTS: none of the first ${this.untrustedPeers} connections came from LIVE_EVENTS_TRUSTED_PROXIES; X-Forwarded-For is not used, check the list`
+    );
+  }
+
   private sharedProxyPeer(address: string): boolean {
     if (this.proxiesConfigured || !isPrivateAddress(address)) return false;
     if (!this.warnedCapInactive) {
@@ -580,12 +708,21 @@ export class EventsHub {
     if (client.authTimer) clearTimeout(client.authTimer);
     client.authTimer = null;
     if (client.gotMessage) this.clearDeadline(client);
+    // fork (PLN-96): an authenticated socket that never subscribes only holds a slot
+    client.subscribeDeadline = setTimeout(() => {
+      client.subscribeDeadline = null;
+      if (client.closed) return;
+      this.counters.rejectedNoSubscribe++;
+      this.close(client, CLOSE_DEADLINE, "no subscription");
+    }, this.config.subscribeDeadlineMs);
+    client.subscribeDeadline.unref?.();
   }
 
   private release(client: Client) {
     if (client.closed) return;
     client.closed = true;
     if (client.deadline) clearTimeout(client.deadline);
+    if (client.subscribeDeadline) clearTimeout(client.subscribeDeadline);
     if (client.authTimer) clearTimeout(client.authTimer);
     if (client.revalTimer) clearTimeout(client.revalTimer);
     if (client.pending) {
@@ -637,6 +774,7 @@ export class EventsHub {
   private heartbeat() {
     const now = Date.now();
     for (const [id, r] of this.rate) if (now - r.start >= 1000) this.rate.delete(id);
+    for (const [id, r] of this.userSubscribeRate) if (now - r.start >= 1000) this.userSubscribeRate.delete(id);
     for (const client of this.clients) {
       if (client.missedPongs >= this.config.maxMissedPongs) {
         this.release(client);
@@ -665,13 +803,25 @@ export class EventsHub {
     return Math.round(revalidateMs * (1 + (this.random() * 2 - 1) * revalidateJitter));
   }
 
+  /**
+   * fork (PLN-96): the first revalidation of a socket is spread uniformly over the whole interval (at
+   * least 1 s): after a restart every client reconnects at once, and +/- jitter alone would keep those
+   * rechecks bunched together for many cycles.
+   */
+  firstRevalidateDelay(): number {
+    return Math.max(1000, Math.round(this.config.revalidateMs * this.random()));
+  }
+
   // Each socket revalidates on its own jittered timer so the upstream calls are spread out.
-  private scheduleRevalidation(client: Client) {
+  private scheduleRevalidation(client: Client, first = false) {
     if (client.closed || this.stopped) return;
-    client.revalTimer = setTimeout(() => {
-      client.revalTimer = null;
-      void this.runRevalidation(client);
-    }, this.nextRevalidateDelay());
+    client.revalTimer = setTimeout(
+      () => {
+        client.revalTimer = null;
+        void this.runRevalidation(client);
+      },
+      first ? this.firstRevalidateDelay() : this.nextRevalidateDelay()
+    );
     client.revalTimer.unref?.();
   }
 
@@ -717,7 +867,7 @@ export class EventsHub {
       let roles: Record<string, number>;
       try {
         // oxlint-disable-next-line no-await-in-loop
-        roles = await this.auth.projectRoles(client.cookie, slug);
+        roles = await this.projectRoles(client, slug);
       } catch (error) {
         const failure = classifyRolesError(error);
         if (failure === "session") {

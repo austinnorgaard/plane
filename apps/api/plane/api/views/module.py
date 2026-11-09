@@ -6,7 +6,6 @@
 import json
 
 # Django imports
-from django.core import serializers
 from django.db.models import Count, F, Func, OuterRef, Prefetch, Q
 from django.utils import timezone
 from django.core.serializers.json import DjangoJSONEncoder
@@ -73,6 +72,7 @@ from plane.utils.openapi import (
     MODULE_ISSUE_NOT_FOUND_RESPONSE,
     CANNOT_ARCHIVE_RESPONSE,
 )
+from plane.utils.live_events import publish_metadata_event
 
 
 class ModuleListCreateAPIEndpoint(BaseAPIView):
@@ -239,6 +239,7 @@ class ModuleListCreateAPIEndpoint(BaseAPIView):
             )
             module = Module.objects.get(pk=serializer.instance.id)
             serializer = ModuleSerializer(module)
+            publish_metadata_event(project_id, "module_definition", "created", request.user.id)  # fork (PLN-36)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -496,6 +497,7 @@ class ModuleDetailAPIEndpoint(BaseAPIView):
                 origin=base_host(request=request, is_app=True),
             )
 
+            publish_metadata_event(project_id, "module_definition", "updated", request.user.id)  # fork (PLN-36)
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -580,6 +582,8 @@ class ModuleDetailAPIEndpoint(BaseAPIView):
         ModuleIssue.objects.filter(module=pk, project_id=project_id).delete()
         # Delete the user favorite module
         UserFavorite.objects.filter(entity_type="module", entity_identifier=pk, project_id=project_id).delete()
+        # fork (PLN-36)
+        publish_metadata_event(project_id, "module_definition", "deleted", request.user.id, settle=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -720,62 +724,50 @@ class ModuleIssueListCreateAPIEndpoint(BaseAPIView):
             return Response({"error": "Issues are required"}, status=status.HTTP_400_BAD_REQUEST)
         module = Module.objects.get(workspace__slug=slug, project_id=project_id, pk=module_id)
 
-        issues = Issue.objects.filter(workspace__slug=slug, project_id=project_id, pk__in=issues).values_list(
-            "id", flat=True
+        # fork (PLN-44): a concrete list of UUIDs. The upstream code kept a values_list QuerySet and compared
+        # str(module_issue.issue_id) against its UUIDs, which never matched (and ignored the loop's own work
+        # item), and passed str(QuerySet) to the activity task. Work items can belong to several modules, so
+        # adding to this module never moves them out of another one: the "move" branch could not run before
+        # and is gone; the effective behaviour (add, ignoring existing memberships) is kept.
+        issue_ids = list(
+            Issue.objects.filter(workspace__slug=slug, project_id=project_id, pk__in=issues).values_list(
+                "id", flat=True
+            )
         )
+        already_in_module = set(
+            ModuleIssue.objects.filter(module_id=module_id, issue_id__in=issue_ids).values_list("issue_id", flat=True)
+        )
+        added_issue_ids = [issue_id for issue_id in issue_ids if issue_id not in already_in_module]
 
-        module_issues = list(ModuleIssue.objects.filter(issue_id__in=issues))
-
-        update_module_issue_activity = []
-        records_to_update = []
-        record_to_create = []
-
-        for issue in issues:
-            module_issue = [module_issue for module_issue in module_issues if str(module_issue.issue_id) in issues]
-
-            if len(module_issue):
-                if module_issue[0].module_id != module_id:
-                    update_module_issue_activity.append(
-                        {
-                            "old_module_id": str(module_issue[0].module_id),
-                            "new_module_id": str(module_id),
-                            "issue_id": str(module_issue[0].issue_id),
-                        }
-                    )
-                    module_issue[0].module_id = module_id
-                    records_to_update.append(module_issue[0])
-            else:
-                record_to_create.append(
-                    ModuleIssue(
-                        module=module,
-                        issue_id=issue,
-                        project_id=project_id,
-                        workspace=module.workspace,
-                        created_by=request.user,
-                        updated_by=request.user,
-                    )
+        ModuleIssue.objects.bulk_create(
+            [
+                ModuleIssue(
+                    module=module,
+                    issue_id=issue_id,
+                    project_id=project_id,
+                    workspace=module.workspace,
+                    created_by=request.user,
+                    updated_by=request.user,
                 )
-
-        ModuleIssue.objects.bulk_create(record_to_create, batch_size=10, ignore_conflicts=True)
-
-        ModuleIssue.objects.bulk_update(records_to_update, ["module"], batch_size=10)
-
-        # Capture Issue Activity
-        issue_activity.delay(
-            type="module.activity.created",
-            requested_data=json.dumps({"modules_list": str(issues)}),
-            actor_id=str(self.request.user.id),
-            issue_id=None,
-            project_id=str(self.kwargs.get("project_id", None)),
-            current_instance=json.dumps(
-                {
-                    "updated_module_issues": update_module_issue_activity,
-                    "created_module_issues": serializers.serialize("json", record_to_create),
-                }
-            ),
-            epoch=int(timezone.now().timestamp()),
-            origin=base_host(request=request, is_app=True),
+                for issue_id in added_issue_ids
+            ],
+            batch_size=10,
+            ignore_conflicts=True,
         )
+
+        # Capture Issue Activity: one per added work item, in the shape the activity task reads (the same as
+        # the app's module bulk add), which also publishes the live event for each work item
+        for issue_id in added_issue_ids:
+            issue_activity.delay(
+                type="module.activity.created",
+                requested_data=json.dumps({"module_id": str(module_id)}),
+                actor_id=str(self.request.user.id),
+                issue_id=str(issue_id),
+                project_id=str(self.kwargs.get("project_id", None)),
+                current_instance=None,
+                epoch=int(timezone.now().timestamp()),
+                origin=base_host(request=request, is_app=True),
+            )
 
         return Response(
             ModuleIssueSerializer(self.get_queryset(), many=True).data,
@@ -1101,6 +1093,7 @@ class ModuleArchiveUnarchiveAPIEndpoint(BaseAPIView):
             project_id=project_id,
             workspace__slug=slug,
         ).delete()
+        publish_metadata_event(project_id, "module_definition", "archived", request.user.id)  # fork (PLN-36)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @module_docs(
@@ -1124,4 +1117,5 @@ class ModuleArchiveUnarchiveAPIEndpoint(BaseAPIView):
         module = Module.objects.get(pk=pk, project_id=project_id, workspace__slug=slug)
         module.archived_at = None
         module.save()
+        publish_metadata_event(project_id, "module_definition", "unarchived", request.user.id)  # fork (PLN-36)
         return Response(status=status.HTTP_204_NO_CONTENT)

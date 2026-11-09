@@ -79,15 +79,29 @@ Optional live events limits (set in the live service environment; defaults shown
   LIVE_EVENTS_TRUSTED_PROXIES           empty  comma-separated IPs or CIDR ranges of reverse proxies whose
                                                X-Forwarded-For is trusted for the per-address limit.
                                                The per-address limit depends on this setting: while it
-                                               is empty, sockets from a loopback, private, link-local or
-                                               unique-local peer (normally the proxy itself) are not
+                                               is empty, sockets from a loopback, private (including
+                                               100.64.0.0/10, the CGNAT / Tailscale range), link-local
+                                               or unique-local peer (normally the proxy itself) are not
                                                limited per address and a warning is logged once. Include
                                                CDN edge ranges as well, otherwise the address seen is a
-                                               shared edge address.
+                                               shared edge address. When it is set but none of the first
+                                               50 connections comes from a listed proxy, a warning is
+                                               logged once (the list is probably wrong).
+  LIVE_EVENTS_ORIGIN_HOST_FALLBACK      0      1 also accepts an Origin that is not in
+                                               LIVE_EVENTS_ALLOWED_ORIGINS / WEB_URL when its host[:port]
+                                               equals X-Forwarded-Host (or Host) and its scheme equals
+                                               X-Forwarded-Proto (plain http when that header is absent).
+                                               Off by default since PLN-96: list every origin users open
+                                               Plane from in LIVE_EVENTS_ALLOWED_ORIGINS instead.
 
 Optional live events tuning (defaults shown; leave unset to use them)
   LIVE_EVENTS_REVALIDATE_MS             60000   how often each socket's session and project
-                                                grants are rechecked (+/-20% jitter per socket)
+                                                grants are rechecked (+/-20% jitter per socket; the
+                                                first recheck of a socket falls anywhere in the
+                                                interval, so a restart does not bunch them). Minimum
+                                                1000: a lower value fails the config parse, the
+                                                events hub does not start (sockets close 4404) and
+                                                "EVENTS_CONTROLLER: hub setup failed" is logged
   LIVE_EVENTS_REVALIDATE_MAX_FAILURES   3       consecutive transient recheck failures before the
                                                 socket is closed with code 1013
 
@@ -110,10 +124,14 @@ Live events counters (numbers since process start; no ids, users or addresses)
     sockets.open|authenticated|pending   current gauges
     accepted                             sockets that passed the pre-auth checks
     authenticated                        sockets that finished authentication
-    rejected.pendingCap|addressCap|authFail|authTimeout|other
+    rejected.pendingCap|addressCap|authFail|authTimeout|noSubscribe|other
+                                         noSubscribe (PLN-96): authenticated sockets closed 4408
+                                         because no subscribe came within 30 s
     framesSent                           frames written to sockets
     invalid.redisDropped|clientMessages  malformed Redis messages dropped, bad client frames closed
     rateLimitOverflows.inboundMessages   4429 closes for message rate
+    rateLimitOverflows.userSubscribes    4429 closes for more than 10 subscribes per second by one
+                                         user across all of their sockets (PLN-96)
     rateLimitOverflows.projectEvents     project messages over LIVE_EVENTS_PROJECT_RATE_PER_SEC in a second
                                          (PLN-110 fix: still merged per work item, no full refresh)
     fullRefreshes.hardOverflow|wildcard|itemCap
@@ -121,6 +139,8 @@ Live events counters (numbers since process start; no ids, users or addresses)
                                          a "*" event (state/label definitions, settle), or more than
                                          500 work items in one frame
     revalidationCloses.auth4401|unavailable1013
+    rolesLookups.cached|shared|upstream  project roles lookups (PLN-96): answered from the 8 s
+                                         per-user cache, joined an in-flight call, or sent to the api
 
 Optional pages API size and time limits (defaults shown; leave unset to use them)
   api service:
