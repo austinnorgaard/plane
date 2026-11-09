@@ -48,6 +48,14 @@ PAGE_UPDATED_AFTER_PARAMETER = OpenApiParameter(
     location=OpenApiParameter.QUERY,
 )
 
+PAGE_VERSION_ID_PARAMETER = OpenApiParameter(
+    name="version_id",
+    description="Page version ID",
+    required=True,
+    type=OpenApiTypes.UUID,
+    location=OpenApiParameter.PATH,
+)
+
 PAGE_CURSOR_PARAMETER = OpenApiParameter(
     name="cursor",
     description=(

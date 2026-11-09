@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 # Third party imports
+import nh3
 from rest_framework import serializers
 
 # Module imports
-from plane.db.models import Page, ProjectPage
-from plane.utils.content_validator import validate_html_content
+from plane.db.models import Page, PageVersion, ProjectPage
+from plane.utils.content_validator import ALLOWED_TAGS, ATTRIBUTES, SAFE_PROTOCOLS, validate_html_content
 from plane.utils.openapi.pages import PAGE_ACCESS_CHOICES
 
 EMPTY_HTML = "<p></p>"
@@ -119,6 +120,43 @@ class PageUpdateAPISerializer(serializers.Serializer):
 
     def validate_description_html(self, value):
         return clean_description_html(value)
+
+
+def sanitize_output_html(value):
+    """Sanitise stored html on the way out (PLN-82): the same nh3 rules as on write, without the removal
+    log of validate_html_content (a read must not let callers inflate the log). Stored versions were
+    written by several paths, so the read does not trust them."""
+    if not value:
+        return EMPTY_HTML
+    try:
+        return nh3.clean(value, tags=ALLOWED_TAGS, attributes=ATTRIBUTES, url_schemes=SAFE_PROTOCOLS) or EMPTY_HTML
+    except Exception:
+        return EMPTY_HTML
+
+
+class PageVersionAPISerializer(serializers.ModelSerializer):
+    """List shape of a page version (PLN-82): metadata only, no content."""
+
+    page_id = serializers.UUIDField(read_only=True)
+    owned_by_id = serializers.UUIDField(read_only=True)
+
+    class Meta:
+        model = PageVersion
+        fields = ["id", "page_id", "last_saved_at", "owned_by_id", "created_at", "updated_at"]
+        read_only_fields = fields
+
+
+class PageVersionDetailAPISerializer(PageVersionAPISerializer):
+    """One page version with its html, sanitised on output. The binary and json forms are not exposed."""
+
+    description_html = serializers.SerializerMethodField()
+
+    class Meta(PageVersionAPISerializer.Meta):
+        fields = [*PageVersionAPISerializer.Meta.fields, "description_html"]
+        read_only_fields = fields
+
+    def get_description_html(self, obj) -> str:
+        return sanitize_output_html(obj.description_html)
 
 
 class PageErrorAPISerializer(serializers.Serializer):

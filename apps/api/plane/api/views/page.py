@@ -35,13 +35,15 @@ from plane.api.serializers.page import (
     PageTooLargeAPISerializer,
     PageUpdateAPISerializer,
     PageValidationErrorAPISerializer,
+    PageVersionAPISerializer,
+    PageVersionDetailAPISerializer,
 )
 from plane.app.permissions import ROLE
 from plane.app.permissions.page import ProjectPagePermission
 from plane.app.serializers import PageBinaryUpdateSerializer
 from plane.bgtasks.page_transaction_task import page_transaction
 from plane.bgtasks.page_version_task import track_page_version
-from plane.db.models import Page, Project, ProjectMember, ProjectPage, UserFavorite
+from plane.db.models import Page, PageVersion, Project, ProjectMember, ProjectPage, UserFavorite
 from plane.utils import live_pages
 from plane.utils.openapi import (
     EXTERNAL_ID_PARAMETER,
@@ -65,6 +67,7 @@ from plane.utils.openapi.pages import (
     PAGE_TOO_LARGE_RESPONSE,
     PAGE_UPDATED_AFTER_PARAMETER,
     PAGE_VALIDATION_EXAMPLES,
+    PAGE_VERSION_ID_PARAMETER,
 )
 from plane.utils.order_queryset import PAGE_ORDER_BY_ALLOWLIST, sanitize_order_by
 from plane.utils.page_cursor import ordering_expressions, ordering_keys, paginate_keyset
@@ -687,3 +690,64 @@ class PageArchiveAPIEndpoint(PageBaseAPIEndpoint):
             page.save(update_fields=["parent"])
         unarchive_archive_page_and_descendants(page.id, None)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PageVersionListAPIEndpoint(PageBaseAPIEndpoint):
+    """List the saved versions of a page (PLN-82)."""
+
+    @page_docs(
+        operation_id="list_page_versions",
+        summary="List page versions",
+        description=(
+            "List the saved versions of a page the caller can see, newest first, without content. "
+            "Keyset cursor paginated like the pages list (per_page default 100, maximum 1000). "
+            "A page the caller cannot see answers 404 (403 when the permission check refuses first)."
+        ),
+        parameters=[PAGE_ID_PARAMETER, PAGE_CURSOR_PARAMETER, PER_PAGE_PARAMETER],
+        responses={
+            200: create_paginated_response(
+                PageVersionAPISerializer, "PageVersion", "List of page versions", "List of page versions"
+            ),
+            400: OpenApiResponse(
+                response=PageListErrorAPISerializer,
+                description=PAGE_LIST_BAD_REQUEST_RESPONSE_DESCRIPTION,
+                examples=PAGE_LIST_VALIDATION_EXAMPLES,
+            ),
+        },
+    )
+    def get(self, request, slug, project_id, page_id):
+        page = self.get_page(slug, project_id, page_id)
+        queryset = PageVersion.objects.filter(page_id=page.id, workspace_id=page.workspace_id)
+        per_page = self.get_per_page(request, 100, 1000)
+        return Response(
+            paginate_keyset(
+                queryset,
+                "-created_at",
+                per_page,
+                request.GET.get("cursor"),
+                lambda versions: PageVersionAPISerializer(versions, many=True).data,
+            ),
+            status=status.HTTP_200_OK,
+        )
+
+
+class PageVersionDetailAPIEndpoint(PageBaseAPIEndpoint):
+    """Retrieve one saved version of a page, with its html (PLN-82)."""
+
+    @page_docs(
+        operation_id="retrieve_page_version",
+        summary="Retrieve a page version",
+        description=(
+            "Retrieve one saved version of a page the caller can see, including its description_html "
+            "(sanitised on output with the same rules as on write). The binary and json forms are not "
+            "returned. An unknown version, or a version of another page, answers 404."
+        ),
+        parameters=[PAGE_ID_PARAMETER, PAGE_VERSION_ID_PARAMETER],
+        responses={200: OpenApiResponse(response=PageVersionDetailAPISerializer, description="The page version")},
+    )
+    def get(self, request, slug, project_id, page_id, version_id):
+        page = self.get_page(slug, project_id, page_id)
+        version = PageVersion.objects.filter(pk=version_id, page_id=page.id, workspace_id=page.workspace_id).first()
+        if version is None:
+            raise NotFound()
+        return Response(PageVersionDetailAPISerializer(version).data, status=status.HTTP_200_OK)

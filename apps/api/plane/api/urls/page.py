@@ -7,6 +7,7 @@ from plane.api.views import (
     PageDetailAPIEndpoint,
     PageListCreateAPIEndpoint,
 )
+from plane.api.views.page import PageVersionDetailAPIEndpoint, PageVersionListAPIEndpoint
 
 urlpatterns = [
     path(
@@ -23,5 +24,16 @@ urlpatterns = [
         "workspaces/<str:slug>/projects/<uuid:project_id>/pages/<uuid:page_id>/archive/",
         PageArchiveAPIEndpoint.as_view(http_method_names=["post", "delete"]),
         name="project-page-archive",
+    ),
+    # PLN-82: saved versions of a page
+    path(
+        "workspaces/<str:slug>/projects/<uuid:project_id>/pages/<uuid:page_id>/versions/",
+        PageVersionListAPIEndpoint.as_view(http_method_names=["get"]),
+        name="project-page-versions",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<uuid:project_id>/pages/<uuid:page_id>/versions/<uuid:version_id>/",
+        PageVersionDetailAPIEndpoint.as_view(http_method_names=["get"]),
+        name="project-page-version-detail",
     ),
 ]
