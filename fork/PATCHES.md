@@ -27,8 +27,11 @@ One line per touched upstream file: ticket id and the reason.
 - `apps/web/core/components/settings/profile/content/pages/preferences/root.tsx`: PLN-106, "Boards" section with the fork board preferences.
 - `apps/web/app/(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/layout.tsx` (PLN-106): also mounts `useLiveUserSettings`.
 - `packages/i18n/src/locales/en/settings.json`: PLN-106, new `account_settings.preferences.*` board keys (en only; other locales fall back).
+- `apps/web/core/components/issues/issue-layouts/kanban/base-kanban-root.tsx`, `.../list/base-list-root.tsx`: PLN-107, the collapse state comes from `useAutoCollapseGroups` (stored state passed through when the setting is off). Also renames the shadowing `projectId` parameter of `canEditProperties` and adds `issues` to the `fetchMoreIssues` deps, upstream lint warnings that the pre-commit `--deny-warnings` hook rejects (no behaviour change).
+- `apps/web/core/components/issues/issue-layouts/kanban/default.tsx`: PLN-107, collapsed column header wrapped in `CollapsedColumnDropTarget` (a pass-through unless auto-collapse is on and the column is collapsed).
+- `apps/web/core/components/issues/issue-layouts/filters/header/display-filters/display-filters-selection.tsx`: PLN-107, the auto-collapse option under the extra options of grouped layouts.
 
-New files (not upstream): `apps/live/src/controllers/events.controller.ts`, `apps/live/src/events/{config,origin,auth,hub}.ts`; `apps/api/plane/api/{urls,views,serializers}/page.py`, `apps/api/plane/utils/live_pages.py`, `apps/api/plane/utils/live_events.py`, `fork/PAGES.md`, `apps/live/src/fork-pages/*`, `fork/tools/*`; PLN-106: `apps/api/plane/db/models/fork_user_settings.py`, `apps/api/plane/db/migrations/0123_fork_user_settings.py`, `apps/api/plane/app/views/user/fork_settings.py`, `apps/web/core/fork/board-settings/*`.
+New files (not upstream): `apps/live/src/controllers/events.controller.ts`, `apps/live/src/events/{config,origin,auth,hub}.ts`; `apps/api/plane/api/{urls,views,serializers}/page.py`, `apps/api/plane/utils/live_pages.py`, `apps/api/plane/utils/live_events.py`, `fork/PAGES.md`, `apps/live/src/fork-pages/*`, `fork/tools/*`; PLN-106: `apps/api/plane/db/models/fork_user_settings.py`, `apps/api/plane/db/migrations/0123_fork_user_settings.py`, `apps/api/plane/app/views/user/fork_settings.py`, `apps/web/core/fork/board-settings/*` (PLN-107 adds `auto-collapse.ts` and its components there).
 
 ## Drift points (new files that mirror private upstream code)
 

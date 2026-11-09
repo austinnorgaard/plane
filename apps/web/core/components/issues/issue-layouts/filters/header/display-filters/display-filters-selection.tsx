@@ -21,6 +21,8 @@ import {
   FilterOrderBy,
   FilterSubGroupBy,
 } from "@/components/issues/issue-layouts/filters";
+// fork (PLN-107): auto-collapse empty groups
+import { AutoCollapseDisplayOption } from "@/fork/board-settings/components/auto-collapse-display-option";
 
 type Props = {
   displayFilters: IIssueDisplayFilterOptions | undefined;
@@ -138,6 +140,10 @@ export const DisplayFiltersSelection = observer(function DisplayFiltersSelection
             }
             enabledExtraOptions={layoutDisplayFiltersOptions?.extra_options.values}
           />
+          {/* fork (PLN-107): mirrored here for every grouped board */}
+          {layoutDisplayFiltersOptions?.extra_options.values.includes("show_empty_groups") && (
+            <AutoCollapseDisplayOption />
+          )}
         </div>
       )}
     </div>
