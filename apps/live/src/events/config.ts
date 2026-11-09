@@ -15,13 +15,15 @@ const intFrom = (fallback: number, min = 1) =>
 
 // The live events hub reads its own settings straight from the environment so that
 // env.ts stays untouched. The Origin allowlist for the events socket is the union of
-// LIVE_EVENTS_ALLOWED_ORIGINS and WEB_URL (plus the host-equality fallback in origin.ts).
+// LIVE_EVENTS_ALLOWED_ORIGINS and WEB_URL (plus the host-equality fallback in origin.ts when
+// LIVE_EVENTS_ORIGIN_HOST_FALLBACK=1, PLN-96).
 // CORS_ALLOWED_ORIGINS is deliberately not read: server.ts feeds it to the stock cors()
 // middleware, so the deploy must not pass it into live. LIVE_EVENTS_ALLOWED_ORIGINS is the
 // explicit allowlist.
 const eventsEnvSchema = z.object({
   LIVE_EVENTS_ENABLED: z.string().optional(),
   LIVE_EVENTS_ALLOWED_ORIGINS: z.string().default(""),
+  LIVE_EVENTS_ORIGIN_HOST_FALLBACK: z.string().optional(),
   WEB_URL: z.string().default(""),
   LIVE_EVENTS_SETTLE_MS: intFrom(2000, 0),
   LIVE_EVENTS_PROJECT_RATE_PER_SEC: intFrom(50),
@@ -44,6 +46,8 @@ export const UPSTREAM_TIMEOUT_MS = 20_000;
 export type EventsConfig = {
   enabled: boolean;
   allowedOrigins: string[];
+  /** PLN-96: accept an Origin whose scheme and host match the request (opt-in) */
+  originHostFallback: boolean;
   webUrl: string;
   settleMs: number;
   projectRatePerSec: number;
@@ -61,6 +65,14 @@ export type EventsConfig = {
   coalesceMs: number;
   maxItemsPerFrame: number;
   firstMessageMs: number;
+  /** PLN-96: an authenticated socket must send a subscribe within this long */
+  subscribeDeadlineMs: number;
+  /** PLN-96: project roles are cached per user and workspace for this long (single-flight) */
+  rolesCacheMs: number;
+  /** PLN-96: subscribe messages per user per second, across all of the user's sockets */
+  maxUserSubscribesPerSec: number;
+  /** PLN-96: connections seen without a trusted peer before warning that LIVE_EVENTS_TRUSTED_PROXIES never matches */
+  trustedProxyWarnAfter: number;
   pingIntervalMs: number;
   maxMissedPongs: number;
   revalidateMs: number;
@@ -78,6 +90,7 @@ export const parseEventsConfig = (source: Record<string, string | undefined> = p
   return {
     enabled: parsed.LIVE_EVENTS_ENABLED === "1",
     allowedOrigins: parsed.LIVE_EVENTS_ALLOWED_ORIGINS.split(","),
+    originHostFallback: parsed.LIVE_EVENTS_ORIGIN_HOST_FALLBACK === "1",
     webUrl: parsed.WEB_URL,
     settleMs: parsed.LIVE_EVENTS_SETTLE_MS,
     projectRatePerSec: parsed.LIVE_EVENTS_PROJECT_RATE_PER_SEC,
@@ -97,6 +110,10 @@ export const parseEventsConfig = (source: Record<string, string | undefined> = p
     coalesceMs: 250,
     maxItemsPerFrame: 500,
     firstMessageMs: 10_000,
+    subscribeDeadlineMs: 30_000,
+    rolesCacheMs: 8000,
+    maxUserSubscribesPerSec: 10,
+    trustedProxyWarnAfter: 50,
     pingIntervalMs: 25_000,
     maxMissedPongs: 2,
     revalidateMs: parsed.LIVE_EVENTS_REVALIDATE_MS,
