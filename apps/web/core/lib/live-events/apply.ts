@@ -10,6 +10,7 @@ import { clone } from "lodash-es";
 import type { TIssue } from "@plane/types";
 // services
 import { IssueService } from "@/services/issue/issue.service";
+import { InboxIssueService } from "@/services/inbox";
 // local imports
 import type { TLiveEvent, TLiveItem } from "./client";
 import type { IProjectIssues } from "@/store/issue/project";
@@ -17,6 +18,7 @@ import type { ICycleIssues } from "@/store/issue/cycle";
 import type { IModuleIssues } from "@/store/issue/module";
 import type { IProjectViewIssues } from "@/store/issue/project-views";
 import type { IArchivedIssues } from "@/store/issue/archived";
+import type { IProjectInboxStore } from "@/store/inbox/project-inbox.store";
 import type { IIssueDetail } from "@/store/issue/issue-details/root.store";
 import type { IIssueStore } from "@/store/issue/issue.store";
 import { EIssueGroupedAction } from "@/store/issue/helpers/base-issues.store";
@@ -160,8 +162,22 @@ export const hasCommentChange = (keys: Iterable<string>): boolean => {
 // applier
 // ---------------------------------------------------------------------------
 
-/** PLN-77: `archived` is the archived work items route (projects/<id>/archives/issues). */
-export type TLiveRoute = { cycleId?: string; moduleId?: string; viewId?: string; archived?: boolean };
+/**
+ * PLN-77: `archived` is the archived work items route (projects/<id>/archives/issues).
+ * PLN-76: `intake` is the intake (triage) route (projects/<id>/intake).
+ */
+export type TLiveRoute = {
+  cycleId?: string;
+  moduleId?: string;
+  viewId?: string;
+  archived?: boolean;
+  intake?: boolean;
+};
+
+/** PLN-76: an intake list refresh (new intake items, full refreshes) waits this long, merged across a burst */
+export const INTAKE_LIST_DEBOUNCE_MS = 1000;
+
+const isIntakeKey = (key: string) => key.startsWith("intake:");
 
 export interface ILiveApplierDeps {
   workspaceSlug: string;
@@ -175,6 +191,8 @@ export interface ILiveApplierDeps {
   viewIssues: IProjectViewIssues;
   /** PLN-77 */
   archivedIssues: IArchivedIssues;
+  /** PLN-76: the intake (triage) list */
+  projectInbox: IProjectInboxStore;
   getFilterExpression: (store: "project" | "cycle" | "module" | "view") => unknown;
   issueDetail: IIssueDetail;
   onIssueMissingFromPeek: () => void;
@@ -193,6 +211,8 @@ type TListTarget = {
 
 export class LiveWorkItemsApplier {
   private issueService = new IssueService();
+  private inboxIssueService = new InboxIssueService();
+  private intakeListTimer: ReturnType<typeof setTimeout> | undefined;
   private pending = new Map<string, Set<string>>();
   private debounceTimer: ReturnType<typeof setTimeout> | undefined;
   private debounceStartedAt = 0;
@@ -214,6 +234,7 @@ export class LiveWorkItemsApplier {
     this.disposed = true;
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     if (this.coarseTimer) clearTimeout(this.coarseTimer);
+    if (this.intakeListTimer) clearTimeout(this.intakeListTimer);
     this.ownActorTimers.forEach((timer) => clearTimeout(timer));
     this.deferTimers.forEach((timer) => clearTimeout(timer));
     this.peekTrailingTimers.forEach((timer) => clearTimeout(timer));
@@ -236,6 +257,7 @@ export class LiveWorkItemsApplier {
 
     if (event.type === "resync" || event.full_refresh) {
       this.scheduleCoarse(true);
+      this.scheduleIntakeList(); // PLN-76
       // an open peek is not part of any list, refresh it too
       const peeked = this.getOpenIssueIds();
       if (peeked.length > 0) this.enqueue(peeked, [changeKey("issue", "updated")]);
@@ -321,6 +343,60 @@ export class LiveWorkItemsApplier {
       this.coarseAll = false;
       void this.runCoarse(includeAll);
     }, COARSE_RETRY_MS);
+  }
+
+  // ---- PLN-76: intake (triage) list ----
+
+  /** The intake store holds this project's list (it is loaded only while the intake route is or was open). */
+  private intakeOnScreen(): boolean {
+    return !!this.deps.getRoute().intake && this.deps.projectInbox.currentInboxProjectId === this.deps.projectId;
+  }
+
+  /**
+   * Known intake items are read one by one (status, snooze, duplicate, the work item fields) and merged into
+   * the store, so they move between the open and closed tabs through the store's own filters. An event for
+   * an intake item the list does not hold yet (a new submission) refreshes the list instead.
+   */
+  private async refreshIntake(batch: Map<string, Set<string>>) {
+    if (!this.intakeOnScreen()) return;
+    const { workspaceSlug, projectId, projectInbox } = this.deps;
+    const known: string[] = [];
+    let listNeeded = false;
+    for (const [id, keys] of batch) {
+      if (projectInbox.inboxIssues[id]) known.push(id);
+      else if ([...keys].some(isIntakeKey)) listNeeded = true;
+    }
+    if (listNeeded) this.scheduleIntakeList();
+    await Promise.all(
+      known.map(async (id) => {
+        try {
+          const inboxIssue = await this.inboxIssueService.retrieve(workspaceSlug, projectId, id);
+          if (this.disposed || !this.intakeOnScreen()) return;
+          runInAction(() => projectInbox.createOrUpdateInboxIssue([inboxIssue], workspaceSlug, projectId));
+        } catch (error) {
+          if (!isNotFoundError(error)) throw error;
+          // deleted, or no longer an intake item: it leaves the list
+          if (this.disposed || !this.intakeOnScreen()) return;
+          runInAction(() => {
+            projectInbox.inboxIssueIds = projectInbox.inboxIssueIds.filter((value) => value !== id);
+            delete projectInbox.inboxIssues[id];
+          });
+        }
+      })
+    );
+  }
+
+  /** Refetches the first page of the intake list in place ("mutation-loading" shows no loader). */
+  private scheduleIntakeList() {
+    if (this.intakeListTimer || !this.intakeOnScreen()) return;
+    this.intakeListTimer = setTimeout(() => {
+      this.intakeListTimer = undefined;
+      if (this.disposed || !this.intakeOnScreen()) return;
+      const { workspaceSlug, projectId, projectInbox } = this.deps;
+      projectInbox
+        .fetchInboxIssues(workspaceSlug, projectId, "mutation-loading")
+        .catch((error: unknown) => console.error("live intake list refresh failed", error));
+    }, INTAKE_LIST_DEBOUNCE_MS);
   }
 
   /** fork (PLN-110 fix): re-enqueues work items whose live read lost to a newer local edit. */
@@ -410,6 +486,10 @@ export class LiveWorkItemsApplier {
 
     const fetched = new Map<string, TIssue>();
     const missing: string[] = [];
+    // PLN-76: the intake list is updated from its own endpoint, alongside the work item lists
+    const intake = this.refreshIntake(batch).catch((error: unknown) =>
+      console.error("live intake refresh failed", error)
+    );
     try {
       const responses = await Promise.all(
         chunkIds([...batch.keys()]).map(async (chunk) => ({
@@ -488,6 +568,7 @@ export class LiveWorkItemsApplier {
     );
 
     if (coarseNeeded) this.scheduleCoarse(false);
+    await intake;
     await this.refreshOpenIssues(batch, new Set(missing.filter((id) => hasIssueDeleted(batch.get(id) ?? []))));
   }
 
