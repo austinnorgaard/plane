@@ -168,6 +168,8 @@ export interface ILiveApplierDeps {
   getFilterExpression: (store: "project" | "cycle" | "module" | "view") => unknown;
   issueDetail: IIssueDetail;
   onIssueMissingFromPeek: () => void;
+  /** Refetches the project's state and label definitions (metadata events and full refreshes). */
+  refreshProjectMetadata: () => Promise<unknown>;
 }
 
 type TListTarget = {
@@ -272,9 +274,18 @@ export class LiveWorkItemsApplier {
   private async runCoarse(all: boolean) {
     if (this.disposed) return;
     const targets = this.getTargets().filter((target) => all || target.coarse);
-    await Promise.all(
-      targets.map((target) => target.refetch().catch((error: unknown) => console.error("live refresh failed", error)))
+    const refreshes = targets.map((target) =>
+      target.refetch().catch((error: unknown) => console.error("live refresh failed", error))
     );
+    // a full refresh may carry a state or label change: the metadata stores follow it
+    if (all) {
+      refreshes.push(
+        this.deps
+          .refreshProjectMetadata()
+          .catch((error: unknown) => console.error("live metadata refresh failed", error))
+      );
+    }
+    await Promise.all(refreshes);
   }
 
   private getOpenIssueIds(): string[] {

@@ -64,6 +64,11 @@ export const useLiveWorkItems = (workspaceSlug: string | undefined, projectId: s
         return filters?.richFilters;
       },
       issueDetail: s.issueDetail,
+      refreshProjectMetadata: () =>
+        Promise.all([
+          root.state.fetchProjectStates(workspaceSlug, projectId),
+          root.label.fetchProjectLabels(workspaceSlug, projectId),
+        ]),
       // TODO: move the text to i18n keys (needs packages/i18n locale entries)
       onIssueMissingFromPeek: () =>
         setToast({
