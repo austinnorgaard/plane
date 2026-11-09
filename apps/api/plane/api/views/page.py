@@ -26,6 +26,9 @@ from rest_framework.response import Response
 # Module imports
 from plane.api.serializers.page import (
     PageAPISerializer,
+    PageBulkCreateAPISerializer,
+    PageBulkErrorAPISerializer,
+    PageBulkResultAPISerializer,
     PageArchiveResultAPISerializer,
     PageConflictAPISerializer,
     PageCreateAPISerializer,
@@ -82,6 +85,7 @@ _OFFSET_CURSOR = re.compile(r"^\d+:\d+:[01]$")
 OPEN_IN_EDITOR = {"error": "page is open in an editor; retry later"}
 LIVE_UNAVAILABLE = {"error": "live service unavailable, page not updated"}
 PAGE_CHANGED = {"error": "page changed during the update; retry"}
+DUPLICATE_EXTERNAL = "Page with the same external id and external source already exists"
 PAGE_BUSY = {"error": "page is being updated by another request; retry"}
 
 
@@ -166,6 +170,25 @@ def _request_body_size(request):
         return size
     except (AttributeError, OSError, ValueError):
         return 0
+
+
+def _has_external_pair(data):
+    return bool(data.get("external_id") and data.get("external_source"))
+
+
+DEFAULT_BULK_MAX_PAGES = 100
+MAX_BULK_MAX_PAGES = 1000
+
+
+def _bulk_max_pages():
+    """Most pages per bulk import call (PAGES_API_BULK_MAX_PAGES, default 100, at most 1000), read per call."""
+    try:
+        value = int(os.environ.get("PAGES_API_BULK_MAX_PAGES", ""))
+    except ValueError:
+        return DEFAULT_BULK_MAX_PAGES
+    if value < 1:
+        return DEFAULT_BULK_MAX_PAGES
+    return min(value, MAX_BULK_MAX_PAGES)
 
 
 def _open_in_editor():
@@ -264,6 +287,74 @@ class PageBaseAPIEndpoint(BaseAPIView):
         page = self.base_queryset(slug, project_id).filter(pk=page_id).first()
         if page is None:
             raise NotFound()
+        return page
+
+    # ---- create helpers, shared by single create and bulk import (PLN-81)
+
+    def lock_external_pairs(self, project, items):
+        """Transaction-scoped advisory locks for the external pairs of `items`, taken in key order so two
+        concurrent requests with overlapping pairs cannot deadlock."""
+        keys = sorted(
+            {
+                _external_lock_key(project.id, d["external_source"], d["external_id"])
+                for d in items
+                if _has_external_pair(d)
+            }
+        )
+        with connection.cursor() as cursor:
+            for key in keys:
+                cursor.execute("SELECT pg_advisory_xact_lock(%s)", [key])
+
+    def duplicate_conflict(self, slug, project_id, project, data):
+        """The 409 body when the external pair already exists in the project, else None. The pair is unique
+        in the project, but the id is only given for a page the caller can see (PLN-99, review F5)."""
+        existing = (
+            Page.objects.filter(
+                workspace_id=project.workspace_id,
+                external_id=data["external_id"],
+                external_source=data["external_source"],
+                project_pages__project_id=project.id,
+                project_pages__deleted_at__isnull=True,
+            )
+            .values_list("id", flat=True)
+            .first()
+        )
+        if existing is None:
+            return None
+        body = {"error": DUPLICATE_EXTERNAL}
+        if self.base_queryset(slug, project_id).filter(pk=existing).exists():
+            body["id"] = str(existing)
+        return body
+
+    @staticmethod
+    def create_page(project, data, user_id):
+        """Create the page and its project link; page_transaction is queued on commit."""
+        page = Page.objects.create(
+            workspace_id=project.workspace_id,
+            name=data["name"],
+            description_html=data["description_html"],
+            description_binary=None,
+            description_json={},
+            access=data["access"],
+            color=data["color"],
+            parent_id=data["parent"],
+            external_id=data["external_id"],
+            external_source=data["external_source"],
+            owned_by_id=user_id,
+        )
+        ProjectPage.objects.create(
+            workspace_id=project.workspace_id,
+            project_id=project.id,
+            page_id=page.id,
+        )
+        stored_html, page_pk = page.description_html, page.id
+        transaction.on_commit(
+            lambda: page_transaction.delay(
+                new_description_html=stored_html,
+                old_description_html=None,
+                page_id=page_pk,
+            )
+        )
         return page
 
     def get_project(self, slug, project_id):
@@ -397,60 +488,120 @@ class PageListCreateAPIEndpoint(PageBaseAPIEndpoint):
         data = serializer.validated_data
 
         with transaction.atomic():
-            if data["external_id"] and data["external_source"]:
-                with connection.cursor() as cursor:
-                    cursor.execute(
-                        "SELECT pg_advisory_xact_lock(%s)",
-                        [_external_lock_key(project.id, data["external_source"], data["external_id"])],
-                    )
-                existing = (
-                    Page.objects.filter(
-                        workspace_id=project.workspace_id,
-                        external_id=data["external_id"],
-                        external_source=data["external_source"],
-                        project_pages__project_id=project.id,
-                        project_pages__deleted_at__isnull=True,
-                    )
-                    .values_list("id", flat=True)
-                    .first()
-                )
-                if existing is not None:
-                    # PLN-99 (review F5): the pair stays unique in the project, but the id is only given
-                    # for a page the caller can see.
-                    body = {"error": "Page with the same external id and external source already exists"}
-                    if self.base_queryset(slug, project_id).filter(pk=existing).exists():
-                        body["id"] = str(existing)
-                    return Response(body, status=status.HTTP_409_CONFLICT)
-
-            page = Page.objects.create(
-                workspace_id=project.workspace_id,
-                name=data["name"],
-                description_html=data["description_html"],
-                description_binary=None,
-                description_json={},
-                access=data["access"],
-                color=data["color"],
-                parent_id=data["parent"],
-                external_id=data["external_id"],
-                external_source=data["external_source"],
-                owned_by_id=request.user.id,
-            )
-            ProjectPage.objects.create(
-                workspace_id=project.workspace_id,
-                project_id=project.id,
-                page_id=page.id,
-            )
-            stored_html = page.description_html
-            transaction.on_commit(
-                lambda: page_transaction.delay(
-                    new_description_html=stored_html,
-                    old_description_html=None,
-                    page_id=page.id,
-                )
-            )
+            if _has_external_pair(data):
+                self.lock_external_pairs(project, [data])
+                conflict = self.duplicate_conflict(slug, project_id, project, data)
+                if conflict is not None:
+                    return Response(conflict, status=status.HTTP_409_CONFLICT)
+            page = self.create_page(project, data, request.user.id)
 
         page = self.get_page(slug, project_id, page.id)
         return Response(PageAPISerializer(page).data, status=status.HTTP_201_CREATED)
+
+
+class PageBulkCreateAPIEndpoint(PageBaseAPIEndpoint):
+    """Create many pages in one call (PLN-81)."""
+
+    @page_docs(
+        operation_id="bulk_create_pages",
+        summary="Bulk import pages",
+        description=(
+            'Create up to PAGES_API_BULK_MAX_PAGES pages (default 100) in one call. Body: {"pages": [...]}, each '
+            "item shaped like the create body. Every item is validated and sanitised exactly like a single "
+            "create, with the same size caps; if any item is invalid nothing is created (400 with the item "
+            "index), and an item over the description_html cap is a 413 with its index. Items whose "
+            "external_id and external_source already exist in the project are not created and are reported "
+            "as conflicts (the id only for a page the caller can see); a pair repeated inside the request is "
+            "a 400. The others are created in one transaction. 201 when every item was created, 200 when at "
+            "least one was a conflict; results lists every item in request order."
+        ),
+        request=PageBulkCreateAPISerializer,
+        responses={
+            200: OpenApiResponse(response=PageBulkResultAPISerializer, description="Created, with conflicts"),
+            201: OpenApiResponse(response=PageBulkResultAPISerializer, description="All pages created"),
+            400: OpenApiResponse(
+                response=PageBulkErrorAPISerializer,
+                description="The body is not {pages: [...]}, has too many or no items, or an item is invalid.",
+            ),
+            413: OpenApiResponse(
+                response=PageTooLargeAPISerializer,
+                description=PAGE_TOO_LARGE_RESPONSE.description,
+                examples=PAGE_TOO_LARGE_RESPONSE.examples,
+            ),
+        },
+    )
+    def post(self, request, slug, project_id):
+        self.check_body_size(request)
+        project = self.get_project(slug, project_id)
+        if not project.page_view:
+            return Response({"error": "Pages are disabled for this project"}, status=status.HTTP_400_BAD_REQUEST)
+
+        body = request.data
+        items = body.get("pages") if hasattr(body, "get") else None
+        limit = _bulk_max_pages()
+        if not isinstance(items, list) or not items:
+            return Response(
+                {"error": 'Body must be {"pages": [...]} with at least one page'}, status=status.HTTP_400_BAD_REQUEST
+            )
+        if len(items) > limit:
+            return Response(
+                {"error": f"At most {limit} pages per call", "max_pages": limit}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        html_limit = _max_html_bytes()
+        visible = self.base_queryset(slug, project_id)
+        errors, validated = [], []
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                errors.append({"index": index, "errors": {"error": "Each page must be an object"}})
+                continue
+            html = item.get("description_html")
+            if isinstance(html, str) and len(html.encode("utf-8")) > html_limit:
+                return Response(
+                    {"error": "description_html too large", "max_bytes": html_limit, "index": index},
+                    status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                )
+            serializer = PageCreateAPISerializer(data=item, context={"project": project, "visible_pages": visible})
+            if serializer.is_valid():
+                validated.append((index, serializer.validated_data))
+            else:
+                errors.append({"index": index, "errors": serializer.errors})
+        seen = {}
+        for index, data in validated:
+            if _has_external_pair(data):
+                pair = (data["external_source"], data["external_id"])
+                if pair in seen:
+                    errors.append(
+                        {"index": index, "errors": {"error": f"Same external id and source as item {seen[pair]}"}}
+                    )
+                seen.setdefault(pair, index)
+        if errors:
+            return Response({"errors": sorted(errors, key=lambda e: e["index"])}, status=status.HTTP_400_BAD_REQUEST)
+
+        results = []
+        with transaction.atomic():
+            self.lock_external_pairs(project, [data for _, data in validated])
+            for index, data in validated:
+                conflict = (
+                    self.duplicate_conflict(slug, project_id, project, data) if _has_external_pair(data) else None
+                )
+                if conflict is not None:
+                    results.append({"index": index, "status": "conflict", **conflict})
+                    continue
+                page = self.create_page(project, data, request.user.id)
+                results.append({"index": index, "status": "created", "id": page.id})
+
+        created_ids = [r["id"] for r in results if r["status"] == "created"]
+        pages = {p.id: p for p in self.base_queryset(slug, project_id).filter(pk__in=created_ids)}
+        for result in results:
+            if result["status"] == "created":
+                page_id = result.pop("id")
+                result["page"] = PageAPISerializer(pages[page_id]).data
+        conflicts = len(results) - len(created_ids)
+        return Response(
+            {"created": len(created_ids), "conflicts": conflicts, "results": results},
+            status=status.HTTP_200_OK if conflicts else status.HTTP_201_CREATED,
+        )
 
 
 class PageDetailAPIEndpoint(PageBaseAPIEndpoint):

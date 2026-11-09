@@ -7,13 +7,23 @@ from plane.api.views import (
     PageDetailAPIEndpoint,
     PageListCreateAPIEndpoint,
 )
-from plane.api.views.page import PageVersionDetailAPIEndpoint, PageVersionListAPIEndpoint
+from plane.api.views.page import (
+    PageBulkCreateAPIEndpoint,
+    PageVersionDetailAPIEndpoint,
+    PageVersionListAPIEndpoint,
+)
 
 urlpatterns = [
     path(
         "workspaces/<str:slug>/projects/<uuid:project_id>/pages/",
         PageListCreateAPIEndpoint.as_view(http_method_names=["get", "post"]),
         name="project-pages",
+    ),
+    # PLN-81: bulk import (before the <uuid:page_id> routes; "bulk" is not a uuid anyway)
+    path(
+        "workspaces/<str:slug>/projects/<uuid:project_id>/pages/bulk/",
+        PageBulkCreateAPIEndpoint.as_view(http_method_names=["post"]),
+        name="project-pages-bulk",
     ),
     path(
         "workspaces/<str:slug>/projects/<uuid:project_id>/pages/<uuid:page_id>/",
