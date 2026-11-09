@@ -25,6 +25,9 @@ import { EIssueGroupedAction } from "@/store/issue/helpers/base-issues.store";
 import type { IBaseIssuesStore } from "@/store/issue/helpers/base-issues.store";
 // fork (PLN-110 fix): the user's own in-flight edits win over live reads that started before them
 import { localEdits } from "@/fork/live/local-edits";
+// PLN-38: filtered lists and saved views evaluate their filter on the fetched work item
+import { compileFilter } from "./filter-match";
+import type { TFilterMatcher } from "./filter-match";
 
 export const APPLY_DEBOUNCE_MS = 300;
 export const APPLY_DEBOUNCE_MAX_MS = 1000;
@@ -69,14 +72,17 @@ export const isIssueInScope = (
  * - in scope and not listed yet: add (local-create semantics, bumps counts)
  * - in scope and listed: update (regroup / resort from the before state)
  * - out of scope and listed: remove
+ * PLN-38: with `matches` (the list's filter), "in scope" also requires the work item to match it.
  */
 export const decideStoreAction = (params: {
   scope: TListScope;
   projectId: string;
-  issue: Pick<TIssue, "project_id" | "cycle_id" | "module_ids">;
+  issue: TIssue;
   inList: boolean;
+  matches?: TFilterMatcher;
 }): TStoreAction => {
-  const inScope = isIssueInScope(params.scope, params.projectId, params.issue);
+  const inScope =
+    isIssueInScope(params.scope, params.projectId, params.issue) && (!params.matches || params.matches(params.issue));
   if (inScope) return params.inList ? "update" : "add";
   return params.inList ? "remove" : "none";
 };
@@ -193,6 +199,8 @@ export interface ILiveApplierDeps {
   archivedIssues: IArchivedIssues;
   /** PLN-76: the intake (triage) list */
   projectInbox: IProjectInboxStore;
+  /** PLN-38: the group of a state, for state_group filters */
+  getStateGroup: (stateId: string) => string | undefined;
   getFilterExpression: (store: "project" | "cycle" | "module" | "view") => unknown;
   issueDetail: IIssueDetail;
   onIssueMissingFromPeek: () => void;
@@ -206,7 +214,22 @@ type TListTarget = {
   store: IBaseIssuesStore;
   scope: TListScope;
   coarse: boolean;
+  /** PLN-38: the list's filter, evaluated on each fetched work item (absent for an unfiltered list) */
+  matches?: TFilterMatcher;
   refetch: () => Promise<unknown>;
+};
+
+/**
+ * PLN-38: how a list with this filter takes live changes. Unfiltered: per work item. Filtered with a filter
+ * the client can evaluate: per work item, adding or removing it by the filter. Otherwise: a full refetch.
+ */
+const filterMode = (
+  richFilters: unknown,
+  getStateGroup: (stateId: string) => string | undefined
+): { coarse: boolean; matches?: TFilterMatcher } => {
+  if (!isFilterExpressionActive(richFilters)) return { coarse: false };
+  const matches = compileFilter(richFilters, getStateGroup);
+  return matches ? { coarse: false, matches } : { coarse: true };
 };
 
 export class LiveWorkItemsApplier {
@@ -440,7 +463,7 @@ export class LiveWorkItemsApplier {
       targets.push({
         store,
         scope: { kind: "cycle", cycleId },
-        coarse: isFilterExpressionActive(this.deps.getFilterExpression("cycle")),
+        ...filterMode(this.deps.getFilterExpression("cycle"), this.deps.getStateGroup),
         refetch: () => store.fetchIssuesWithExistingPagination(workspaceSlug, projectId, "mutation", cycleId),
       });
     } else if (route.moduleId) {
@@ -449,7 +472,7 @@ export class LiveWorkItemsApplier {
       targets.push({
         store,
         scope: { kind: "module", moduleId },
-        coarse: isFilterExpressionActive(this.deps.getFilterExpression("module")),
+        ...filterMode(this.deps.getFilterExpression("module"), this.deps.getStateGroup),
         refetch: () => store.fetchIssuesWithExistingPagination(workspaceSlug, projectId, "mutation", moduleId),
       });
     } else if (route.viewId) {
@@ -458,8 +481,8 @@ export class LiveWorkItemsApplier {
       targets.push({
         store,
         scope: { kind: "project" },
-        // a saved view is always a filtered list
-        coarse: true,
+        // a saved view is a filtered list: per work item when its filter can be evaluated (PLN-38)
+        ...filterMode(this.deps.getFilterExpression("view"), this.deps.getStateGroup),
         refetch: () => store.fetchIssuesWithExistingPagination(workspaceSlug, projectId, viewId, "mutation"),
       });
     } else {
@@ -467,7 +490,7 @@ export class LiveWorkItemsApplier {
       targets.push({
         store,
         scope: { kind: "project" },
-        coarse: isFilterExpressionActive(this.deps.getFilterExpression("project")),
+        ...filterMode(this.deps.getFilterExpression("project"), this.deps.getStateGroup),
         refetch: () => store.fetchIssuesWithExistingPagination(workspaceSlug, projectId, "mutation"),
       });
     }
@@ -550,6 +573,7 @@ export class LiveWorkItemsApplier {
               projectId,
               issue: after,
               inList: listContainsIssue(target.store.groupedIssueIds, id),
+              matches: target.matches,
             });
             if (action === "add") target.store.addIssueToList(id);
             else if (action === "update") target.store.updateIssueList(after, beforeState);
