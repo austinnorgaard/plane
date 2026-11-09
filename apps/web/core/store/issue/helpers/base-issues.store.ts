@@ -47,6 +47,7 @@ import {
 import type { IBaseIssueFilterStore } from "./issue-filter-helper.store";
 // fork (PLN-110 fix): the user's own in-flight edits, so live refetches never overwrite them
 import { LOCAL_QUIET_MS, localEdits } from "@/fork/live/local-edits";
+import { issueSyncQueue } from "@/fork/live/issue-sync-queue";
 
 export type TIssueDisplayFilterOptions = Exclude<TIssueGroupByOptions, null> | "target_date";
 
@@ -591,9 +592,16 @@ export abstract class BaseIssuesStore implements IBaseIssuesStore {
     // fork (PLN-110 fix): the edit is in flight until the PATCH settles (live reads of it are stale until then)
     const endLocalEdit = localEdits.begin(issueId);
     try {
-      // Update the Respective Stores
-      this.rootIssueStore.issues.updateIssue(issueId, data);
-      this.updateIssueList({ ...issueBeforeUpdate, ...data } as TIssue, issueBeforeUpdate);
+      try {
+        // Update the Respective Stores
+        this.rootIssueStore.issues.updateIssue(issueId, data);
+        this.updateIssueList({ ...issueBeforeUpdate, ...data } as TIssue, issueBeforeUpdate);
+      } catch (error) {
+        // If errored out update store again to revert the change
+        this.rootIssueStore.issues.updateIssue(issueId, issueBeforeUpdate ?? {});
+        this.updateIssueList(issueBeforeUpdate, { ...issueBeforeUpdate, ...data } as TIssue);
+        throw error;
+      }
 
       // Check if should Sync
       if (!shouldSync) return;
@@ -604,16 +612,19 @@ export abstract class BaseIssuesStore implements IBaseIssuesStore {
         ...data,
       } as TIssue);
 
-      // call API to update the issue
-      await this.issueService.patchIssue(workspaceSlug, projectId, issueId, data);
+      // fork (PLN-110 fix): one PATCH at a time per work item; edits made meanwhile are merged and sent next.
+      // On a failure the queue rolls the work item back to its last confirmed server state (once, for all
+      // the edits involved), so this caller does not revert to its own, possibly unconfirmed, before state.
+      await issueSyncQueue.enqueue({
+        issueId,
+        data,
+        confirmedBase: issueBeforeUpdate,
+        send: (payload) => this.issueService.patchIssue(workspaceSlug, projectId, issueId, payload),
+        rollback: (revert) => this.rollbackIssue(issueId, revert),
+      });
 
       // call fetch Parent Stats
       this.fetchParentStats(workspaceSlug, projectId);
-    } catch (error) {
-      // If errored out update store again to revert the change
-      this.rootIssueStore.issues.updateIssue(issueId, issueBeforeUpdate ?? {});
-      this.updateIssueList(issueBeforeUpdate, { ...issueBeforeUpdate, ...data } as TIssue);
-      throw error;
     } finally {
       endLocalEdit(); // fork (PLN-110 fix)
     }
@@ -914,6 +925,8 @@ export abstract class BaseIssuesStore implements IBaseIssuesStore {
     if (issueCycleId === cycleId) return;
 
     const issueBeforeUpdate = clone(this.rootIssueStore.issues.getIssueById(issueId));
+    // fork (PLN-110 fix): in flight until the cycle request settles
+    const endLocalEdit = localEdits.begin(issueId);
 
     try {
       // Update issueIds from current store
@@ -949,6 +962,8 @@ export abstract class BaseIssuesStore implements IBaseIssuesStore {
       });
 
       throw error;
+    } finally {
+      endLocalEdit(); // fork (PLN-110 fix)
     }
   };
 
@@ -1119,6 +1134,8 @@ export abstract class BaseIssuesStore implements IBaseIssuesStore {
     // keep a copy of the original module ids
     const issueBeforeChanges = clone(this.rootIssueStore.issues.getIssueById(issueId));
     const originalModuleIds = get(this.rootIssueStore.issues.issuesMap, [issueId, "module_ids"]) ?? [];
+    // fork (PLN-110 fix): in flight until the module request settles
+    const endLocalEdit = localEdits.begin(issueId);
     try {
       runInAction(() => {
         // get current Module Ids of the issue
@@ -1168,6 +1185,8 @@ export abstract class BaseIssuesStore implements IBaseIssuesStore {
       });
 
       throw error;
+    } finally {
+      endLocalEdit(); // fork (PLN-110 fix)
     }
   }
 
@@ -1183,6 +1202,19 @@ export abstract class BaseIssuesStore implements IBaseIssuesStore {
 
     // if true, add issue id to the list
     if (shouldUpdateList) this.updateIssueList(issue, undefined, EIssueGroupedAction.ADD);
+  }
+
+  /**
+   * fork (PLN-110 fix): puts the given fields of a work item back (the last confirmed server state after a
+   * failed PATCH) and regroups it on the board.
+   */
+  rollbackIssue(issueId: string, revert: Partial<TIssue>) {
+    const current = clone(this.rootIssueStore.issues.getIssueById(issueId));
+    if (!current) return;
+    runInAction(() => {
+      this.rootIssueStore.issues.updateIssue(issueId, revert);
+      this.updateIssueList({ ...current, ...revert } as TIssue, current);
+    });
   }
 
   /**

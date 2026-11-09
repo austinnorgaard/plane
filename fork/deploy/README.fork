@@ -106,7 +106,12 @@ Live events counters (numbers since process start; no ids, users or addresses)
     framesSent                           frames written to sockets
     invalid.redisDropped|clientMessages  malformed Redis messages dropped, bad client frames closed
     rateLimitOverflows.inboundMessages   4429 closes for message rate
-    rateLimitOverflows.projectEvents     per-project overflows answered with a full refresh
+    rateLimitOverflows.projectEvents     project messages over LIVE_EVENTS_PROJECT_RATE_PER_SEC in a second
+                                         (PLN-110 fix: still merged per work item, no full refresh)
+    fullRefreshes.hardOverflow|wildcard|itemCap
+                                         frames sent as a full refresh: over 10x the project rate,
+                                         a "*" event (state/label definitions, settle), or more than
+                                         500 work items in one frame
     revalidationCloses.auth4401|unavailable1013
 
 Optional pages API size and time limits (defaults shown; leave unset to use them)

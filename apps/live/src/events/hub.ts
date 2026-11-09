@@ -71,6 +71,8 @@ export type HubStats = {
   framesSent: number;
   invalid: { redisDropped: number; clientMessages: number };
   rateLimitOverflows: { inboundMessages: number; projectEvents: number };
+  /** fork (PLN-110 fix): frames sent as a full refresh, by cause */
+  fullRefreshes: { hardOverflow: number; wildcard: number; itemCap: number };
   revalidationCloses: { auth4401: number; unavailable1013: number };
 };
 
@@ -98,6 +100,10 @@ export const EVENT_VERBS = ["created", "updated", "deleted", "removed", "archive
 
 const MAX_IDS = 500;
 const MAX_SETTLE_TIMERS_PER_PROJECT = 20;
+// fork (PLN-110 fix): over projectRatePerSec the window keeps coalescing per work item (a Map insert per
+// message, and the frame stays capped at maxItemsPerFrame); only this many times the limit in one second
+// collapses it into a full refresh.
+const HARD_OVERFLOW_FACTOR = 10;
 
 // `ids` is the legacy name of `issue_ids`, accepted for older publishers during a rolling deploy. The publisher must emit `issue_ids`.
 const withIssueIds = (raw: unknown) => {
@@ -229,6 +235,9 @@ export class EventsHub {
     invalidClientMessages: 0,
     overflowInbound: 0,
     overflowProject: 0,
+    fullHardOverflow: 0,
+    fullWildcard: 0,
+    fullItemCap: 0,
     revalAuth: 0,
     revalUnavailable: 0,
   };
@@ -276,6 +285,7 @@ export class EventsHub {
       framesSent: c.framesSent,
       invalid: { redisDropped: this.invalidDropped, clientMessages: c.invalidClientMessages },
       rateLimitOverflows: { inboundMessages: c.overflowInbound, projectEvents: c.overflowProject },
+      fullRefreshes: { hardOverflow: c.fullHardOverflow, wildcard: c.fullWildcard, itemCap: c.fullItemCap },
       revalidationCloses: { auth4401: c.revalAuth, unavailable1013: c.revalUnavailable },
     };
   }
@@ -843,22 +853,32 @@ export class EventsHub {
     if (!this.byProject.has(projectId)) return;
 
     // settle re-emits are internal: they neither consume nor trip the inbound limit
-    let overflow = false;
+    // fork (PLN-110 fix): one Redis message is published per issue_activity task when the worker runs it, so a
+    // worker draining a backlog (or one request that fans out to many tasks) easily passes the soft limit while
+    // the API sees only a few writes per second. Over the soft limit the messages are still merged per work
+    // item; only the hard limit (or the frame's item cap) turns the window into a full refresh.
+    let hardOverflow = false;
     if (!fromSettle) {
       const now = Date.now();
       let rate = this.rate.get(projectId);
       if (!rate || now - rate.start >= 1000) this.rate.set(projectId, (rate = { start: now, count: 0 }));
-      overflow = ++rate.count > this.config.projectRatePerSec;
-      if (overflow) this.counters.overflowProject++;
+      const count = ++rate.count;
+      if (count > this.config.projectRatePerSec) this.counters.overflowProject++;
+      hardOverflow = count > this.config.projectRatePerSec * HARD_OVERFLOW_FACTOR;
     }
 
     let pending = this.pending.get(projectId);
     if (!pending) this.pending.set(projectId, (pending = { items: new Map(), full: false, timer: null }));
 
-    // Over the limit, or a project-wide event: nothing is dropped, the whole window
+    // Far over the limit, or a project-wide event: nothing is dropped, the whole window
     // collapses into one full refresh.
-    if (overflow || event.issue_ids === "*") this.markFull(pending);
-    else if (!pending.full) {
+    if (hardOverflow || event.issue_ids === "*") {
+      if (!pending.full) {
+        if (hardOverflow) this.counters.fullHardOverflow++;
+        else this.counters.fullWildcard++;
+      }
+      this.markFull(pending);
+    } else if (!pending.full) {
       for (const id of event.issue_ids) {
         let item = pending.items.get(id);
         if (!item)
@@ -867,7 +887,10 @@ export class EventsHub {
         item.verbs.add(event.verb);
         if (event.actor_id) item.actor_ids.add(event.actor_id);
       }
-      if (pending.items.size > this.config.maxItemsPerFrame) this.markFull(pending);
+      if (pending.items.size > this.config.maxItemsPerFrame) {
+        this.counters.fullItemCap++;
+        this.markFull(pending);
+      }
     }
     if (!pending.timer) pending.timer = setTimeout(() => this.flush(projectId), this.config.coalesceMs);
 
