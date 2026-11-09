@@ -10,6 +10,8 @@ from plane.utils.openapi.pages import PAGE_ACCESS_CHOICES
 
 EMPTY_HTML = "<p></p>"
 PATCHABLE_FIELDS = ("name", "description_html")
+# PLN-99 (review F11): the model field is unbounded; the API caps the title.
+MAX_NAME_LENGTH = 255
 
 
 def clean_description_html(value):
@@ -58,7 +60,7 @@ class PageListAPISerializer(PageAPISerializer):
 
 
 class PageCreateAPISerializer(serializers.Serializer):
-    name = serializers.CharField(required=False, allow_blank=True, default="")
+    name = serializers.CharField(required=False, allow_blank=True, max_length=MAX_NAME_LENGTH, default="")
     description_html = serializers.CharField(required=False, allow_blank=True, allow_null=True, default=EMPTY_HTML)
     access = serializers.ChoiceField(choices=PAGE_ACCESS_CHOICES, required=False, default=0)
     color = serializers.CharField(required=False, allow_blank=True, max_length=255, default="")
@@ -72,17 +74,24 @@ class PageCreateAPISerializer(serializers.Serializer):
         return clean_description_html(value)
 
     def validate_parent(self, value):
-        """The parent must be an active page of the project in the url."""
+        """The parent must be a page of the project in the url that the caller can see and that is not
+        archived (PLN-99, review F6). Hidden, unknown and archived parents get the same answer, so the
+        error is not an existence oracle for other users' private pages."""
         if value is None:
             return None
-        project = self.context["project"]
-        linked = ProjectPage.objects.filter(
-            page_id=value,
-            project_id=project.id,
-            workspace_id=project.workspace_id,
-            deleted_at__isnull=True,
-        ).exists()
-        if not linked:
+        visible = self.context.get("visible_pages")
+        if visible is not None:
+            ok = visible.filter(pk=value, archived_at__isnull=True).exists()
+        else:
+            project = self.context["project"]
+            ok = ProjectPage.objects.filter(
+                page_id=value,
+                project_id=project.id,
+                workspace_id=project.workspace_id,
+                deleted_at__isnull=True,
+                page__archived_at__isnull=True,
+            ).exists()
+        if not ok:
             raise serializers.ValidationError("Parent page does not belong to this project.")
         return value
 
@@ -97,7 +106,7 @@ class PageCreateAPISerializer(serializers.Serializer):
 class PageUpdateAPISerializer(serializers.Serializer):
     """PATCH accepts exactly name and description_html; any other key is a 400."""
 
-    name = serializers.CharField(required=False, allow_blank=True)
+    name = serializers.CharField(required=False, allow_blank=True, max_length=MAX_NAME_LENGTH)
     description_html = serializers.CharField(required=False, allow_blank=True)
 
     def validate(self, attrs):
