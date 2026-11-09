@@ -116,7 +116,9 @@ Live events counters (numbers since process start; no ids, users or addresses)
   the shared secret is never sent through the public proxy. The header
   live-server-secret-key must hold the value of LIVE_SERVER_SECRET_KEY (take it from
   the container environment, do not paste it into shell history or tickets). No header
-  or a wrong value answers 401; an unset or placeholder secret answers 503. The public
+  or a wrong value answers 401; a secret that is unset, a shipped example
+  (change-this-key-on-deployment, secret-key) or shorter than 32 characters answers
+  503 (PLN-112, the rule of item 4). The public
   /health stays minimal and shows no counters. Example, run inside the live container
   (LIVE_PORT is the port the live service listens on):
 

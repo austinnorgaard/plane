@@ -5,9 +5,9 @@
 import { createHash, timingSafeEqual } from "crypto";
 import type { NextFunction, Request, Response } from "express";
 import { env } from "@/env";
+// fork (PLN-112): the same key rule as the pages guard (PLN-99)
+import { isUsableKey } from "@/fork-pages/auth";
 import type { HubStats } from "./hub";
-
-const PLACEHOLDER_KEY = "change-this-key-on-deployment";
 
 /** The running hub, registered by the events controller so the health controller can read its counters. */
 let statsSource: (() => HubStats) | null = null;
@@ -39,14 +39,15 @@ const PROXY_HEADERS = ["x-forwarded-for", "x-forwarded-host", "forwarded", "x-re
 
 /**
  * Internal-only guard for the counters endpoint, same order and status codes as the pages routes:
- * 1. secret unconfigured or placeholder -> 503
+ * 1. secret not usable -> 503: unset, a known example value or shorter than MIN_KEY_LENGTH (32) characters,
+ *    the rule of the pages guard (PLN-112)
  * 2. proxy headers present -> 403 (the shared secret must never travel through the public proxy)
  * 3. live shared secret header missing or wrong -> 401, compared on fixed-length digests with timingSafeEqual.
  * Nothing about the request or the secret is logged.
  */
 export const requireStatsAccess = (req: Request, res: Response, next: NextFunction): void => {
   const configured = env.LIVE_SERVER_SECRET_KEY;
-  if (!configured || configured === PLACEHOLDER_KEY) {
+  if (!isUsableKey(configured)) {
     res.status(503).json({ error: "Service unavailable" });
     return;
   }
