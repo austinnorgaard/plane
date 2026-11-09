@@ -35,6 +35,17 @@
 #   live_auth_failures    last "authentication failures, running count" value from live
 #   live_invalid_redis    last "dropped invalid Redis messages, running count" value
 #
+# Worker queue (PLN-124), a snapshot taken at the end of the run, not a log count:
+#   queue <name>          per RabbitMQ queue of the Plane vhost: messages ready, unacked
+#                         and consumers (rabbitmqctl list_queues in the broker container).
+#                         Live events are published when the worker runs issue_activity,
+#                         so a backlog here delays every live update.
+#   queue_ready_total     ready messages over all queues (threshold --max-queue-ready)
+#   A queue with ready messages and 0 consumers prints a WARN (no worker is taking work).
+#   If the broker cannot be asked, the summary says so; the queue does not fail the run.
+#   The broker service is plane-mq (PDL_MQ_SERVICE overrides it) and the vhost is
+#   RABBITMQ_VHOST from plane.env (default plane).
+#
 # Required environment (operator supplied, no defaults):
 #   PVE_HOST        ssh target of the hypervisor
 #   PLANE_CTID      container id on the hypervisor (numeric)
@@ -52,9 +63,10 @@
 #   --max-ratelimit N     default 10
 #   --max-opened-during N default 0
 #   --max-409-unknown N   default 0
+#   --max-queue-ready N   ready messages over all worker queues, default 100
 #   --dry-run             print the ssh command; connect nowhere
 #   --redact-stdin        filter stdin to stdout through the redaction and exit
-#                         (no environment needed; used by the tests)
+#                         (no environment needed; for checking the redaction by hand)
 #
 # A count is over its threshold when it is greater than the maximum.
 #
@@ -108,13 +120,13 @@ DRY=0
 WINDOW=15m
 TOP=10
 TIMEOUT=120
-MAX_5XX=5 MAX_503=2 MAX_TB=0 MAX_LIVE=0 MAX_CLOSES=50 MAX_RL=10 MAX_OPENED=0 MAX_409U=0
+MAX_5XX=5 MAX_503=2 MAX_TB=0 MAX_LIVE=0 MAX_CLOSES=50 MAX_RL=10 MAX_OPENED=0 MAX_409U=0 MAX_QREADY=100
 while [ "$#" -gt 0 ]; do
   a=$1
   case "$a" in
     --dry-run) DRY=1; shift; continue ;;
-    -h|--help) sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    --window|--top|--timeout|--max-5xx|--max-503|--max-tracebacks|--max-live-errors|--max-closes|--max-ratelimit|--max-opened-during|--max-409-unknown) ;;
+    -h|--help) sed -n '2,75p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --window|--top|--timeout|--max-5xx|--max-503|--max-tracebacks|--max-live-errors|--max-closes|--max-ratelimit|--max-opened-during|--max-409-unknown|--max-queue-ready) ;;
     *) usage ;;
   esac
   [ "$#" -ge 2 ] || usage
@@ -139,6 +151,7 @@ while [ "$#" -gt 0 ]; do
         --max-ratelimit) MAX_RL=$v ;;
         --max-opened-during) MAX_OPENED=$v ;;
         --max-409-unknown) MAX_409U=$v ;;
+        --max-queue-ready) MAX_QREADY=$v ;;
       esac ;;
   esac
 done
@@ -164,6 +177,15 @@ for s in api worker beat-worker live; do
   echo "$MARK $s"
   docker compose -f docker-compose.yaml -f docker-compose.override.yaml --env-file plane.env logs --no-color --no-log-prefix --since "$WINDOW" "$s" 2>&1 || rc=3
 done
+# PLN-124: worker queue snapshot. Only the vhost name is read from plane.env; a failure is
+# reported in the section and does not fail the run.
+echo "$MARK QUEUE"
+vhost=$(sed -n 's/^RABBITMQ_VHOST=//p' plane.env | tail -n 1 | tr -d '"'"'"' \r')
+case "$vhost" in ''|*[!A-Za-z0-9._-]*) vhost=plane ;; esac
+if ! docker compose -f docker-compose.yaml -f docker-compose.override.yaml --env-file plane.env exec -T "$MQ" \
+    rabbitmqctl -q list_queues -p "$vhost" --no-table-headers name messages_ready messages_unacknowledged consumers </dev/null 2>/dev/null; then
+  echo "queue-unavailable"
+fi
 echo "$MARK END"
 exit $rc
 EOF
@@ -173,7 +195,9 @@ SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o Ser
 # sq <text>: POSIX single-quote text for the remote shell.
 sq() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
 
-REMOTE="pct exec $PLANE_CTID -- env APP_DIR=$PLANE_APP_DIR WINDOW=$WINDOW MARK=$MARK sh -c $(sq "$S_LOGS")"
+MQ=${PDL_MQ_SERVICE:-plane-mq}
+case "$MQ" in -*|*[!A-Za-z0-9._-]*) die "PDL_MQ_SERVICE has unexpected characters" ;; esac
+REMOTE="pct exec $PLANE_CTID -- env APP_DIR=$PLANE_APP_DIR WINDOW=$WINDOW MARK=$MARK MQ=$MQ sh -c $(sq "$S_LOGS")"
 
 if [ "$DRY" = 1 ]; then
   echo "[dry-run] window $WINDOW, services: $SERVICES"
@@ -216,6 +240,14 @@ index($0, mark " ") == 1 {
   next
 }
 svc == "" || svc == "END" { next }
+svc == "QUEUE" {
+  # rabbitmqctl rows: name, ready, unacked, consumers (tab or space separated)
+  if ($0 == "queue-unavailable") { qna = 1; next }
+  if (NF == 4 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ && $1 ~ /^[A-Za-z0-9._@:-]+$/) {
+    nq++; print "queue_row " $1 " " $2 " " $3 " " $4; qready += $2
+  }
+  next
+}
 {
   lines[svc]++
   line = $0
@@ -276,11 +308,20 @@ END {
   print "rate_limit_overflows", rl + 0
   print "live_auth_failures", authf + 0
   print "live_invalid_redis", invr + 0
+  print "queue_rows", nq + 0
+  print "queue_ready_total", qready + 0
+  print "queue_unavailable", qna + 0
 }' "$RAW") || { echo "RESULT: could not analyse the logs" >&2; exit 3; }
 
 c_5xx=0 c_503=0 c_409=0 c_409u=0 c_p503=0 c_open=0 c_tb=0 c_errlog=0 c_live=0
 c_4401=0 c_4403=0 c_4429=0 c_1013=0 c_rl=0 c_af=0 c_ir=0 l_api=0 l_worker=0 l_beat=0 l_live=0
-while read -r k v; do
+q_rows=0 q_ready=0 q_na=0
+QROWS=()
+while read -r k v rest; do
+  if [ "$k" = queue_row ]; then
+    QROWS+=("$v $rest")
+    continue
+  fi
   isnum "$v" || { echo "RESULT: unexpected analysis output" >&2; exit 3; }
   case "$k" in
     lines_api) l_api=$v ;; lines_worker) l_worker=$v ;; lines_beat-worker) l_beat=$v ;; lines_live) l_live=$v ;;
@@ -290,6 +331,7 @@ while read -r k v; do
     live_errors) c_live=$v ;;
     closes_4401) c_4401=$v ;; closes_4403) c_4403=$v ;; closes_4429) c_4429=$v ;; closes_1013) c_1013=$v ;;
     rate_limit_overflows) c_rl=$v ;; live_auth_failures) c_af=$v ;; live_invalid_redis) c_ir=$v ;;
+    queue_rows) q_rows=$v ;; queue_ready_total) q_ready=$v ;; queue_unavailable) q_na=$v ;;
   esac
 done <<<"$COUNTS"
 
@@ -334,6 +376,18 @@ row "  close_1013 (retry)" "$c_1013" -
 row rate_limit_overflows "$c_rl" "$MAX_RL"
 row live_auth_failures "$c_af" -
 row live_invalid_redis "$c_ir" -
+
+echo "worker queue (PLN-124, snapshot now, broker service $MQ):"
+if [ "$q_na" = 1 ] || [ "$q_rows" = 0 ]; then
+  echo "  WARN: the queue could not be read (broker service not running or rabbitmqctl failed); not counted"
+else
+  for r in "${QROWS[@]}"; do
+    read -r qn qr qu qc <<<"$r"
+    printf '  queue %-24s ready=%s unacked=%s consumers=%s\n' "$qn" "$qr" "$qu" "$qc"
+    if [ "$qc" = 0 ] && [ "$qr" -gt 0 ]; then echo "  WARN: queue $qn has $qr ready messages and no consumer (is the worker running?)"; fi
+  done
+  row queue_ready_total "$q_ready" "$MAX_QREADY"
+fi
 
 echo "top distinct error lines (redacted):"
 if [ -s "$CAND" ]; then
