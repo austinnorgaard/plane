@@ -44,6 +44,8 @@ const PRIVATE_RANGES: Array<[string, number, "ipv4" | "ipv6"]> = [
   ["172.16.0.0", 12, "ipv4"],
   ["192.168.0.0", 16, "ipv4"],
   ["169.254.0.0", 16, "ipv4"],
+  // fork (PLN-96): shared address space (RFC 6598): carrier-grade NAT and overlay networks such as Tailscale
+  ["100.64.0.0", 10, "ipv4"],
   ["::1", 128, "ipv6"],
   ["fe80::", 10, "ipv6"],
   ["fc00::", 7, "ipv6"],
@@ -51,7 +53,13 @@ const PRIVATE_RANGES: Array<[string, number, "ipv4" | "ipv6"]> = [
 const privateList = new BlockList();
 for (const [net, bits, family] of PRIVATE_RANGES) privateList.addSubnet(net, bits, family);
 
-/** Loopback, private, link-local or unique-local address. */
+/** True when the direct peer is one of the trusted proxies. */
+export const isTrustedPeer = (peer: string | undefined, trusted: BlockList): boolean => {
+  const ip = normalize(peer);
+  return ip !== null && trusted.check(ip, familyOf(ip));
+};
+
+/** Loopback, private (including 100.64.0.0/10), link-local or unique-local address. */
 export const isPrivateAddress = (address: string): boolean => {
   const ip = normalize(address);
   return ip !== null && privateList.check(ip, familyOf(ip));
