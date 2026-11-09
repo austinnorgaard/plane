@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Fork consistency checks (PLN-118): fork/PATCHES.md lists every upstream file the fork changes, and every
+# live metadata event an app view publishes is also published by a REST v1 view. Read-only, stdlib Python.
+name: Fork checks
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - "live-updates/v1.4.3"
+  push:
+    branches:
+      - "live-updates/v1.4.3"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fork-checks:
+    name: PATCHES.md coverage and REST v1 publish parity
+    if: github.repository == 'austinnorgaard/plane'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Fetch the upstream base tag
+        run: git fetch --no-tags https://github.com/makeplane/plane.git "refs/tags/v1.4.3:refs/tags/v1.4.3"
+
+      - name: Run the checks
+        run: python3 fork/tools/fork_checks.py all --base v1.4.3

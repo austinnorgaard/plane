@@ -1,0 +1,2 @@
+# Live metadata events an app view may publish without a REST v1 counterpart (fork/tools/fork_checks.py parity).
+# One "<kind> <verb>  # reason" per line. Keep it empty unless REST v1 really has no matching endpoint.
