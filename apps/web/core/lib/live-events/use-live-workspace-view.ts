@@ -18,6 +18,7 @@ import { StoreContext } from "@/lib/store-context";
 // local imports
 import { LiveWorkItemsApplier } from "./apply";
 import { getLiveEventsClient } from "./client";
+import { refreshCycleAndModuleDefinitions } from "./metadata";
 
 /**
  * PLN-37: at most this many projects are subscribed for a workspace view (the hub allows 100 per socket). The
@@ -127,6 +128,8 @@ export const useLiveWorkspaceView = (workspaceSlug: string | undefined, globalVi
             Promise.all([
               root.state.fetchProjectStates(workspaceSlug, projectId),
               root.label.fetchProjectLabels(workspaceSlug, projectId),
+              // PLN-36: cycle and module definitions (quiet: no loader, deleted ones are dropped)
+              refreshCycleAndModuleDefinitions(root, workspaceSlug, projectId),
             ]),
           // TODO: move the text to i18n keys (needs packages/i18n locale entries)
           onIssueMissingFromPeek: () =>
