@@ -53,6 +53,20 @@ export type TLiveUserEventFrame = { type: "user_event"; kind: string; verb: stri
 export type TLiveUserEvent = TLiveUserEventFrame | { type: "resync" };
 export type TLiveUserListener = (event: TLiveUserEvent) => void;
 
+/**
+ * fork (PLN-47): the connection state of the shared socket, for the status indicator.
+ *  - idle: nothing is subscribed in this tab (no socket wanted)
+ *  - connecting: the first connection of this session is being opened
+ *  - connected: the socket is open
+ *  - reconnecting: the socket was open before and is being re-established (backoff, or a closed hidden tab)
+ *  - offline: not trying: the browser is offline, the session needs a sign-in (4401, retried on activity),
+ *    or the hub refused this client (4400/4403/4404/4413, until the next page load)
+ */
+export type TLiveConnectionState = "idle" | "connecting" | "connected" | "reconnecting" | "offline";
+export type TLiveOfflineReason = "network" | "unauthenticated" | "stopped";
+export type TLiveConnectionStatus = { state: TLiveConnectionState; offlineReason?: TLiveOfflineReason };
+export type TLiveConnectionListener = (status: TLiveConnectionStatus) => void;
+
 type TServerFrame =
   | TLiveEventsFrame
   | { type: "ping" }
@@ -214,6 +228,90 @@ export class LiveEventsClient {
   private hiddenBufferWeight = 0;
   private hiddenOverflow = false;
   private globalListenersAttached = false;
+  /** fork (PLN-47): connection state observers and the last state sent to them */
+  private connectionListeners = new Set<TLiveConnectionListener>();
+  private connectionStatus: TLiveConnectionStatus = { state: "idle" };
+  /** a socket of this session has been open at least once (reconnecting vs connecting) */
+  private everConnected = false;
+
+  /** fork (PLN-47): the current connection state. Stable object identity until the state changes. */
+  getConnectionStatus = (): TLiveConnectionStatus => this.connectionStatus;
+
+  /** fork (PLN-47): observes the connection state (useSyncExternalStore shape). Returns the unsubscribe function. */
+  subscribeConnectionStatus = (listener: TLiveConnectionListener): (() => void) => {
+    this.connectionListeners.add(listener);
+    return () => {
+      this.connectionListeners.delete(listener);
+    };
+  };
+
+  /** Derives the state from the client fields and notifies the observers when it changed. */
+  private updateConnectionStatus() {
+    let next: TLiveConnectionStatus;
+    if (this.listeners.size === 0) next = { state: "idle" };
+    else if (this.stopped) next = { state: "offline", offlineReason: "stopped" };
+    else if (this.pausedUntilActivity) next = { state: "offline", offlineReason: "unauthenticated" };
+    else if (!this.isOnline()) next = { state: "offline", offlineReason: "network" };
+    else if (this.socket?.readyState === 1) next = { state: "connected" };
+    else next = { state: this.everConnected ? "reconnecting" : "connecting" };
+    const current = this.connectionStatus;
+    if (current.state === next.state && current.offlineReason === next.offlineReason) return;
+    this.connectionStatus = next;
+    for (const listener of this.connectionListeners) {
+      try {
+        listener(next);
+      } catch (error) {
+        console.error("live events connection listener failed", error);
+      }
+    }
+  }
+
+  /**
+   * PLN-37: one listener for several projects of a workspace (the workspace views). Sends one subscribe frame
+   * for the projects that are new, and one unsubscribe frame when it ends: the hub rate-limits subscribe
+   * frames per user (PLN-96), so a project-by-project subscribe could close the socket.
+   */
+  subscribeMany(workspaceSlug: string, projectIds: string[], listener: TLiveListener): () => void {
+    const ids = [...new Set(projectIds)];
+    if (ids.length === 0) return () => {};
+    const fresh: string[] = [];
+    for (const projectId of ids) {
+      let set = this.listeners.get(projectId);
+      if (!set) {
+        set = new Set();
+        this.listeners.set(projectId, set);
+        fresh.push(projectId);
+      }
+      set.add(listener);
+      this.workspaceSlugs.set(projectId, workspaceSlug);
+    }
+    this.attachGlobalListeners();
+    // a navigation counts as user activity: it lifts a 4401 pause
+    this.pausedUntilActivity = false;
+    if (fresh.length > 0) this.sendSubscribe(fresh);
+    this.ensureConnected();
+    this.updateConnectionStatus();
+
+    let active = true;
+    return () => {
+      if (!active) return;
+      active = false;
+      const gone: string[] = [];
+      for (const projectId of ids) {
+        const current = this.listeners.get(projectId);
+        if (!current) continue;
+        current.delete(listener);
+        if (current.size > 0) continue;
+        this.listeners.delete(projectId);
+        this.workspaceSlugs.delete(projectId);
+        this.denied.delete(projectId);
+        gone.push(projectId);
+      }
+      if (gone.length > 0) this.send({ type: "unsubscribe", project_ids: gone });
+      if (this.listeners.size === 0) this.shutdown();
+      this.updateConnectionStatus();
+    };
+  }
 
   /** Subscribes to a project. Returns the unsubscribe function. */
   subscribe(workspaceSlug: string, projectId: string, listener: TLiveListener): () => void {
@@ -231,6 +329,7 @@ export class LiveEventsClient {
     this.workspaceSlugs.set(projectId, workspaceSlug);
     if (isFirstForProject) this.sendSubscribe([projectId]);
     this.ensureConnected();
+    this.updateConnectionStatus();
 
     let active = true;
     return () => {
@@ -245,6 +344,7 @@ export class LiveEventsClient {
       this.denied.delete(projectId);
       this.send({ type: "unsubscribe", project_ids: [projectId] });
       if (this.listeners.size === 0) this.shutdown();
+      this.updateConnectionStatus();
     };
   }
 
@@ -308,6 +408,8 @@ export class LiveEventsClient {
         // retry into a first retry. It resets once the connection proves stable.
         this.stableTimer = setTimeout(this.markStable, SETTLE_WINDOW_MS);
         this.resetWatchdog();
+        this.everConnected = true;
+        this.updateConnectionStatus();
         // roles may have changed while the socket was down: ask again
         this.denied.clear();
         this.sendSubscribe([...this.listeners.keys()]);
@@ -342,6 +444,7 @@ export class LiveEventsClient {
         this.clearStableTimer();
         this.markDisconnected();
         this.handleClose(closeEvent.code);
+        this.updateConnectionStatus();
       },
       { signal }
     );
@@ -434,6 +537,7 @@ export class LiveEventsClient {
     this.hiddenBuffer = [];
     this.hiddenBufferWeight = 0;
     this.hiddenOverflow = false;
+    this.everConnected = false;
   }
 
   /** one subscribe message per workspace, denied projects are skipped */
@@ -506,6 +610,7 @@ export class LiveEventsClient {
       // the connection was dead for an unknown time before this was noticed
       this.markDisconnected(true);
       this.scheduleReconnect();
+      this.updateConnectionStatus();
     }, WATCHDOG_MS);
   }
 
@@ -584,6 +689,7 @@ export class LiveEventsClient {
         this.closeSocket();
         if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
         this.reconnectTimer = undefined;
+        this.updateConnectionStatus();
       }, HIDDEN_CLOSE_MS);
       return;
     }
@@ -602,12 +708,14 @@ export class LiveEventsClient {
       this.onActivity();
     }
     if (this.socket) this.flushHiddenBuffer();
+    this.updateConnectionStatus();
   };
 
   /** focus and visibility lift a 4401 pause and wake a closed socket */
   private onActivity = () => {
     this.pausedUntilActivity = false;
     this.ensureConnected();
+    this.updateConnectionStatus();
   };
 
   private onOnline = () => {
@@ -615,6 +723,7 @@ export class LiveEventsClient {
     // a spurious online event with a healthy socket must not leave a stale resync request behind
     if (!this.socket) this.markDisconnected(true);
     this.ensureConnected();
+    this.updateConnectionStatus();
   };
 
   private onOffline = () => {
@@ -622,6 +731,7 @@ export class LiveEventsClient {
     this.reconnectTimer = undefined;
     this.closeSocket();
     this.markDisconnected(true);
+    this.updateConnectionStatus();
   };
 
   private attachGlobalListeners() {
