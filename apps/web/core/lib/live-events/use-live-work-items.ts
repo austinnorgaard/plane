@@ -6,17 +6,12 @@
 
 import { useContext, useEffect, useRef } from "react";
 import { useLocation, useParams } from "react-router";
-// plane imports
-import { EIssuesStoreType } from "@plane/types";
-import { TOAST_TYPE, setToast } from "@plane/propel/toast";
 // hooks
-import { useIssueDetail } from "@/hooks/store/use-issue-detail";
-import { useIssues } from "@/hooks/store/use-issues";
 import { useUser } from "@/hooks/store/user";
 import { StoreContext } from "@/lib/store-context";
 // local imports
 import { LiveWorkItemsApplier } from "./apply";
-import { refreshCycleAndModuleDefinitions } from "./metadata";
+import { buildApplierDeps, useWorkItemUnavailableNotice } from "./applier-deps";
 import { getLiveEventsClient } from "./client";
 
 /**
@@ -38,14 +33,10 @@ export const useLiveWorkItems = (
   const archived = /\/projects\/[^/]+\/archives\/issues(\/|$)/.test(pathname);
   // PLN-76: the intake (triage) route
   const intake = /\/projects\/[^/]+\/intake(\/|$)/.test(pathname);
-  const storeContext = useContext(StoreContext);
+  const root = useContext(StoreContext);
   const { data: currentUser } = useUser();
-  const issueDetail = useIssueDetail();
-  const projectStore = useIssues(EIssuesStoreType.PROJECT);
-  const cycleStore = useIssues(EIssuesStoreType.CYCLE);
-  const moduleStore = useIssues(EIssuesStoreType.MODULE);
-  const viewStore = useIssues(EIssuesStoreType.PROJECT_VIEW);
-  const archivedStore = useIssues(EIssuesStoreType.ARCHIVED);
+  // PLN-119: translated, and stable across renders
+  const notifyUnavailable = useWorkItemUnavailableNotice();
 
   // the applier reads the latest values without being recreated on every navigation inside the project
   const latest = useRef({
@@ -66,59 +57,29 @@ export const useLiveWorkItems = (
     userId: currentUser?.id,
     pageIssueId: options?.pageIssueId,
   };
-  // the stores are stable singletons, read through a ref so the subscription only follows the project
-  const stores = useRef({ storeContext, issueDetail, projectStore, cycleStore, moduleStore, viewStore, archivedStore });
-  stores.current = { storeContext, issueDetail, projectStore, cycleStore, moduleStore, viewStore, archivedStore };
+  // the root store is a stable singleton, read through a ref so the subscription only follows the project
+  const stores = useRef({ root, notifyUnavailable });
+  stores.current = { root, notifyUnavailable };
 
   useEffect(() => {
-    const s = stores.current;
-    const root = s.storeContext;
-    if (!workspaceSlug || !projectId || !root) return;
-    const applier = new LiveWorkItemsApplier({
-      workspaceSlug,
-      projectId,
-      getRoute: () => ({
-        cycleId: latest.current.cycleId,
-        moduleId: latest.current.moduleId,
-        viewId: latest.current.viewId,
-        archived: latest.current.archived,
-        intake: latest.current.intake,
-      }),
-      getCurrentUserId: () => latest.current.userId,
-      getPageIssueId: () => latest.current.pageIssueId,
-      issueMap: root.issue.issues,
-      projectIssues: s.projectStore.issues,
-      cycleIssues: s.cycleStore.issues,
-      moduleIssues: s.moduleStore.issues,
-      viewIssues: s.viewStore.issues,
-      archivedIssues: s.archivedStore.issues,
-      projectInbox: root.projectInbox,
-      getStateGroup: (stateId) => root.state.stateMap?.[stateId]?.group,
-      // PLN-111: unknown ids make the applier refresh the project's metadata once
-      isKnownLabel: (labelId) => !!root.label.labelMap?.[labelId],
-      isKnownState: (stateId) => !!root.state.stateMap?.[stateId],
-      getFilterExpression: (which) => {
-        const filters = { project: s.projectStore, cycle: s.cycleStore, module: s.moduleStore, view: s.viewStore }[
-          which
-        ].issuesFilter.issueFilters;
-        return filters?.richFilters;
-      },
-      issueDetail: s.issueDetail,
-      refreshProjectMetadata: () =>
-        Promise.all([
-          root.state.fetchProjectStates(workspaceSlug, projectId),
-          root.label.fetchProjectLabels(workspaceSlug, projectId),
-          // PLN-36: cycle and module definitions (quiet: no loader, deleted ones are dropped)
-          refreshCycleAndModuleDefinitions(root, workspaceSlug, projectId),
-        ]),
-      // TODO: move the text to i18n keys (needs packages/i18n locale entries)
-      onIssueMissingFromPeek: () =>
-        setToast({
-          type: TOAST_TYPE.INFO,
-          title: "Work item unavailable",
-          message: "This work item was deleted or you no longer have access to it.",
+    const { root: rootStore, notifyUnavailable: notify } = stores.current;
+    if (!workspaceSlug || !projectId || !rootStore) return;
+    const applier = new LiveWorkItemsApplier(
+      buildApplierDeps(rootStore, {
+        workspaceSlug,
+        projectId,
+        getRoute: () => ({
+          cycleId: latest.current.cycleId,
+          moduleId: latest.current.moduleId,
+          viewId: latest.current.viewId,
+          archived: latest.current.archived,
+          intake: latest.current.intake,
         }),
-    });
+        getCurrentUserId: () => latest.current.userId,
+        getPageIssueId: () => latest.current.pageIssueId,
+        onIssueUnavailable: notify,
+      })
+    );
     const unsubscribe = getLiveEventsClient().subscribe(workspaceSlug, projectId, (event) => applier.handle(event));
     return () => {
       unsubscribe();

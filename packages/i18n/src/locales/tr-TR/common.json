@@ -880,6 +880,10 @@
       "offline_network_tooltip": "Çevrimdışısınız. Ağ geri geldiğinde canlı güncellemeler devam eder.",
       "offline_unauthenticated_tooltip": "Canlı güncellemeler duraklatıldı: oturum doğrulanamadı. Yeniden denemek için sayfaya tıklayın veya tekrar oturum açın.",
       "offline_stopped_tooltip": "Bu sekmede canlı güncellemeler kapalı. Yeniden açmak için sayfayı yenileyin."
+    },
+    "work_item_unavailable": {
+      "title": "İş öğesi kullanılamıyor",
+      "message": "Bu iş öğesi silindi veya artık bu öğeye erişiminiz yok."
     }
   }
 }

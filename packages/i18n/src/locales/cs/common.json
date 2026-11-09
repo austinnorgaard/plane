@@ -880,6 +880,10 @@
       "offline_network_tooltip": "Jste offline. Živé aktualizace budou pokračovat po obnovení sítě.",
       "offline_unauthenticated_tooltip": "Živé aktualizace jsou pozastaveny: relaci se nepodařilo ověřit. Klikněte na stránku a zkuste to znovu, nebo se znovu přihlaste.",
       "offline_stopped_tooltip": "Živé aktualizace jsou pro tuto kartu vypnuté. Obnovte stránku, abyste je znovu zapnuli."
+    },
+    "work_item_unavailable": {
+      "title": "Pracovní položka není dostupná",
+      "message": "Tato pracovní položka byla smazána nebo k ní již nemáte přístup."
     }
   }
 }

@@ -880,6 +880,10 @@
       "offline_network_tooltip": "Anda sedang offline. Pembaruan langsung akan berlanjut saat jaringan kembali.",
       "offline_unauthenticated_tooltip": "Pembaruan langsung dijeda: sesi tidak dapat diverifikasi. Klik halaman untuk mencoba lagi, atau masuk kembali.",
       "offline_stopped_tooltip": "Pembaruan langsung dinonaktifkan untuk tab ini. Muat ulang halaman untuk mengaktifkannya kembali."
+    },
+    "work_item_unavailable": {
+      "title": "Item kerja tidak tersedia",
+      "message": "Item kerja ini telah dihapus atau Anda tidak lagi memiliki akses ke item tersebut."
     }
   }
 }
