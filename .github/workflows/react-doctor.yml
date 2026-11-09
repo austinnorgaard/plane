@@ -44,6 +44,9 @@ concurrency:
 
 jobs:
   react-doctor:
+    # fork (PLN-109): upstream-only. It runs on every pull request to any branch, so it would run on
+    # the fork's live-updates PRs. Remove on rebase.
+    if: github.repository == 'makeplane/plane'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

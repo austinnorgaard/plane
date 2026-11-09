@@ -50,6 +50,9 @@ env:
 jobs:
   branch_build_setup:
     name: Build Setup
+    # fork (PLN-109): upstream-only. The fork's preview branch is synced from upstream and would
+    # start this job here (burning minutes or failing without upstream secrets). Remove on rebase.
+    if: github.repository == 'makeplane/plane'
     runs-on: ubuntu-22.04
     outputs:
       gh_branch_name: ${{ steps.set_env_variables.outputs.TARGET_BRANCH }}

@@ -4,21 +4,92 @@
 
 Every host-specific value is a variable supplied by the operator at run time. Nothing on this page is a real hostname, address, container number or path.
 
-| Variable            | Meaning                                                                                      |
-| ------------------- | -------------------------------------------------------------------------------------------- |
-| `PVE_HOST`          | ssh target of the hypervisor                                                                 |
-| `PLANE_CTID`        | container id of the Plane container on the hypervisor                                        |
-| `PLANE_APP_DIR`     | path in the container to the plane-app directory, which holds `docker-compose.yaml` and `plane.env` |
-| `PAUSE_FLAG_PATH`   | path of the flag file that pauses automated changes (operator supplied)                      |
-| `PVE_STAGING_DIR`   | scratch directory on the hypervisor for the image archive                                    |
-| `CT_STAGING_DIR`    | scratch directory in the container for the image archive                                     |
-| `BUILD_HOST`        | machine where the images were built with podman                                              |
-| `STOCK_RELEASE`     | tag of the stock `makeplane/*` images running before the deploy, taken from the inspection   |
-| `FORK_N`            | fork build number; tag is `v1.4.3-live.$FORK_N`                                              |
-| `PUBLIC_URL`        | origin users open from outside the LAN                                                       |
-| `LAN_URL`           | origin users open from the LAN                                                               |
-| `WORKSPACE_SLUG`, `PROJECT_ID` | a test workspace and project for the health checks                                 |
-| `PLANE_API_TOKEN`   | a Plane API token of a test user, exported in your shell only, never printed or committed    |
+## Updates (normal path)
+
+PLN-109. Code changes reach production as an update: CI builds the images, and one command pulls them and restarts only the services whose image changed. There is no build on the production box, no restart of the other services, and no restart of the container. The numbered sections further down are the first-deploy and offline (archive) procedure. Use them only for that, or when CI is unavailable.
+
+**Prerequisite, once per workstation:** `gh` is logged in to github.com, and its token has the `read:packages` scope (the images are private packages):
+
+```
+gh auth refresh -h github.com -s read:packages
+gh auth status        # "Token scopes" must list 'read:packages'
+```
+
+Nothing is stored on the container. Each `update.sh` step that talks to ghcr.io does the following:
+
+- pipes the token from `gh auth token` over ssh into `pct exec` stdin;
+- runs `docker login ghcr.io --password-stdin` with `DOCKER_CONFIG` pointing at a fresh 0700 directory `/run/plane-update.<id>` inside the container (tmpfs);
+- removes that directory in a trap on every exit, including Ctrl-C.
+
+The token never appears in an argument list, a log, a file in the repo or the `--dry-run` output.
+
+1. **CI build.** Merge the PR into `live-updates/v1.4.3`. The `Fork images` workflow (`.github/workflows/fork-images.yml`) builds only the images whose paths changed (mapping in `fork/build/service-paths.sh`). It pushes them as `ghcr.io/austinnorgaard/plane-fork-<web|live|api>:sha-<sha>` and moves `:live-updates-v1.4.3`. Its job summary lists the decision and a manifest table (sha, built images, digests). The same manifest is the run artifact `fork-images-manifest`. To build by hand (for example `services=all` for the first switch):
+   ```
+   gh workflow run fork-images.yml -R austinnorgaard/plane --ref live-updates/v1.4.3 -f services=all -f sha=<sha>
+   ```
+2. **Update.** From a workstation with this repository checked out, and `PVE_HOST`, `PLANE_CTID` and `PLANE_APP_DIR` set:
+
+   ```
+   fork/deploy/update.sh --dry-run <sha>     # prints the plan and every command
+   fork/deploy/update.sh <sha>               # or: --services web,live,api
+   ```
+
+   **Preflight:** it checks that the sha is on the branch, that the CI run succeeded, that the images exist (with `docker manifest inspect` inside the container) and that no L1 file is active.
+
+   **Then it:**
+   - records the current tags (`plane.env.update-prev`, plus a timestamped copy);
+   - pulls the changed images;
+   - runs the Django migrations with the new api image, if api changes, before any restart;
+   - writes `FORK_*_TAG` into `plane.env`;
+   - runs `up -d --no-deps` on only the changed services;
+   - polls health (web `/`, live `/live/health`, api `/api/instances/` with up to 15 minutes).
+
+   **Hold window:** with `--notify`, `UPDATE_PRE_CMD` runs before the pull and `UPDATE_POST_CMD` after the health checks (locally, `bash -c`), for example to message the Gavel team.
+
+   **Exit codes:**
+   - 2: a check stopped it;
+   - 4: the registry refused the token (scope);
+   - 5: the health check failed. Nothing is rolled back automatically.
+
+3. **Checks.** Run `fork/deploy/update.sh status` (tags, previous tags, running images). Then the post-deploy log check (section 7a), and the smoke tests of section 7 that touch what changed.
+4. **Undo.** `fork/deploy/update.sh rollback` puts back the tags from before the last update or rollback (run it twice to roll forward again). It does not reverse migrations.
+
+`gate.sh` (section 1a) checks an image archive and stays the gate for the archive path. For updates, the preflight of `update.sh` takes its place.
+
+### One-time switch from `localhost/...:v1.4.3-live.N` to GHCR tags
+
+Do this once on the container that still runs the archive-built images. Run the steps in `$PLANE_APP_DIR`; `N` is the `FORK_N` now in `plane.env`.
+
+1. Keep copies: `cp -p docker-compose.override.yaml docker-compose.override.yaml.pre-pln109 && cp -p plane.env plane.env.pre-pln109`.
+2. Add the per-service tags for the images that are running now. Append them with an editor or `printf`; never print `plane.env`:
+   ```
+   FORK_REGISTRY=localhost
+   FORK_WEB_TAG=v1.4.3-live.N
+   FORK_LIVE_TAG=v1.4.3-live.N
+   FORK_API_TAG=v1.4.3-live.N
+   ```
+   The `FORK_N` line can stay; nothing reads it any more.
+3. Copy the new `fork/deploy/docker-compose.override.yaml` into `$PLANE_APP_DIR` (as in section 4). It also carries the Gunicorn hotfix (`GUNICORN_CMD_ARGS`, `GUNICORN_WORKERS: "2"` on api). If the hotfix was applied somewhere else on the container, remove it there, so that the override is its only source: `grep -n GUNICORN docker-compose*.yaml`.
+4. Validate with `$C config -q && echo config-ok`, then run `fork/deploy/rollback.sh forward` from the workstation. It runs `up -d` (a no-op for unchanged services) and checks that the five services run `localhost/plane-fork-*:v1.4.3-live.N`, the images plane.env now names.
+5. Build all three images for the branch head in CI (step 1 above, `services=all`), then run `fork/deploy/update.sh <head sha>`. The registry changes, so all three images move to `ghcr.io/austinnorgaard/...:sha-<head sha>`. `update.sh rollback` returns to the localhost images, as long as they are still in the local store (keep them until the GHCR images have run for a while).
+
+After the switch, `fork/build/build.sh` is the offline fallback only. Its images are deployed by setting `FORK_REGISTRY=localhost` and the three tags to `v1.4.3-live.<N>`, then running `$C up -d`.
+
+| Variable                       | Meaning                                                                                                                                                                                           |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PVE_HOST`                     | ssh target of the hypervisor                                                                                                                                                                      |
+| `PLANE_CTID`                   | container id of the Plane container on the hypervisor                                                                                                                                             |
+| `PLANE_APP_DIR`                | path in the container to the plane-app directory, which holds `docker-compose.yaml` and `plane.env`                                                                                               |
+| `PAUSE_FLAG_PATH`              | path of the flag file that pauses automated changes (operator supplied)                                                                                                                           |
+| `PVE_STAGING_DIR`              | scratch directory on the hypervisor for the image archive                                                                                                                                         |
+| `CT_STAGING_DIR`               | scratch directory in the container for the image archive                                                                                                                                          |
+| `BUILD_HOST`                   | machine where the images were built with podman                                                                                                                                                   |
+| `STOCK_RELEASE`                | tag of the stock `makeplane/*` images running before the deploy, taken from the inspection                                                                                                        |
+| `FORK_N`                       | build number of an archive build (`build.sh`); its tag is `v1.4.3-live.$FORK_N`. The override reads `FORK_REGISTRY` and `FORK_WEB_TAG` / `FORK_LIVE_TAG` / `FORK_API_TAG` instead (see "Updates") |
+| `PUBLIC_URL`                   | origin users open from outside the LAN                                                                                                                                                            |
+| `LAN_URL`                      | origin users open from the LAN                                                                                                                                                                    |
+| `WORKSPACE_SLUG`, `PROJECT_ID` | a test workspace and project for the health checks                                                                                                                                                |
+| `PLANE_API_TOKEN`              | a Plane API token of a test user, exported in your shell only, never printed or committed                                                                                                         |
 
 Compose shorthand used below, run inside the container in `$PLANE_APP_DIR`:
 
@@ -53,28 +124,28 @@ Fill in the table below from the output (values `set`, `unset`, `match`, `no-mat
 
 ### Inspection results
 
-| Item                                                        | Result |
-| ----------------------------------------------------------- | ------ |
-| Compose file name in `$PLANE_APP_DIR`                       |        |
-| Image line: web                                             |        |
-| Image line: live                                            |        |
-| Image line: api                                             |        |
-| Image line: worker                                          |        |
-| Image line: beat-worker                                     |        |
-| `plane.env` defines `WEB_URL`                               |        |
-| `WEB_URL` equals `PUBLIC_URL` / `LAN_URL` / other           |        |
-| `LIVE_SERVER_SECRET_KEY` state (sha256 vs placeholder)      |        |
-| `LIVE_BASE_URL` in `plane.env`                              |        |
-| `LIVE_BASE_URL` on running api                              |        |
-| `LIVE_BASE_URL` on running worker (must be unset)           |        |
-| `LIVE_BASE_URL` on running beat-worker (must be unset)      |        |
-| `plane-redis` publishes ports                               |        |
-| `pct listsnapshot` works                                    |        |
-| `STOCK_RELEASE` (tag of the stock images now running)       |        |
-| Free disk in `$PLANE_APP_DIR` filesystem                    |        |
-| Free disk for the container image store                     |        |
-| Origins users use (variable names only)                     |        |
-| inspect.sh exit code                                        |        |
+| Item                                                   | Result |
+| ------------------------------------------------------ | ------ |
+| Compose file name in `$PLANE_APP_DIR`                  |        |
+| Image line: web                                        |        |
+| Image line: live                                       |        |
+| Image line: api                                        |        |
+| Image line: worker                                     |        |
+| Image line: beat-worker                                |        |
+| `plane.env` defines `WEB_URL`                          |        |
+| `WEB_URL` equals `PUBLIC_URL` / `LAN_URL` / other      |        |
+| `LIVE_SERVER_SECRET_KEY` state (sha256 vs placeholder) |        |
+| `LIVE_BASE_URL` in `plane.env`                         |        |
+| `LIVE_BASE_URL` on running api                         |        |
+| `LIVE_BASE_URL` on running worker (must be unset)      |        |
+| `LIVE_BASE_URL` on running beat-worker (must be unset) |        |
+| `plane-redis` publishes ports                          |        |
+| `pct listsnapshot` works                               |        |
+| `STOCK_RELEASE` (tag of the stock images now running)  |        |
+| Free disk in `$PLANE_APP_DIR` filesystem               |        |
+| Free disk for the container image store                |        |
+| Origins users use (variable names only)                |        |
+| inspect.sh exit code                                   |        |
 
 Free disk must exceed twice the size of the image archive (about 1.5 GB for the three fork images).
 
@@ -84,14 +155,14 @@ Run this on the workstation with this repository checked out, after step 1 and b
 
 Inputs, all supplied by you at run time (no secret is ever printed; only key names):
 
-| Input             | Meaning                                                                                          |
-| ----------------- | ------------------------------------------------------------------------------------------------ |
-| `RELEASE_SHA`     | argument: the full sha being deployed                                                            |
-| `IMAGE_TAR`, `IMAGE_SHA256` | the archive and the sha256 from the build output (or `BUILD_NOTES`, a file with the `Tar sha256:` line) |
-| `RUNBOOK_FILE`    | your copy of this file with the inspection table above filled in (default: the shipped file, which fails because its table is empty) |
-| `STOCK_RELEASE`   | the stock image tag from the inspection, used by rollback L2                                      |
-| `PVE_HOST`, `PLANE_CTID`, `PLANE_APP_DIR` | as in step 1; the gate runs `inspect.sh` the same way                       |
-| `ENV_FILE`        | a copy of the deploy settings (`plane.env`), passed with `-e`; without `-e` they are read from the environment |
+| Input                                     | Meaning                                                                                                                              |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `RELEASE_SHA`                             | argument: the full sha being deployed                                                                                                |
+| `IMAGE_TAR`, `IMAGE_SHA256`               | the archive and the sha256 from the build output (or `BUILD_NOTES`, a file with the `Tar sha256:` line)                              |
+| `RUNBOOK_FILE`                            | your copy of this file with the inspection table above filled in (default: the shipped file, which fails because its table is empty) |
+| `STOCK_RELEASE`                           | the stock image tag from the inspection, used by rollback L2                                                                         |
+| `PVE_HOST`, `PLANE_CTID`, `PLANE_APP_DIR` | as in step 1; the gate runs `inspect.sh` the same way                                                                                |
+| `ENV_FILE`                                | a copy of the deploy settings (`plane.env`), passed with `-e`; without `-e` they are read from the environment                       |
 
 ```
 IMAGE_TAR=<archive> IMAGE_SHA256=<hash> RUNBOOK_FILE=<filled copy> STOCK_RELEASE=<tag> \
@@ -139,11 +210,11 @@ The images are built from this public repository, and the build secrets (such as
 
 Additional variables:
 
-| Variable            | Meaning                                                                                  |
-| ------------------- | ---------------------------------------------------------------------------------------- |
-| `FORK_REPO`         | `owner/name` of this fork on GitHub                                                      |
-| `RELEASE_TAG`       | tag of the image release, one per build, for example `images-live.$FORK_N`               |
-| `IMAGE_SHA256`      | sha256 of the archive, copied from the build output (the `Tar sha256` line)              |
+| Variable       | Meaning                                                                     |
+| -------------- | --------------------------------------------------------------------------- |
+| `FORK_REPO`    | `owner/name` of this fork on GitHub                                         |
+| `RELEASE_TAG`  | tag of the image release, one per build, for example `images-live.$FORK_N`  |
+| `IMAGE_SHA256` | sha256 of the archive, copied from the build output (the `Tar sha256` line) |
 
 The expected hash must come from the build output, not from the release page: that is what makes the check independent of the download.
 
@@ -196,9 +267,14 @@ Manual alternative (no release, no internet on the build side): copy the archive
 Copy `fork/deploy/docker-compose.override.yaml` into `$PLANE_APP_DIR` (`pct push`, same as above) and add these keys to `plane.env` (set values yourself; do not paste secrets anywhere):
 
 ```
-FORK_N=<number>
+FORK_REGISTRY=localhost
+FORK_WEB_TAG=v1.4.3-live.<FORK_N>
+FORK_LIVE_TAG=v1.4.3-live.<FORK_N>
+FORK_API_TAG=v1.4.3-live.<FORK_N>
 LIVE_EVENTS_ALLOWED_ORIGINS=<PUBLIC_URL>,<LAN_URL>
 ```
+
+(These are the archive images. With CI images, leave `FORK_REGISTRY` out (the default is `ghcr.io/austinnorgaard`) and use `sha-<sha>` tags; normally `update.sh` writes them.)
 
 `WEB_URL` must already be defined in `plane.env` (see inspection). `CORS_ALLOWED_ORIGINS` stays as it is; the override never passes it into live.
 
@@ -219,7 +295,7 @@ $C up -d
 $C ps --format '{{.Service}} {{.Image}}'
 ```
 
-Expected images: `web`, `live`, `api`, `worker`, `beat-worker` all `localhost/plane-fork-*:v1.4.3-live.$FORK_N` (web -> `plane-fork-web`, live -> `plane-fork-live`, the other three -> `plane-fork-api`). Every other service keeps its stock image. Exactly one `live` container must be running. If any of the five shows a stock image, the stack was started without the override (for example through `setup.sh`): rerun `$C up -d`.
+Expected images: `web`, `live`, `api`, `worker`, `beat-worker` all `$FORK_REGISTRY/plane-fork-*:<tag>` with the tags from `plane.env` (archive path: `localhost/plane-fork-*:v1.4.3-live.$FORK_N`; web -> `plane-fork-web` with `FORK_WEB_TAG`, live -> `plane-fork-live` with `FORK_LIVE_TAG`, the other three -> `plane-fork-api` with `FORK_API_TAG`). Every other service keeps its stock image. Exactly one `live` container must be running. If any of the five shows a stock image, the stack was started without the override (for example through `setup.sh`): rerun `$C up -d`.
 
 Wait for `api` to be healthy: `$C logs --tail 30 api`.
 
@@ -235,12 +311,12 @@ done
 
 Expected:
 
-| Service       | Names present                                                                                             | Names absent                         |
-| ------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| Service       | Names present                                                                                                  | Names absent                            |
+| ------------- | -------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
 | `live`        | `LIVE_EVENTS_ENABLED`, `LIVE_EVENTS_ALLOWED_ORIGINS`, `WEB_URL`, `PAGES_API_ENABLED`, `LIVE_SERVER_SECRET_KEY` | `CORS_ALLOWED_ORIGINS`, `LIVE_BASE_URL` |
-| `api`         | `LIVE_EVENTS_ENABLED`, `PAGES_API_ENABLED`, `LIVE_BASE_URL`, `LIVE_SERVER_SECRET_KEY`                      |                                      |
-| `worker`      | `LIVE_EVENTS_ENABLED`                                                                                      | `LIVE_BASE_URL`, `PAGES_API_ENABLED` |
-| `beat-worker` |                                                                                                            | `LIVE_BASE_URL`, `PAGES_API_ENABLED` |
+| `api`         | `LIVE_EVENTS_ENABLED`, `PAGES_API_ENABLED`, `LIVE_BASE_URL`, `LIVE_SERVER_SECRET_KEY`                          |                                         |
+| `worker`      | `LIVE_EVENTS_ENABLED`                                                                                          | `LIVE_BASE_URL`, `PAGES_API_ENABLED`    |
+| `beat-worker` |                                                                                                                | `LIVE_BASE_URL`, `PAGES_API_ENABLED`    |
 
 If `LIVE_BASE_URL` shows on `worker` or `beat-worker`, run rollback L1 (below) at once and stop.
 
@@ -302,11 +378,11 @@ It reads `docker compose logs --since` for api, worker, beat-worker and live and
 
 Targets are estimates; record the measured times here.
 
-| Step | Target | Measured |
-| ---- | ------ | -------- |
-| L1   | 1 to 2 min |      |
-| L2   | 60 s or less |      |
-| Roll forward | 1 to 2 min |  |
+| Step         | Target       | Measured |
+| ------------ | ------------ | -------- |
+| L1           | 1 to 2 min   |          |
+| L2           | 60 s or less |          |
+| Roll forward | 1 to 2 min   |          |
 
 ## 9. Hard reload
 
@@ -316,14 +392,14 @@ The web bundle changed. Tabs opened before the deploy keep running the old code 
 
 Choose the smallest level that fixes the problem.
 
-**Wrapper.** `fork/deploy/rollback.sh l1|l2|forward` runs the commands of L1, L2 and the roll-forward below, in the same order, with the sed check and a timing line per step. Run it from a workstation with `PVE_HOST`, `PLANE_CTID` and `PLANE_APP_DIR` set (plus `STOCK_RELEASE` for `l2` and `FORK_N` for `forward`). `--dry-run` prints every command and changes nothing. Exit codes: 0 done, 1 usage, 2 a check failed (nothing further was run), 3 a remote command failed. It is idempotent: running `l1` twice is safe.
+**Wrapper.** `fork/deploy/rollback.sh l1|l2|forward` runs the commands of L1, L2 and the roll-forward below, in the same order, with the sed check and a timing line per step. Run it from a workstation with `PVE_HOST`, `PLANE_CTID` and `PLANE_APP_DIR` set (plus `STOCK_RELEASE` for `l2`; `forward` reads the image tags from `plane.env`). `--dry-run` prints every command and changes nothing. Exit codes: 0 done, 1 usage, 2 a check failed (nothing further was run), 3 a remote command failed. It is idempotent: running `l1` twice is safe.
 
 ```
 fork/deploy/rollback.sh --dry-run l1
 fork/deploy/rollback.sh l1
 ```
 
-`l2` also checks first that every stock image that uses `APP_RELEASE` (backend, frontend, space, admin, live, proxy) is in the local store at `$STOCK_RELEASE`, warns when the up takes longer than 60 s, and exits 2 if any service still shows a `localhost/plane-fork-` image afterwards. The ssh calls use `BatchMode`, `ConnectTimeout=10` and a keepalive, so a dead host fails fast. `forward` checks that the five fork services run `v1.4.3-live.$FORK_N` and deletes the L1 file only if they do. The manual commands below are the fallback and stay the reference.
+`l2` also checks first that every stock image that uses `APP_RELEASE` (backend, frontend, space, admin, live, proxy) is in the local store at `$STOCK_RELEASE`, warns when the up takes longer than 60 s, and exits 2 if any service still shows a `plane-fork-` image (GHCR or localhost) afterwards. The ssh calls use `BatchMode`, `ConnectTimeout=10` and a keepalive, so a dead host fails fast. `forward` checks that the five fork services run the images `plane.env` names (`FORK_REGISTRY` and the `FORK_*_TAG` lines) and deletes the L1 file only if they do. The manual commands below are the fallback and stay the reference.
 
 **L1: both flags off (about 1 to 2 min).** Keeps the fork images, turns the behaviour off. Live events stop (the socket closes with 4404) and the pages API answers 404. The L1 file is generated on the spot and deleted after the roll-forward.
 
@@ -364,7 +440,7 @@ Afterwards run the stock stack as in L2 and check the web UI. Delete the snapsho
 
 ## 11. Retention
 
-- Keep the two most recent fork tags in the container's image store (the running one and the previous one). Remove older ones by exact tag: `docker image rm localhost/plane-fork-web:v1.4.3-live.<old>` (and `-live`, `-api`).
+- Keep the two most recent fork tags in the container's image store (the running one and the previous one, which `update.sh rollback` needs). Remove older ones by exact tag: `docker image rm ghcr.io/austinnorgaard/plane-fork-web:sha-<old>` (archive path: `localhost/plane-fork-web:v1.4.3-live.<old>`; and `-live`, `-api`).
 - Never prune stock images: no `docker image prune -a`, no `docker system prune -a`, no removal of `makeplane/*`, `postgres`, `valkey`, `rabbitmq` or `minio` images. Rollback L2 depends on them.
 - Delete image archives from `$PVE_STAGING_DIR` and `$CT_STAGING_DIR` after the checksum check.
 

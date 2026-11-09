@@ -8,10 +8,19 @@
 #       --env-file plane.env up -d
 #
 # Required variables (from plane.env or the shell):
-#   FORK_N                       fork build number; images are ...:v1.4.3-live.${FORK_N}
+#   FORK_WEB_TAG                 tag of the web image, normally sha-<40-hex sha> (PLN-109)
+#   FORK_LIVE_TAG                tag of the live image
+#   FORK_API_TAG                 tag of the api image, shared by api, worker and beat-worker
 #   WEB_URL                      the public origin users open (already in plane.env)
 #   LIVE_EVENTS_ALLOWED_ORIGINS  comma-separated browser origins allowed on the events socket
 #   LIVE_SERVER_SECRET_KEY       must not be the shipped placeholder (already in plane.env)
+# Optional:
+#   FORK_REGISTRY                image registry and owner, default ghcr.io/austinnorgaard (CI
+#                                images, private). For images built with fork/build/build.sh
+#                                (the offline path) set FORK_REGISTRY=localhost and the three
+#                                tags to v1.4.3-live.<N>.
+# The tags are written by fork/deploy/update.sh; set them by hand only for the one-time
+# switch (RUNBOOK "Updates") or the offline path.
 #
 # Rules (checked by hand; there is no automated check):
 #   - LIVE_EVENTS_ENABLED=1 on api, worker, live.
@@ -22,10 +31,10 @@
 
 services:
   web:
-    image: localhost/plane-fork-web:v1.4.3-live.${FORK_N:?set FORK_N}
+    image: ${FORK_REGISTRY:-ghcr.io/austinnorgaard}/plane-fork-web:${FORK_WEB_TAG:?set FORK_WEB_TAG}
 
   live:
-    image: localhost/plane-fork-live:v1.4.3-live.${FORK_N:?set FORK_N}
+    image: ${FORK_REGISTRY:-ghcr.io/austinnorgaard}/plane-fork-live:${FORK_LIVE_TAG:?set FORK_LIVE_TAG}
     environment:
       LIVE_EVENTS_ENABLED: "1"
       LIVE_EVENTS_ALLOWED_ORIGINS: ${LIVE_EVENTS_ALLOWED_ORIGINS:?set LIVE_EVENTS_ALLOWED_ORIGINS}
@@ -35,7 +44,7 @@ services:
       # middleware. The events socket uses LIVE_EVENTS_ALLOWED_ORIGINS instead.
 
   api:
-    image: localhost/plane-fork-api:v1.4.3-live.${FORK_N:?set FORK_N}
+    image: ${FORK_REGISTRY:-ghcr.io/austinnorgaard}/plane-fork-api:${FORK_API_TAG:?set FORK_API_TAG}
     environment:
       LIVE_EVENTS_ENABLED: "1"
       PAGES_API_ENABLED: "1"
@@ -47,13 +56,19 @@ services:
       # "rich" sync in bgtasks/copy_s3_object.py). The pages API needs it on
       # api alone.
       LIVE_BASE_URL: http://live:3000
+      # Gunicorn (PLN-109, the hotfix already running on CT 142): vault IO stalls killed
+      # single-worker boots, so the api runs two workers with a 300 s timeout and a 60 s
+      # graceful timeout. docker-compose.yaml hardcodes GUNICORN_WORKERS: 1 in its shared env
+      # anchor, so the value must be set here (plane.env cannot change it).
+      GUNICORN_CMD_ARGS: "--timeout 300 --graceful-timeout 60"
+      GUNICORN_WORKERS: "2"
 
   worker:
-    image: localhost/plane-fork-api:v1.4.3-live.${FORK_N:?set FORK_N}
+    image: ${FORK_REGISTRY:-ghcr.io/austinnorgaard}/plane-fork-api:${FORK_API_TAG:?set FORK_API_TAG}
     environment:
       LIVE_EVENTS_ENABLED: "1"
       # Intentionally no LIVE_BASE_URL (see api above).
 
   beat-worker:
-    image: localhost/plane-fork-api:v1.4.3-live.${FORK_N:?set FORK_N}
+    image: ${FORK_REGISTRY:-ghcr.io/austinnorgaard}/plane-fork-api:${FORK_API_TAG:?set FORK_API_TAG}
     # Intentionally no LIVE_BASE_URL and no fork flags: beat only schedules.

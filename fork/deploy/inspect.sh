@@ -82,6 +82,14 @@ echo "plane_env=readable"
 line=$(grep -m1 '^WEB_URL=' "$f" | tr -d '\r')
 if [ -z "$line" ]; then echo "WEB_URL=unset"; else echo "WEB_URL=${line#*=}"; fi
 if grep -q '^LIVE_BASE_URL=' "$f"; then echo "plane_env.LIVE_BASE_URL=set"; else echo "plane_env.LIVE_BASE_URL=unset"; fi
+# fork (PLN-109): image settings (non-secret). FORK_N is the old single build number;
+# the per-service FORK_*_TAG lines replace it.
+for k in FORK_N FORK_REGISTRY FORK_WEB_TAG FORK_LIVE_TAG FORK_API_TAG; do
+  v=$(grep "^$k=" "$f" | tail -n 1 | tr -d '\r')
+  v=${v#*=}
+  case "$v" in '') v=unset ;; *[!A-Za-z0-9._/:-]*) v='<unexpected characters>' ;; esac
+  echo "plane_env.$k=$v"
+done
 EOF
 
 # The secret is read, hashed and compared here; only a word is printed.
@@ -168,7 +176,7 @@ if [ "$DRY" = 0 ]; then
   fi
 fi
 
-echo "-- WEB_URL (plane.env, non-secret URL) --"
+echo "-- WEB_URL and fork image tags (plane.env, non-secret) --"
 out=$(ct_sh "$S_WEBURL" "$PLANE_APP_DIR")
 [ "$DRY" = 1 ] || printf '%s\n' "$out"
 plane_env_lbu=$(kv 'plane_env.LIVE_BASE_URL' "$out")

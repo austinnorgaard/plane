@@ -8,6 +8,8 @@ Files in this directory
   fetch-images.sh               downloads the image archive, verifies its sha256, then
                                 runs fork/build/verify-load.sh
   gate.sh                       go/no-go gate: PASS/FAIL per item, then GO or NO-GO (RUNBOOK 1a)
+  update.sh                     the normal deploy (PLN-109): pull the CI images of a sha and
+                                restart only the changed services; also rollback and status
   rollback.sh                   one command per rollback level: l1, l2, forward (--dry-run prints
                                 the commands; see RUNBOOK.md section 10)
   postdeploy-logs.sh            post-deploy log summary of api, worker, beat-worker and live: counts,
@@ -47,7 +49,13 @@ WARNINGS
    events socket go in LIVE_EVENTS_ALLOWED_ORIGINS.
 
 Variables (supplied by the operator; nothing host-specific is stored in the repo)
-  FORK_N                       fork build number, image tag v1.4.3-live.$FORK_N
+  FORK_WEB_TAG, FORK_LIVE_TAG, FORK_API_TAG
+                               image tags, normally sha-<40-hex sha> of a CI build,
+                               written by update.sh (PLN-109); api, worker and
+                               beat-worker share FORK_API_TAG
+  FORK_REGISTRY                optional, default ghcr.io/austinnorgaard (private CI
+                               images); localhost for archive images built with
+                               fork/build/build.sh (tags v1.4.3-live.<N>)
   WEB_URL                      public origin (normally already in plane.env)
   LIVE_EVENTS_ALLOWED_ORIGINS  comma-separated origins users open Plane from
                                (scheme://host[:port], for example the values of
@@ -124,7 +132,10 @@ Optional pages API size and time limits (defaults shown; leave unset to use them
                                                 about 2 MB of binary state can need more. A
                                                 --max-old-space-size in NODE_OPTIONS overrides this limit
 
-Commands (run in $PLANE_APP_DIR; FORK_N must be exported or in plane.env)
+Normal deploy (PLN-109): from a workstation, fork/deploy/update.sh <sha> pulls the
+CI images and restarts only the changed services; see RUNBOOK.md "Updates".
+
+Commands (run in $PLANE_APP_DIR; the FORK_*_TAG lines must be in plane.env)
 
   C="docker compose -f docker-compose.yaml -f docker-compose.override.yaml --env-file plane.env"
 
@@ -137,5 +148,7 @@ Read-only inspection of the target (on the hypervisor; changes nothing)
   ssh "$PVE_HOST" "PLANE_CTID=$PLANE_CTID PLANE_APP_DIR=$PLANE_APP_DIR bash -s" < fork/deploy/inspect.sh
   add "-- --dry-run" after "bash -s" to print the commands without running them.
 
-The migrator service keeps the stock backend image: the fork adds no database
-migrations. If that ever changes, add the migrator to the override.
+The migrator service keeps the stock backend image, which does not have the fork's
+migrations (for example 0123_fork_user_settings from PLN-106). update.sh runs
+"manage.py migrate" with the new fork api image before it restarts api, and skips it
+when "migrate --check" finds nothing to apply.
