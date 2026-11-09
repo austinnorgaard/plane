@@ -32,8 +32,7 @@ import { KanBan } from "./default";
 import { HeaderGroupByCard } from "./headers/group-by-card";
 import { HeaderSubGroupByCard } from "./headers/sub-group-by-card";
 // fork (PLN-108): a collapsed sub-group row accepts drops while auto-collapse is on
-import { useAutoCollapseEnabled } from "@/fork/board-settings/auto-collapse";
-import { CollapsedRowDropTarget } from "@/fork/board-settings/components/collapsed-column-drop-target";
+import { CollapsedRowDropZone } from "@/fork/board-settings/components/collapsed-column-drop-target";
 
 interface ISubGroupSwimlaneHeader {
   collapsedGroups: TIssueKanbanFilters;
@@ -108,6 +107,8 @@ const SubGroupSwimlaneHeader = observer(function SubGroupSwimlaneHeader({
 });
 
 interface ISubGroupSwimlane extends ISubGroupSwimlaneHeader {
+  /** fork (PLN-110): the board's columns, to lay out the drop preview of a collapsed row */
+  columnList?: IGroupByColumn[];
   addIssuesToView?: (issueIds: string[]) => Promise<TIssue>;
   canEditProperties: (projectId: string | undefined) => boolean;
   collapsedGroups: TIssueKanbanFilters;
@@ -161,7 +162,11 @@ const SubGroupSwimlane = observer(function SubGroupSwimlane(props: ISubGroupSwim
     sub_group_by,
     updateIssue,
   } = props;
-  const autoCollapse = useAutoCollapseEnabled();
+  const { columnList = [] } = props;
+  // fork (PLN-110): the columns the board shows (the same rule as the header and the row's KanBan)
+  const visibleColumnIds = columnList
+    .filter((column) => showEmptyGroup || (getGroupIssueCount(column.id, undefined, false) ?? 0) > 0)
+    .map((column) => column.id);
 
   const visibilitySubGroupBy = (
     _list: IGroupByColumn,
@@ -188,30 +193,52 @@ const SubGroupSwimlane = observer(function SubGroupSwimlane(props: ISubGroupSwim
           const issueCount = getGroupIssueCount(undefined, _list.id, true) ?? 0;
           const subGroupByVisibilityToggle = visibilitySubGroupBy(_list, issueCount);
           if (subGroupByVisibilityToggle.showGroup === false) return <></>;
+          // fork (PLN-110): previewing renders the title strip of a collapsed row as expanded
+          const renderHeader = (previewing = false) => (
+            <div className="sticky top-[50px] z-[3] flex w-full items-center border-y-[0.5px] border-subtle bg-layer-1 py-1">
+              <Row className="sticky left-0 flex-shrink-0">
+                <HeaderSubGroupByCard
+                  column_id={_list.id}
+                  icon={_list.icon}
+                  title={_list.name}
+                  count={issueCount}
+                  collapsedGroups={
+                    previewing
+                      ? {
+                          ...collapsedGroups,
+                          sub_group_by: collapsedGroups.sub_group_by.filter((id) => id !== _list.id),
+                        }
+                      : collapsedGroups
+                  }
+                  handleCollapsedGroups={handleCollapsedGroups}
+                  sub_group_by={sub_group_by}
+                />
+              </Row>
+            </div>
+          );
+          // fork (PLN-110): a collapsed row (auto-collapse on or collapsed by hand) is one drop zone across
+          // the board's full width, with a hover preview; a drop keeps the card's column and opens the row
+          if (!subGroupByVisibilityToggle.showIssues) {
+            return (
+              <CollapsedRowDropZone
+                key={_list.id}
+                subGroupId={_list.id}
+                columnIds={visibleColumnIds}
+                isDropDisabled={!!_list.isDropDisabled}
+                dropErrorMessage={_list.dropErrorMessage}
+                handleOnDrop={handleOnDrop}
+                onDropped={() =>
+                  handleExpandGroup
+                    ? handleExpandGroup("sub_group_by", _list.id)
+                    : handleCollapsedGroups("sub_group_by", _list.id)
+                }
+                renderHeader={renderHeader}
+              />
+            );
+          }
           return (
             <div key={_list.id} className="flex flex-shrink-0 flex-col">
-              <div className="sticky top-[50px] z-[3] flex w-full items-center border-y-[0.5px] border-subtle bg-layer-1 py-1">
-                <Row className="sticky left-0 flex-shrink-0">
-                  <CollapsedRowDropTarget
-                    enabled={autoCollapse && !subGroupByVisibilityToggle.showIssues}
-                    subGroupId={_list.id}
-                    isDropDisabled={!!_list.isDropDisabled}
-                    dropErrorMessage={_list.dropErrorMessage}
-                    handleOnDrop={handleOnDrop}
-                    onDropped={() => handleExpandGroup?.("sub_group_by", _list.id)}
-                  >
-                    <HeaderSubGroupByCard
-                      column_id={_list.id}
-                      icon={_list.icon}
-                      title={_list.name}
-                      count={issueCount}
-                      collapsedGroups={collapsedGroups}
-                      handleCollapsedGroups={handleCollapsedGroups}
-                      sub_group_by={sub_group_by}
-                    />
-                  </CollapsedRowDropTarget>
-                </Row>
-              </div>
+              {renderHeader()}
 
               {subGroupByVisibilityToggle.showIssues && (
                 <div className="relative">
@@ -344,6 +371,7 @@ export const KanBanSwimLanes = observer(function KanBanSwimLanes(props: IKanBanS
         <SubGroupSwimlane
           issuesMap={issuesMap}
           list={subGroupByList}
+          columnList={groupByList}
           groupedIssueIds={groupedIssueIds}
           getGroupIssueCount={getGroupIssueCount}
           displayProperties={displayProperties}
