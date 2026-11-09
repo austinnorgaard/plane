@@ -16,6 +16,7 @@ import type { IProjectIssues } from "@/store/issue/project";
 import type { ICycleIssues } from "@/store/issue/cycle";
 import type { IModuleIssues } from "@/store/issue/module";
 import type { IProjectViewIssues } from "@/store/issue/project-views";
+import type { IArchivedIssues } from "@/store/issue/archived";
 import type { IIssueDetail } from "@/store/issue/issue-details/root.store";
 import type { IIssueStore } from "@/store/issue/issue.store";
 import { EIssueGroupedAction } from "@/store/issue/helpers/base-issues.store";
@@ -159,7 +160,8 @@ export const hasCommentChange = (keys: Iterable<string>): boolean => {
 // applier
 // ---------------------------------------------------------------------------
 
-export type TLiveRoute = { cycleId?: string; moduleId?: string; viewId?: string };
+/** PLN-77: `archived` is the archived work items route (projects/<id>/archives/issues). */
+export type TLiveRoute = { cycleId?: string; moduleId?: string; viewId?: string; archived?: boolean };
 
 export interface ILiveApplierDeps {
   workspaceSlug: string;
@@ -171,6 +173,8 @@ export interface ILiveApplierDeps {
   cycleIssues: ICycleIssues;
   moduleIssues: IModuleIssues;
   viewIssues: IProjectViewIssues;
+  /** PLN-77 */
+  archivedIssues: IArchivedIssues;
   getFilterExpression: (store: "project" | "cycle" | "module" | "view") => unknown;
   issueDetail: IIssueDetail;
   onIssueMissingFromPeek: () => void;
@@ -344,7 +348,17 @@ export class LiveWorkItemsApplier {
     const { workspaceSlug, projectId } = this.deps;
     const route = this.deps.getRoute();
     const targets: TListTarget[] = [];
-    if (route.cycleId) {
+    if (route.archived) {
+      // PLN-77: the per-item read (retrieveIssues) leaves archived work items out, so the archived list is
+      // always refreshed as a whole (in place, after the user's own edits have settled; see liveRefetch)
+      const store = this.deps.archivedIssues;
+      targets.push({
+        store,
+        scope: { kind: "project" },
+        coarse: true,
+        refetch: () => store.fetchIssuesWithExistingPagination(workspaceSlug, projectId, "mutation"),
+      });
+    } else if (route.cycleId) {
       const cycleId = route.cycleId;
       const store = this.deps.cycleIssues;
       targets.push({

@@ -25,6 +25,7 @@ One line per touched upstream file: ticket id and the reason.
 - `apps/api/plane/app/urls/user.py`: PLN-106, route `users/me/fork-settings/` (one import, one path).
 - `apps/live/src/events/config.ts`, `apps/live/src/events/hub.ts`: PLN-106, user-scoped events on `plane:live-events:user:<user_id>`, sent as `{type: "user_event", kind, verb, version}` to every authenticated socket of that user (fork-owned files, listed here because they changed contract).
 - `apps/web/app/(all)/[workspaceSlug]/(projects)/browse/[workItem]/page.tsx`: PLN-78, mounts `useLiveWorkItems` with the page's work item as `pageIssueId` (the route is outside the project layout), so its details, comments and activity refresh live like the peek.
+- `apps/web/core/lib/live-events/apply.ts`, `use-live-work-items.ts` (fork-owned): PLN-77, the archived work items route (`archives/issues`, detected from the pathname) gets the archived store as a live target, refreshed as a whole in place (the per-item read leaves archived work items out).
 - `apps/web/core/lib/live-events/client.ts`: PLN-106, parse `user_event` frames, `subscribeUser()` listeners, resync also emitted to user listeners.
 - `apps/web/core/store/issue/project/filter.store.ts`: PLN-106, `forkBoard` (ForkGlobalBoard): fetchFilters resolves the board through it; display filter, display property and rich filter writes go to the global template instead of the project row while it is on.
 - `apps/web/core/components/issues/filters.tsx`: PLN-106, global board indicator at the top of the project board's display menu.

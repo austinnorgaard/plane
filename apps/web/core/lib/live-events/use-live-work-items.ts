@@ -5,7 +5,7 @@
  */
 
 import { useContext, useEffect, useRef } from "react";
-import { useParams } from "react-router";
+import { useLocation, useParams } from "react-router";
 // plane imports
 import { EIssuesStoreType } from "@plane/types";
 import { TOAST_TYPE, setToast } from "@plane/propel/toast";
@@ -32,6 +32,9 @@ export const useLiveWorkItems = (
   options?: { pageIssueId?: string }
 ) => {
   const { cycleId, moduleId, viewId } = useParams();
+  // PLN-77: the archived work items route (list or detail) has no route param of its own
+  const { pathname } = useLocation();
+  const archived = /\/projects\/[^/]+\/archives\/issues(\/|$)/.test(pathname);
   const storeContext = useContext(StoreContext);
   const { data: currentUser } = useUser();
   const issueDetail = useIssueDetail();
@@ -39,13 +42,21 @@ export const useLiveWorkItems = (
   const cycleStore = useIssues(EIssuesStoreType.CYCLE);
   const moduleStore = useIssues(EIssuesStoreType.MODULE);
   const viewStore = useIssues(EIssuesStoreType.PROJECT_VIEW);
+  const archivedStore = useIssues(EIssuesStoreType.ARCHIVED);
 
   // the applier reads the latest values without being recreated on every navigation inside the project
-  const latest = useRef({ cycleId, moduleId, viewId, userId: currentUser?.id, pageIssueId: options?.pageIssueId });
-  latest.current = { cycleId, moduleId, viewId, userId: currentUser?.id, pageIssueId: options?.pageIssueId };
+  const latest = useRef({
+    cycleId,
+    moduleId,
+    viewId,
+    archived,
+    userId: currentUser?.id,
+    pageIssueId: options?.pageIssueId,
+  });
+  latest.current = { cycleId, moduleId, viewId, archived, userId: currentUser?.id, pageIssueId: options?.pageIssueId };
   // the stores are stable singletons, read through a ref so the subscription only follows the project
-  const stores = useRef({ storeContext, issueDetail, projectStore, cycleStore, moduleStore, viewStore });
-  stores.current = { storeContext, issueDetail, projectStore, cycleStore, moduleStore, viewStore };
+  const stores = useRef({ storeContext, issueDetail, projectStore, cycleStore, moduleStore, viewStore, archivedStore });
+  stores.current = { storeContext, issueDetail, projectStore, cycleStore, moduleStore, viewStore, archivedStore };
 
   useEffect(() => {
     const s = stores.current;
@@ -58,6 +69,7 @@ export const useLiveWorkItems = (
         cycleId: latest.current.cycleId,
         moduleId: latest.current.moduleId,
         viewId: latest.current.viewId,
+        archived: latest.current.archived,
       }),
       getCurrentUserId: () => latest.current.userId,
       getPageIssueId: () => latest.current.pageIssueId,
@@ -66,6 +78,7 @@ export const useLiveWorkItems = (
       cycleIssues: s.cycleStore.issues,
       moduleIssues: s.moduleStore.issues,
       viewIssues: s.viewStore.issues,
+      archivedIssues: s.archivedStore.issues,
       getFilterExpression: (which) => {
         const filters = { project: s.projectStore, cycle: s.cycleStore, module: s.moduleStore, view: s.viewStore }[
           which
