@@ -77,8 +77,9 @@ PAGE_VALIDATION_EXAMPLES = [
 
 PAGE_CONFLICT_CREATE_RESPONSE = OpenApiResponse(
     description=(
-        "A page with the same external_id and external_source already exists in the project; "
-        "the body carries the id of the existing page."
+        "A page with the same external_id and external_source already exists in the project. "
+        "The body carries the id of the existing page only when the caller can see that page; "
+        "for another user's private page the body has the error message only."
     ),
     examples=[
         _example(
@@ -101,13 +102,19 @@ PAGE_LIST_VALIDATION_EXAMPLES = [
 
 PAGE_CONFLICT_UPDATE_RESPONSE = OpenApiResponse(
     description=(
-        "The page cannot be updated now because it is open in an editor, or because whether it is open "
-        "could not be determined and the page has no stored document (a page with a stored document "
-        "returns 503 instead when the live service fails). The response carries a Retry-After header "
-        "in seconds (default 60, maximum 3600, set by PAGES_API_RETRY_AFTER_SECONDS); wait at least that long. "
+        "The page was not updated. 'page is open in an editor': the page is open in an editor, or whether "
+        "it is open could not be determined (a page with a stored document returns 503 instead when the "
+        "live service fails while rebasing); Retry-After is in seconds (default 60, maximum 3600, set by "
+        "PAGES_API_RETRY_AFTER_SECONDS), wait at least that long. 'page changed during the update' and "
+        "'page is being updated by another request': another writer changed the page, or is updating it, "
+        "while this request was prepared; Retry-After is 1, re-read the page and send the update again. "
         "The 413 and 503 responses carry no Retry-After header."
     ),
-    examples=[_example("Open in editor", {"error": "page is open in an editor; retry later"})],
+    examples=[
+        _example("Open in editor", {"error": "page is open in an editor; retry later"}),
+        _example("Changed meanwhile", {"error": "page changed during the update; retry"}),
+        _example("Another update running", {"error": "page is being updated by another request; retry"}),
+    ],
 )
 
 PAGE_TOO_LARGE_RESPONSE = OpenApiResponse(
@@ -118,6 +125,10 @@ PAGE_TOO_LARGE_RESPONSE = OpenApiResponse(
     examples=[
         _example("HTML too large", {"error": "description_html too large", "max_bytes": 262144}),
         _example("Body too large", {"error": "request body too large"}),
+        _example(
+            "Stored document too large",
+            {"error": "page document too large to update through the API"},
+        ),
     ],
 )
 
