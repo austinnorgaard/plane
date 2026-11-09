@@ -20,7 +20,7 @@ import { TOAST_TYPE, setToast } from "@plane/propel/toast";
 import type { RootStore } from "@/store/root.store";
 // local imports
 import type { ILiveApplierDeps, TLiveRoute } from "./apply";
-import { refreshCycleAndModuleDefinitions } from "./metadata";
+import { refreshCycleAndModuleDefinitions, refreshEstimateDefinitions } from "./metadata";
 
 type TApplierDepsParams = {
   workspaceSlug: string;
@@ -56,6 +56,9 @@ export const buildApplierDeps = (root: RootStore, params: TApplierDepsParams): I
     // PLN-111: unknown ids make the applier refresh the project's metadata once
     isKnownLabel: (labelId) => !!root.label.labelMap?.[labelId],
     isKnownState: (stateId) => !!root.state.stateMap?.[stateId],
+    // PLN-120: an estimate point is known when one of the loaded estimates has it
+    isKnownEstimatePoint: (pointId) =>
+      Object.values(root.projectEstimate.estimates ?? {}).some((estimate) => !!estimate.estimatePoints?.[pointId]),
     getFilterExpression: (which) => {
       const filter = {
         project: issue.projectIssuesFilter,
@@ -71,6 +74,8 @@ export const buildApplierDeps = (root: RootStore, params: TApplierDepsParams): I
         root.label.fetchProjectLabels(workspaceSlug, projectId),
         // PLN-36: cycle and module definitions (quiet: no loader, deleted ones are dropped)
         refreshCycleAndModuleDefinitions(root, workspaceSlug, projectId),
+        // PLN-120: estimate definitions (deleted ones are dropped)
+        refreshEstimateDefinitions(root, workspaceSlug, projectId),
       ]),
     onIssueMissingFromPeek: params.onIssueUnavailable,
   };

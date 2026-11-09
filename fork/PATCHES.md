@@ -59,6 +59,7 @@ One line per touched upstream file: ticket id and the reason.
 - `apps/live/src/controllers/health.controller.ts`: PLN-34, `GET /health/stats` (live event counters) behind the live shared secret (#47; added by PLN-88).
 - `apps/live/src/server.ts`: PLN-97, stop the pages rebase workers on shutdown (#47; added by PLN-88).
 - `apps/live/tsdown.config.ts`: PLN-97, build `src/fork-pages/rebase.worker.ts` as a second entry, `exports: false` (#47; added by PLN-88).
+- `apps/api/plane/app/views/estimate/base.py`, `apps/api/plane/api/views/estimate.py` (REST v1): PLN-120, `publish_metadata_event(project_id, "estimate", created|updated|deleted)` after each successful estimate and estimate point create, update and delete (deletes settle).
 
 ## New files (not upstream)
 
@@ -92,7 +93,7 @@ web:
 - `apps/web/core/lib/live-events/filter-match.ts`: PLN-38.
 - `apps/web/core/lib/live-events/metadata.ts`: PLN-36.
 - `apps/web/core/lib/live-events/use-live-workspace-view.ts`: PLN-37.
-- `apps/web/core/lib/live-events/applier-deps.ts`: PLN-119, the applier wiring shared by the two live hooks, and the translated "work item unavailable" toast.
+- `apps/web/core/lib/live-events/applier-deps.ts`: PLN-119, the applier wiring shared by the two live hooks, and the translated "work item unavailable" toast. PLN-120: estimate refresh and the unknown estimate point check.
 - `apps/web/core/fork/board-settings/*`: PLN-106 (PLN-107 adds `auto-collapse.ts` and its components; PLN-110 adds `components/drop-preview.tsx`).
 - `apps/web/core/fork/live/local-edits.ts`: PLN-110 fix.
 - `apps/web/core/fork/live/issue-sync-queue.ts`: PLN-110 fix.
