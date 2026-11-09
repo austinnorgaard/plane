@@ -5,7 +5,7 @@
  */
 
 import { useContext, useEffect, useRef } from "react";
-import { useLocation, useParams } from "react-router";
+import { useLocation, useParams, useSearchParams } from "react-router";
 // hooks
 import { useUser } from "@/hooks/store/user";
 import { StoreContext } from "@/lib/store-context";
@@ -33,6 +33,9 @@ export const useLiveWorkItems = (
   const archived = /\/projects\/[^/]+\/archives\/issues(\/|$)/.test(pathname);
   // PLN-76: the intake (triage) route
   const intake = /\/projects\/[^/]+\/intake(\/|$)/.test(pathname);
+  // PLN-123: the intake item open in the detail pane
+  const [searchParams] = useSearchParams();
+  const intakeIssueId = intake ? (searchParams.get("inboxIssueId") ?? undefined) : undefined;
   const root = useContext(StoreContext);
   const { data: currentUser } = useUser();
   // PLN-119: translated, and stable across renders
@@ -45,6 +48,7 @@ export const useLiveWorkItems = (
     viewId,
     archived,
     intake,
+    intakeIssueId,
     userId: currentUser?.id,
     pageIssueId: options?.pageIssueId,
   });
@@ -54,6 +58,7 @@ export const useLiveWorkItems = (
     viewId,
     archived,
     intake,
+    intakeIssueId,
     userId: currentUser?.id,
     pageIssueId: options?.pageIssueId,
   };
@@ -74,6 +79,7 @@ export const useLiveWorkItems = (
           viewId: latest.current.viewId,
           archived: latest.current.archived,
           intake: latest.current.intake,
+          intakeIssueId: latest.current.intakeIssueId,
         }),
         getCurrentUserId: () => latest.current.userId,
         getPageIssueId: () => latest.current.pageIssueId,
