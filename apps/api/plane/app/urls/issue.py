@@ -4,6 +4,9 @@
 
 from django.urls import path
 
+# fork (PLN-129): bulk update of work items
+from plane.app.views.issue.bulk_operation import BulkOperationIssuesEndpoint
+
 from plane.app.views import (
     BulkCreateIssueLabelsEndpoint,
     BulkDeleteIssuesEndpoint,
@@ -99,6 +102,12 @@ urlpatterns = [
         "workspaces/<str:slug>/projects/<uuid:project_id>/bulk-archive-issues/",
         BulkArchiveIssuesEndpoint.as_view(),
         name="bulk-archive-issues",
+    ),
+    # fork (PLN-129): bulk update of work items (the web client's bulkOperations)
+    path(
+        "workspaces/<str:slug>/projects/<uuid:project_id>/bulk-operation-issues/",
+        BulkOperationIssuesEndpoint.as_view(),
+        name="bulk-operation-issues",
     ),
     ##
     path(

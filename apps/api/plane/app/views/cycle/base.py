@@ -59,6 +59,7 @@ from plane.utils.cycle_transfer_issues import transfer_cycle_issues
 from .. import BaseAPIView, BaseViewSet
 from plane.bgtasks.webhook_task import model_activity
 from plane.utils.live_events import publish_metadata_event
+from plane.bgtasks.cycle_automation_task import queue_cycle_automation  # fork (PLN-129)
 from plane.utils.timezone_converter import convert_to_utc, user_timezone_converter
 
 
@@ -326,6 +327,7 @@ class CycleViewSet(BaseViewSet):
                     origin=base_host(request=request, is_app=True),
                 )
                 publish_metadata_event(project_id, "cycle_definition", "created", request.user.id)  # fork (PLN-36)
+                queue_cycle_automation(cycle["id"], dates_changed=True)  # fork (PLN-129)
                 return Response(cycle, status=status.HTTP_201_CREATED)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         else:
@@ -407,6 +409,8 @@ class CycleViewSet(BaseViewSet):
             )
 
             publish_metadata_event(project_id, "cycle_definition", "updated", request.user.id)  # fork (PLN-36)
+            # fork (PLN-129)
+            queue_cycle_automation(pk, dates_changed="start_date" in request.data or "end_date" in request.data)
             return Response(cycle, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 

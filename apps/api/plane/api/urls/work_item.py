@@ -4,6 +4,9 @@
 
 from django.urls import path
 
+# fork (PLN-129): bulk update of work items
+from plane.api.views.work_item_bulk import WorkItemBulkUpdateAPIEndpoint
+
 from plane.api.views import (
     IssueListCreateAPIEndpoint,
     IssueDetailAPIEndpoint,
@@ -100,6 +103,12 @@ new_url_patterns = [
         "workspaces/<str:slug>/projects/<uuid:project_id>/work-items/",
         IssueListCreateAPIEndpoint.as_view(http_method_names=["get", "post"]),
         name="work-item-list",
+    ),
+    # fork (PLN-129): bulk update of work items
+    path(
+        "workspaces/<str:slug>/projects/<uuid:project_id>/work-items/bulk-update/",
+        WorkItemBulkUpdateAPIEndpoint.as_view(http_method_names=["post"]),
+        name="work-item-bulk-update",
     ),
     path(
         "workspaces/<str:slug>/projects/<uuid:project_id>/work-items/<uuid:pk>/",

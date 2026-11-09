@@ -62,6 +62,15 @@ One line per touched upstream file: ticket id and the reason.
 - `apps/live/tsdown.config.ts`: PLN-97, build `src/fork-pages/rebase.worker.ts` as a second entry, `exports: false` (#47; added by PLN-88).
 - `apps/api/plane/app/views/intake/base.py` (`IntakeIssueViewSet.destroy`), `apps/api/plane/api/views/intake.py` (REST v1 `IntakeIssueDetailAPIEndpoint.delete`): PLN-121, publish `intake`/`deleted` for the work item after an intake delete, and `issue`/`deleted` when the not-yet-accepted work item is deleted with it (neither path published before, so the live intake list never saw deletes).
 - `apps/api/plane/app/views/estimate/base.py`, `apps/api/plane/api/views/estimate.py` (REST v1): PLN-120, `publish_metadata_event(project_id, "estimate", created|updated|deleted)` after each successful estimate and estimate point create, update and delete (deletes settle).
+- `apps/api/plane/bgtasks/issue_activities_task.py`: PLN-129, `issue_activity(..., live_event=True)`: a caller that publishes one live event for a whole batch passes `False` (the bulk update service).
+- `apps/api/plane/db/models/__init__.py`, `apps/api/plane/db/models/user.py`: PLN-129, export the cycle automation models; `BotTypeEnum.CYCLE_AUTOMATION` (the workspace bot user that is the actor of rule moves).
+- `apps/api/plane/celery.py`, `apps/api/plane/settings/common.py`: PLN-129, the 5 minute beat entry `run_cycle_automation` and its `CELERY_IMPORTS` line.
+- `apps/api/plane/app/views/cycle/base.py` (create, partial_update), `apps/api/plane/api/views/cycle.py` (REST v1 post, patch): PLN-129, `queue_cycle_automation` after a create or a date edit (runs the cycle's rules on commit).
+- `apps/api/plane/app/urls/cycle.py`, `apps/api/plane/app/urls/issue.py`, `apps/api/plane/api/urls/work_item.py`: PLN-129, routes `cycle-automation-rules/`, `cycles/<id>/bulk-move-state/`, `bulk-operation-issues/` and REST v1 `work-items/bulk-update/`.
+- `apps/web/app/(all)/[workspaceSlug]/(settings)/settings/projects/[projectId]/automations/page.tsx`: PLN-129, the "Cycle automation" section under the stock automations.
+- `apps/web/core/components/cycles/quick-actions.tsx`: PLN-129, "Move work items" menu entry and modal; two `return;` in upstream `then()` callbacks for the pre-commit lint (no behaviour change).
+- `apps/web/core/hooks/use-bulk-operation-status.ts`, `apps/web/core/components/issues/bulk-operations/root.tsx`: PLN-129 (fork-only, not for upstream: the bar is a paid-edition feature there), selection on for project, cycle, module and project view lists, and the fork bulk update bar instead of the upgrade banner.
+- `packages/i18n/src/locales/en/cycle.json`: PLN-129, `cycle_automation.*` keys (en only; other locales fall back).
 
 ## New files (not upstream)
 
@@ -78,6 +87,10 @@ api:
 - `apps/api/plane/db/models/fork_user_settings.py`: PLN-106.
 - `apps/api/plane/db/migrations/0123_fork_user_settings.py`: PLN-106.
 - `apps/api/plane/app/views/user/fork_settings.py`: PLN-106.
+- `apps/api/plane/db/models/cycle_automation.py`, `apps/api/plane/db/migrations/0124_cycle_automation.py`: PLN-129, cycle automation rules and runs.
+- `apps/api/plane/utils/work_item_bulk_update.py`: PLN-129, the bulk update service (REST v1, app and rules).
+- `apps/api/plane/utils/cycle_automation.py`, `apps/api/plane/bgtasks/cycle_automation_task.py`: PLN-129, rule firing, baseline, bot user, tasks.
+- `apps/api/plane/app/views/cycle/automation.py`, `apps/api/plane/app/views/issue/bulk_operation.py`, `apps/api/plane/api/views/work_item_bulk.py`: PLN-129 endpoints.
 
 live:
 
@@ -98,6 +111,8 @@ web:
 - `apps/web/core/lib/live-events/applier-deps.ts`: PLN-119, the applier wiring shared by the two live hooks, and the translated "work item unavailable" toast. PLN-120: estimate refresh and the unknown estimate point check.
 - `apps/web/core/fork/board-settings/*`: PLN-106 (PLN-107 adds `auto-collapse.ts` and its components; PLN-110 adds `components/drop-preview.tsx`).
 - `apps/web/core/fork/live/local-edits.ts`: PLN-110 fix.
+- `apps/web/core/services/cycle-automation.service.ts`, `apps/web/core/components/automation/cycle-automation/*`, `apps/web/core/components/cycles/move-work-items-modal.tsx`: PLN-129.
+- `apps/web/core/components/issues/bulk-operations/bulk-update-bar.tsx`: PLN-129 (fork-only).
 - `apps/web/core/fork/live/issue-sync-queue.ts`: PLN-110 fix.
 - `apps/web/core/fork/live/connection-status.tsx`: PLN-47.
 
@@ -114,6 +129,7 @@ docs:
 
 - `fork/PAGES.md`, `fork/PATCHES.md`, `fork/README.md`, `fork/SPIKE.md`: fork documentation.
 - `fork/docs/security/pln-66-pages-review.md`: PLN-66 security review.
+- `fork/docs/bulk-update-and-cycle-automation.md`: PLN-129, REST v1 bulk update and cycle automation, for agents and admins.
 
 ## Drift points (new files that mirror private upstream code)
 

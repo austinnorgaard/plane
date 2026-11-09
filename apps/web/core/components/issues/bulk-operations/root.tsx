@@ -6,7 +6,8 @@
 
 import { observer } from "mobx-react";
 // components
-import { BulkOperationsUpgradeBanner } from "@/components/issues/bulk-operations/upgrade-banner";
+// fork (PLN-129): the bulk update bar instead of the upgrade banner
+import { BulkUpdateBar } from "@/components/issues/bulk-operations/bulk-update-bar";
 // hooks
 import { useMultipleSelectStore } from "@/hooks/store/use-multiple-select-store";
 import type { TSelectionHelper } from "@/hooks/use-multiple-select";
@@ -23,5 +24,5 @@ export const IssueBulkOperationsRoot = observer(function IssueBulkOperationsRoot
 
   if (!isSelectionActive || selectionHelpers.isSelectionDisabled) return null;
 
-  return <BulkOperationsUpgradeBanner className={className} />;
+  return <BulkUpdateBar className={className} />; // fork (PLN-129)
 });

@@ -51,6 +51,8 @@ def get_default_product_tour():
 
 class BotTypeEnum(models.TextChoices):
     WORKSPACE_SEED = "WORKSPACE_SEED", "Workspace Seed"
+    # fork (PLN-129): actor of cycle automation moves
+    CYCLE_AUTOMATION = "CYCLE_AUTOMATION", "Cycle Automation"
 
 
 class User(AbstractBaseUser, PermissionsMixin):
