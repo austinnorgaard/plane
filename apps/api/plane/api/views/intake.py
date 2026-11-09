@@ -29,6 +29,7 @@ from plane.app.permissions import ProjectLitePermission
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.db.models import Intake, IntakeIssue, Issue, Project, ProjectMember, State, StateGroup
 from plane.utils.host import base_host
+from plane.utils.live_events import publish_work_item_event
 from plane.utils.content_validator import validate_html_content
 from .base import BaseAPIView
 from plane.db.models.intake import SourceType
@@ -482,6 +483,7 @@ class IntakeIssueDetailAPIEndpoint(BaseAPIView):
         )
 
         # Check the issue status
+        issue_deleted = False  # fork (PLN-121)
         if intake_issue.status in [-2, -1, 0, 2]:
             # Delete the issue also
             issue = Issue.objects.filter(workspace__slug=slug, project_id=project_id, pk=issue_id).first()
@@ -499,6 +501,11 @@ class IntakeIssueDetailAPIEndpoint(BaseAPIView):
                     status=status.HTTP_403_FORBIDDEN,
                 )
             issue.delete()
+            issue_deleted = True
 
         intake_issue.delete()
+        # fork (PLN-121): the intake list (PLN-76) drops the item; a deleted work item leaves the boards too
+        publish_work_item_event(project_id, [issue_id], "intake", "deleted", request.user.id)
+        if issue_deleted:
+            publish_work_item_event(project_id, [issue_id], "issue", "deleted", request.user.id)
         return Response(status=status.HTTP_204_NO_CONTENT)
