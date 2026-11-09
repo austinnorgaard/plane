@@ -180,6 +180,7 @@ export const KanBan = observer(function KanBan(props: IKanBan) {
                     isDropDisabled={!!subList.isDropDisabled || !!isDropDisabled}
                     dropErrorMessage={subList.dropErrorMessage ?? dropErrorMessage}
                     handleOnDrop={handleOnDrop}
+                    onDropped={() => handleCollapsedGroups("group_by", subList.id)}
                   >
                     <HeaderGroupByCard
                       sub_group_by={sub_group_by}

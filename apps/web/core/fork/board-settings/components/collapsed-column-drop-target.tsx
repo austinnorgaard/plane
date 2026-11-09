@@ -7,7 +7,8 @@
 /**
  * fork (PLN-107): a collapsed kanban column renders only its header, so it has no drop target of its own.
  * With auto-collapse on, the header becomes one, with the same COLUMN data as the expanded column. After the
- * drop the column holds an item, so it expands by itself.
+ * drop the column is toggled open (a session override that ends as soon as the column holds an item, so an
+ * empty column then stays open because it is no longer empty, and a column collapsed by hand opens too).
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -28,6 +29,8 @@ type Props = {
   isDropDisabled?: boolean;
   dropErrorMessage?: string;
   handleOnDrop: (source: GroupDropLocation, destination: GroupDropLocation) => Promise<void>;
+  /** called after a drop, to expand the column (the same as the list layout does on a collapsed group) */
+  onDropped: () => void;
   children: React.ReactNode;
 };
 
@@ -37,7 +40,7 @@ export function CollapsedColumnDropTarget(props: Props) {
 }
 
 function DropTarget(props: Props) {
-  const { groupId, subGroupId, isDropDisabled, dropErrorMessage, handleOnDrop, children } = props;
+  const { groupId, subGroupId, isDropDisabled, dropErrorMessage, handleOnDrop, onDropped, children } = props;
   const { t } = useTranslation();
   const ref = useRef<HTMLDivElement | null>(null);
   const [isOver, setIsOver] = useState(false);
@@ -61,9 +64,10 @@ function DropTarget(props: Props) {
           return;
         }
         void handleOnDrop(source, destination);
+        onDropped();
       },
     });
-  }, [groupId, subGroupId, isDropDisabled, dropErrorMessage, handleOnDrop, t]);
+  }, [groupId, subGroupId, isDropDisabled, dropErrorMessage, handleOnDrop, onDropped, t]);
 
   return (
     <div ref={ref} className={cn("rounded-sm", { "ring-1 ring-accent-strong": isOver })}>
