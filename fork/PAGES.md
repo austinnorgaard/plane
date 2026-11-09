@@ -91,6 +91,12 @@ kept per page (the oldest is deleted). The API only reads them.
 
 - `GET pages/<page_id>/versions/`: `{id, page_id, last_saved_at, owned_by_id, created_at, updated_at}` per version, ordered
   by `(created_at, id)` descending, keyset cursor paginated like the pages list (`per_page` default 100, maximum 1000).
+  This is the order of the editor's version history panel (PLN-117): the app endpoint
+  (`app/views/page/version.py`) lists `PageVersion` in its model order `-created_at` and the panel renders that list
+  unsorted; `id` only breaks ties. When `track_page_version` merges a user's edit into their latest version (within 10
+  minutes) it updates the content and `updated_at` but not `last_saved_at` or `created_at`, so a merged version keeps its
+  place; `last_saved_at` (what the panel displays) is the time the version was created, and `updated_at` is the time of
+  the last edit merged into it.
 - `GET pages/<page_id>/versions/<version_id>/`: the same fields plus `description_html`, sanitised on output with the write
   rules (nh3, same allowlist; no removal log on read). `description_binary` and `description_json` are not exposed.
 - Permissions: `ProjectPagePermission` as for the page itself, and the page must be visible to the caller (`base_queryset`:
