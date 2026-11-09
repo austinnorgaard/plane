@@ -19,6 +19,7 @@ import type { IModuleIssues } from "@/store/issue/module";
 import type { IProjectViewIssues } from "@/store/issue/project-views";
 import type { IArchivedIssues } from "@/store/issue/archived";
 import type { IProjectInboxStore } from "@/store/inbox/project-inbox.store";
+import type { IWorkspaceIssues } from "@/store/issue/workspace";
 import type { IIssueDetail } from "@/store/issue/issue-details/root.store";
 import type { IIssueStore } from "@/store/issue/issue.store";
 import { EIssueGroupedAction } from "@/store/issue/helpers/base-issues.store";
@@ -178,6 +179,8 @@ export type TLiveRoute = {
   viewId?: string;
   archived?: boolean;
   intake?: boolean;
+  /** PLN-37: a workspace view (all-issues, assigned, created, subscribed, or a saved workspace view id) */
+  globalViewId?: string;
 };
 
 /** PLN-76: an intake list refresh (new intake items, full refreshes) waits this long, merged across a burst */
@@ -201,6 +204,16 @@ export interface ILiveApplierDeps {
   projectInbox: IProjectInboxStore;
   /** PLN-38: the group of a state, for state_group filters */
   getStateGroup: (stateId: string) => string | undefined;
+  /**
+   * PLN-37: the workspace view list (one applier per project of the view feeds it) and its refetch, which
+   * the workspace hook shares between those appliers so a burst over several projects costs one request
+   */
+  workspace?: {
+    issues: IWorkspaceIssues;
+    refetch: () => Promise<unknown>;
+    /** the view's stored rich filter */
+    getRichFilters: () => unknown;
+  };
   getFilterExpression: (store: "project" | "cycle" | "module" | "view") => unknown;
   issueDetail: IIssueDetail;
   onIssueMissingFromPeek: () => void;
@@ -442,12 +455,40 @@ export class LiveWorkItemsApplier {
     return ids;
   }
 
+  /**
+   * PLN-37: a workspace view's filter is its rich filter plus, for the built-in views, the condition the
+   * store adds to the request (getFilterConditionBasedOnViews): assigned = assignee is me, created = created by
+   * me. "subscribed" needs subscriber data the work item does not carry, so that view refetches as a whole.
+   */
+  private workspaceFilterMode(viewId: string, richFilters: unknown): { coarse: boolean; matches?: TFilterMatcher } {
+    if (viewId === "subscribed") return { coarse: true };
+    const mode = filterMode(richFilters, this.deps.getStateGroup);
+    if (mode.coarse || (viewId !== "assigned" && viewId !== "created")) return mode;
+    const userId = this.deps.getCurrentUserId();
+    if (!userId) return { coarse: true };
+    const fixed: TFilterMatcher =
+      viewId === "assigned"
+        ? (issue) => (issue.assignee_ids ?? []).includes(userId)
+        : (issue) => issue.created_by === userId;
+    const rich = mode.matches;
+    return { coarse: false, matches: rich ? (issue) => fixed(issue) && rich(issue) : fixed };
+  }
+
   /** The list stores that are on screen for the current route. */
   private getTargets(): TListTarget[] {
     const { workspaceSlug, projectId } = this.deps;
     const route = this.deps.getRoute();
     const targets: TListTarget[] = [];
-    if (route.archived) {
+    if (route.globalViewId && this.deps.workspace) {
+      // PLN-37: the workspace view holds work items of many projects; this applier handles its own project's
+      const workspace = this.deps.workspace;
+      targets.push({
+        store: workspace.issues,
+        scope: { kind: "project" },
+        ...this.workspaceFilterMode(route.globalViewId, workspace.getRichFilters()),
+        refetch: workspace.refetch,
+      });
+    } else if (route.archived) {
       // PLN-77: the per-item read (retrieveIssues) leaves archived work items out, so the archived list is
       // always refreshed as a whole (in place, after the user's own edits have settled; see liveRefetch)
       const store = this.deps.archivedIssues;
