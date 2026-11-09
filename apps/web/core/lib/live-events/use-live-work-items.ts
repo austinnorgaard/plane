@@ -35,6 +35,8 @@ export const useLiveWorkItems = (
   // PLN-77: the archived work items route (list or detail) has no route param of its own
   const { pathname } = useLocation();
   const archived = /\/projects\/[^/]+\/archives\/issues(\/|$)/.test(pathname);
+  // PLN-76: the intake (triage) route
+  const intake = /\/projects\/[^/]+\/intake(\/|$)/.test(pathname);
   const storeContext = useContext(StoreContext);
   const { data: currentUser } = useUser();
   const issueDetail = useIssueDetail();
@@ -50,10 +52,19 @@ export const useLiveWorkItems = (
     moduleId,
     viewId,
     archived,
+    intake,
     userId: currentUser?.id,
     pageIssueId: options?.pageIssueId,
   });
-  latest.current = { cycleId, moduleId, viewId, archived, userId: currentUser?.id, pageIssueId: options?.pageIssueId };
+  latest.current = {
+    cycleId,
+    moduleId,
+    viewId,
+    archived,
+    intake,
+    userId: currentUser?.id,
+    pageIssueId: options?.pageIssueId,
+  };
   // the stores are stable singletons, read through a ref so the subscription only follows the project
   const stores = useRef({ storeContext, issueDetail, projectStore, cycleStore, moduleStore, viewStore, archivedStore });
   stores.current = { storeContext, issueDetail, projectStore, cycleStore, moduleStore, viewStore, archivedStore };
@@ -70,6 +81,7 @@ export const useLiveWorkItems = (
         moduleId: latest.current.moduleId,
         viewId: latest.current.viewId,
         archived: latest.current.archived,
+        intake: latest.current.intake,
       }),
       getCurrentUserId: () => latest.current.userId,
       getPageIssueId: () => latest.current.pageIssueId,
@@ -79,6 +91,8 @@ export const useLiveWorkItems = (
       moduleIssues: s.moduleStore.issues,
       viewIssues: s.viewStore.issues,
       archivedIssues: s.archivedStore.issues,
+      projectInbox: root.projectInbox,
+      getStateGroup: (stateId) => root.state.stateMap?.[stateId]?.group,
       getFilterExpression: (which) => {
         const filters = { project: s.projectStore, cycle: s.cycleStore, module: s.moduleStore, view: s.viewStore }[
           which
