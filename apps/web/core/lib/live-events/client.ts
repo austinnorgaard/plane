@@ -34,7 +34,12 @@ export type TLiveKind =
   | "issue_relation"
   | "issue_reaction"
   | "comment_reaction"
-  | "intake";
+  | "intake"
+  // PLN-35/PLN-36: project metadata (arrives as a full refresh)
+  | "state"
+  | "label"
+  | "cycle_definition"
+  | "module_definition";
 export type TLiveVerb = "created" | "updated" | "deleted" | "removed" | "archived" | "unarchived" | "restored";
 
 export type TLiveItem = { issue_id: string; kinds: string[]; verbs: string[]; actor_ids: string[] };

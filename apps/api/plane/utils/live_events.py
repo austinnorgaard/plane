@@ -60,8 +60,9 @@ USER_EVENT_KINDS = ("user_settings",)
 MAX_IDS = 500
 SOCKET_TIMEOUT_SECONDS = 1
 ALL_IDS = "*"
-# Kinds of project metadata (state and label definitions), published by publish_metadata_event.
-METADATA_KINDS = frozenset({"state", "label"})
+# Kinds of project metadata (state and label definitions; PLN-36: cycle and module definitions, as kinds of
+# their own so they do not mix with the "cycle"/"module" membership kinds), published by publish_metadata_event.
+METADATA_KINDS = frozenset({"state", "label", "cycle_definition", "module_definition"})
 
 _UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
@@ -177,11 +178,15 @@ def publish_user_event(user_id, kind, verb, version):
 
 
 def publish_metadata_event(project_id, kind, verb, actor_id, settle=False):
-    """Publish an ids-only event for a project's metadata (state or label definitions).
+    """Publish an ids-only event for a project's metadata (state, label, cycle or module definitions).
 
     No work item ids are involved, so ``issue_ids`` is ``"*"``: subscribers refresh the
     project's metadata stores (and, as a full refresh, its work item lists). Never raises.
+    Only METADATA_KINDS are published (the hub drops unknown kinds).
     """
+    if kind not in METADATA_KINDS:
+        logger.warning("live metadata event skipped: unknown kind %s", kind)
+        return False
     return publish_work_item_event(project_id, ALL_IDS, kind, verb, actor_id, settle=settle)
 
 

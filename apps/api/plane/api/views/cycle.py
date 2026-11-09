@@ -77,6 +77,7 @@ from plane.utils.openapi import (
     UNARCHIVED_RESPONSE,
     REQUIRED_FIELDS_RESPONSE,
 )
+from plane.utils.live_events import publish_metadata_event
 
 
 class CycleListCreateAPIEndpoint(BaseAPIView):
@@ -348,6 +349,7 @@ class CycleListCreateAPIEndpoint(BaseAPIView):
 
                 cycle = Cycle.objects.get(pk=serializer.instance.id)
                 serializer = CycleSerializer(cycle)
+                publish_metadata_event(project_id, "cycle_definition", "created", request.user.id)  # fork (PLN-36)
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         else:
@@ -603,6 +605,7 @@ class CycleDetailAPIEndpoint(BaseAPIView):
             )
             cycle = Cycle.objects.get(pk=serializer.instance.id)
             serializer = CycleSerializer(cycle)
+            publish_metadata_event(project_id, "cycle_definition", "updated", request.user.id)  # fork (PLN-36)
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -656,6 +659,7 @@ class CycleDetailAPIEndpoint(BaseAPIView):
         cycle.delete()
         # Delete the user favorite cycle
         UserFavorite.objects.filter(entity_type="cycle", entity_identifier=pk, project_id=project_id).delete()
+        publish_metadata_event(project_id, "cycle_definition", "deleted", request.user.id, settle=True)  # fork (PLN-36)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -826,6 +830,7 @@ class CycleArchiveUnarchiveAPIEndpoint(BaseAPIView):
             project_id=project_id,
             workspace__slug=slug,
         ).delete()
+        publish_metadata_event(project_id, "cycle_definition", "archived", request.user.id)  # fork (PLN-36)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @cycle_docs(
@@ -846,6 +851,7 @@ class CycleArchiveUnarchiveAPIEndpoint(BaseAPIView):
         cycle = Cycle.objects.get(pk=cycle_id, project_id=project_id, workspace__slug=slug)
         cycle.archived_at = None
         cycle.save()
+        publish_metadata_event(project_id, "cycle_definition", "unarchived", request.user.id)  # fork (PLN-36)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

@@ -198,7 +198,7 @@ export interface ILiveApplierDeps {
   onIssueMissingFromPeek: () => void;
   /** PLN-78: the work item shown by the full-page detail route (browse/[workItem]), if that route is open */
   getPageIssueId?: () => string | undefined;
-  /** Refetches the project's state and label definitions (metadata events and full refreshes). */
+  /** Refetches the project's state, label, cycle and module definitions (metadata events and full refreshes). */
   refreshProjectMetadata: () => Promise<unknown>;
 }
 
@@ -321,7 +321,8 @@ export class LiveWorkItemsApplier {
         console.error("live refresh failed", error);
       }
     });
-    // a full refresh may carry a state or label change: the metadata stores follow it
+    // a full refresh may carry a state, label, cycle or module definition change (PLN-35/36): the metadata
+    // stores follow it
     if (all) {
       refreshes.push(
         this.deps

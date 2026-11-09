@@ -16,6 +16,7 @@ import { useUser } from "@/hooks/store/user";
 import { StoreContext } from "@/lib/store-context";
 // local imports
 import { LiveWorkItemsApplier } from "./apply";
+import { refreshCycleAndModuleDefinitions } from "./metadata";
 import { getLiveEventsClient } from "./client";
 
 /**
@@ -103,6 +104,8 @@ export const useLiveWorkItems = (
         Promise.all([
           root.state.fetchProjectStates(workspaceSlug, projectId),
           root.label.fetchProjectLabels(workspaceSlug, projectId),
+          // PLN-36: cycle and module definitions (quiet: no loader, deleted ones are dropped)
+          refreshCycleAndModuleDefinitions(root, workspaceSlug, projectId),
         ]),
       // TODO: move the text to i18n keys (needs packages/i18n locale entries)
       onIssueMissingFromPeek: () =>
