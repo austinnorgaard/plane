@@ -37,7 +37,11 @@ ALLOW_FILE = "fork/tools/publish-parity.allow"
 
 def git(root, *args):
     result = subprocess.run(
-        ["git", "-C", root, *args], capture_output=True, text=True, encoding="utf-8"
+        ["git", "-C", root, *args],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"git {' '.join(args)} failed")
@@ -101,7 +105,7 @@ def check_patches(root, base, head):
     for line in git(
         root, "diff", "--name-status", "--no-renames", "--diff-filter=MD", base, head
     ).splitlines():
-        status, _, path = line.partition("\t")
+        _status, _, path = line.partition("\t")
         if path in base_files:
             changed.add(path)
     with open(os.path.join(root, "fork", "PATCHES.md"), encoding="utf-8") as fh:
