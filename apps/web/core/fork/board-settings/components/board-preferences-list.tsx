@@ -8,12 +8,14 @@
 
 import { observer } from "mobx-react";
 // local imports
+import { AutoCollapsePreferenceToggle } from "./auto-collapse-toggle";
 import { GlobalBoardPreferenceToggle } from "./global-board-toggle";
 
 export const ForkBoardPreferencesList = observer(function ForkBoardPreferencesList() {
   return (
     <div className="flex flex-col gap-y-1">
       <GlobalBoardPreferenceToggle />
+      <AutoCollapsePreferenceToggle />
     </div>
   );
 });

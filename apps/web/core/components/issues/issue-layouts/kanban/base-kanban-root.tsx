@@ -30,6 +30,8 @@ import { IssueLayoutHOC } from "../issue-layout-HOC";
 import type { IQuickActionProps, TRenderQuickActions } from "../list/list-view-types";
 //components
 import { getSourceFromDropPayload } from "../utils";
+// fork (PLN-107): auto-collapse empty groups
+import { getBoardGroupIds, useAutoCollapseGroups } from "@/fork/board-settings/auto-collapse";
 import { KanBan } from "./default";
 import { KanBanSwimLanes } from "./swimlanes";
 
@@ -105,7 +107,7 @@ export const BaseKanBanRoot = observer(function BaseKanBanRoot(props: IBaseKanBa
         fetchNextIssues(groupId, subgroupId);
       }
     },
-    [fetchNextIssues]
+    [fetchNextIssues, issues]
   );
 
   const groupedIssueIds = issues?.groupedIssueIds;
@@ -130,9 +132,11 @@ export const BaseKanBanRoot = observer(function BaseKanBanRoot(props: IBaseKanBa
   const handleOnDrop = useGroupIssuesDragNDrop(storeType, orderBy, group_by, sub_group_by);
 
   const canEditProperties = useCallback(
-    (projectId: string | undefined) => {
+    (itemProjectId: string | undefined) => {
       const isEditingAllowedBasedOnProject =
-        canEditPropertiesBasedOnProject && projectId ? canEditPropertiesBasedOnProject(projectId) : isEditingAllowed;
+        canEditPropertiesBasedOnProject && itemProjectId
+          ? canEditPropertiesBasedOnProject(itemProjectId)
+          : isEditingAllowed;
 
       return enableInlineEditing && isEditingAllowedBasedOnProject;
     },
@@ -231,7 +235,19 @@ export const BaseKanBanRoot = observer(function BaseKanBanRoot(props: IBaseKanBa
     [workspaceSlug, issuesFilter, projectId, updateFilters]
   );
 
-  const collapsedGroups = issuesFilter?.issueFilters?.kanbanFilters || { group_by: [], sub_group_by: [] };
+  const storedCollapsedGroups = issuesFilter?.issueFilters?.kanbanFilters || { group_by: [], sub_group_by: [] };
+  // fork (PLN-107): with auto-collapse on, a group is collapsed iff its count is 0 (clicks are session overrides)
+  const { collapsedGroups, handleToggle: handleCollapsedGroupsToggle } = useAutoCollapseGroups({
+    storeType,
+    groupBy: group_by,
+    subGroupBy: sub_group_by,
+    groupIds: getBoardGroupIds(group_by, storeType, isEpic),
+    subGroupIds: sub_group_by ? getBoardGroupIds(sub_group_by, storeType, isEpic) : [],
+    getGroupIssueCount: issues.getGroupIssueCount,
+    loaded: issues.groupedIssueIds !== undefined && issues.getIssueLoader() !== "init-loader",
+    stored: storedCollapsedGroups,
+    onStoredToggle: handleCollapsedGroups,
+  });
 
   return (
     <>
@@ -276,7 +292,7 @@ export const BaseKanBanRoot = observer(function BaseKanBanRoot(props: IBaseKanBa
                 orderBy={orderBy}
                 updateIssue={updateIssue}
                 quickActions={renderQuickActions}
-                handleCollapsedGroups={handleCollapsedGroups}
+                handleCollapsedGroups={handleCollapsedGroupsToggle}
                 collapsedGroups={collapsedGroups}
                 enableQuickIssueCreate={enableQuickAdd}
                 showEmptyGroup={userDisplayFilters?.show_empty_groups ?? true}
