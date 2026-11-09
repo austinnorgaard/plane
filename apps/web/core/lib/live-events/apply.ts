@@ -174,6 +174,8 @@ export interface ILiveApplierDeps {
   getFilterExpression: (store: "project" | "cycle" | "module" | "view") => unknown;
   issueDetail: IIssueDetail;
   onIssueMissingFromPeek: () => void;
+  /** PLN-78: the work item shown by the full-page detail route (browse/[workItem]), if that route is open */
+  getPageIssueId?: () => string | undefined;
   /** Refetches the project's state and label definitions (metadata events and full refreshes). */
   refreshProjectMetadata: () => Promise<unknown>;
 }
@@ -222,8 +224,8 @@ export class LiveWorkItemsApplier {
     if (this.disposed || event.project_id !== this.deps.projectId) return;
 
     if (event.type === "revoked") {
-      // access lost: close an open peek, the lists follow through the coarse refresh
-      if (this.getOpenIssueIds().length > 0) this.closePeek();
+      // access lost: close an open peek (and tell a full-page detail), the lists follow through the coarse refresh
+      this.closeOpenIssues(this.getOpenIssueIds());
       this.scheduleCoarse(true);
       return;
     }
@@ -327,10 +329,14 @@ export class LiveWorkItemsApplier {
     this.deferTimers.add(timer);
   }
 
+  /** The work items open in a detail view: the peek, and (PLN-78) the full-page detail route. */
   private getOpenIssueIds(): string[] {
+    const ids: string[] = [];
     const peek = this.deps.issueDetail.peekIssue;
-    if (!peek || peek.projectId !== this.deps.projectId) return [];
-    return [peek.issueId];
+    if (peek && peek.projectId === this.deps.projectId) ids.push(peek.issueId);
+    const pageIssueId = this.deps.getPageIssueId?.();
+    if (pageIssueId && !ids.includes(pageIssueId)) ids.push(pageIssueId);
+    return ids;
   }
 
   /** The list stores that are on screen for the current route. */
@@ -485,7 +491,7 @@ export class LiveWorkItemsApplier {
       }
       if (deleted.has(issueId)) {
         // deleted: never fetchIssue on it
-        this.closePeek();
+        this.closeOpenIssues([issueId]);
         continue;
       }
       refreshes.push(this.refreshIssueDetail(issueId, kinds));
@@ -493,8 +499,14 @@ export class LiveWorkItemsApplier {
     await Promise.all(refreshes);
   }
 
-  private closePeek() {
-    this.deps.issueDetail.setPeekIssue(undefined);
+  /**
+   * The work items are gone or no longer visible: close the peek if it shows one of them, and say so once.
+   * PLN-78: a full-page detail is not closed (it is a route); the toast tells the user.
+   */
+  private closeOpenIssues(issueIds: string[]) {
+    if (issueIds.length === 0) return;
+    const peek = this.deps.issueDetail.peekIssue;
+    if (peek && issueIds.includes(peek.issueId)) this.deps.issueDetail.setPeekIssue(undefined);
     this.deps.onIssueMissingFromPeek();
   }
 
@@ -528,7 +540,7 @@ export class LiveWorkItemsApplier {
     const { workspaceSlug, projectId, issueDetail } = this.deps;
     issueDetail.fetchIssue(workspaceSlug, projectId, issueId).catch((error: unknown) => {
       // gone or no longer visible: close the peek, anything else is transient
-      if (isNotFoundError(error) && this.getOpenIssueIds().includes(issueId)) this.closePeek();
+      if (isNotFoundError(error) && this.getOpenIssueIds().includes(issueId)) this.closeOpenIssues([issueId]);
       else console.error("live detail fetch failed", error);
     });
   }

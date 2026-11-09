@@ -21,8 +21,16 @@ import { getLiveEventsClient } from "./client";
 /**
  * Keeps the work item lists and the open peek of a project live.
  * Mounted once in the project layout; subscribes while the project is on screen.
+ *
+ * PLN-78: also mounted by the full-page work item detail (browse/[workItem]), which is outside the project
+ * layout. `pageIssueId` is that page's work item: it is refreshed like an open peek (details, comments and
+ * activity on its events).
  */
-export const useLiveWorkItems = (workspaceSlug: string | undefined, projectId: string | undefined) => {
+export const useLiveWorkItems = (
+  workspaceSlug: string | undefined,
+  projectId: string | undefined,
+  options?: { pageIssueId?: string }
+) => {
   const { cycleId, moduleId, viewId } = useParams();
   const storeContext = useContext(StoreContext);
   const { data: currentUser } = useUser();
@@ -33,8 +41,8 @@ export const useLiveWorkItems = (workspaceSlug: string | undefined, projectId: s
   const viewStore = useIssues(EIssuesStoreType.PROJECT_VIEW);
 
   // the applier reads the latest values without being recreated on every navigation inside the project
-  const latest = useRef({ cycleId, moduleId, viewId, userId: currentUser?.id });
-  latest.current = { cycleId, moduleId, viewId, userId: currentUser?.id };
+  const latest = useRef({ cycleId, moduleId, viewId, userId: currentUser?.id, pageIssueId: options?.pageIssueId });
+  latest.current = { cycleId, moduleId, viewId, userId: currentUser?.id, pageIssueId: options?.pageIssueId };
   // the stores are stable singletons, read through a ref so the subscription only follows the project
   const stores = useRef({ storeContext, issueDetail, projectStore, cycleStore, moduleStore, viewStore });
   stores.current = { storeContext, issueDetail, projectStore, cycleStore, moduleStore, viewStore };
@@ -52,6 +60,7 @@ export const useLiveWorkItems = (workspaceSlug: string | undefined, projectId: s
         viewId: latest.current.viewId,
       }),
       getCurrentUserId: () => latest.current.userId,
+      getPageIssueId: () => latest.current.pageIssueId,
       issueMap: root.issue.issues,
       projectIssues: s.projectStore.issues,
       cycleIssues: s.cycleStore.issues,
