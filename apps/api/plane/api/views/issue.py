@@ -159,6 +159,7 @@ from plane.utils.openapi import (
     WORKSPACE_NOT_FOUND_RESPONSE,
 )
 from plane.bgtasks.work_item_link_task import crawl_work_item_link_title
+from plane.utils.live_events import publish_metadata_event
 
 
 def user_has_issue_permission(user_id, project_id, issue=None, allowed_roles=None, allow_creator=True):
@@ -952,6 +953,7 @@ class LabelListCreateAPIEndpoint(BaseAPIView):
                 serializer.save(project_id=project_id)
                 label = Label.objects.get(pk=serializer.instance.id)
                 serializer = LabelSerializer(label)
+                publish_metadata_event(project_id, "label", "created", request.user.id)  # fork (PLN-111)
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         except IntegrityError:
@@ -1085,6 +1087,7 @@ class LabelDetailAPIEndpoint(LabelListCreateAPIEndpoint):
             serializer.save()
             label = Label.objects.get(pk=serializer.instance.id)
             serializer = LabelSerializer(label)
+            publish_metadata_event(project_id, "label", "updated", request.user.id)  # fork (PLN-111)
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1107,6 +1110,7 @@ class LabelDetailAPIEndpoint(LabelListCreateAPIEndpoint):
         """
         label = self.get_queryset().get(pk=pk)
         label.delete()
+        publish_metadata_event(project_id, "label", "deleted", request.user.id, settle=True)  # fork (PLN-111)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

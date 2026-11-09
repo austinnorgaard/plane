@@ -95,6 +95,17 @@ export const listContainsIssue = (grouped: unknown, issueId: string): boolean =>
   return Object.values(grouped).some((value) => listContainsIssue(value, issueId));
 };
 
+/** PLN-111: every work item id in a (sub)grouped id structure. */
+export const listedIssueIds = (grouped: unknown, into: Set<string> = new Set()): Set<string> => {
+  if (Array.isArray(grouped)) grouped.forEach((id) => typeof id === "string" && into.add(id));
+  else if (typeof grouped === "object" && grouped !== null)
+    Object.values(grouped).forEach((value) => listedIssueIds(value, into));
+  return into;
+};
+
+/** PLN-111: a metadata refresh for unknown label or state ids waits this long, merged across a burst */
+export const UNKNOWN_METADATA_DEBOUNCE_MS = 500;
+
 /** A store is "filtered" when its filter expression is not empty. Filtered lists take the coarse path. */
 export const isFilterExpressionActive = (richFilters: unknown): boolean =>
   typeof richFilters === "object" && richFilters !== null && Object.keys(richFilters).length > 0;
@@ -205,6 +216,13 @@ export interface ILiveApplierDeps {
   /** PLN-38: the group of a state, for state_group filters */
   getStateGroup: (stateId: string) => string | undefined;
   /**
+   * PLN-111: whether the project's label and state stores know an id. A work item that carries an unknown one
+   * (a label or state created where no metadata event came from, for example before PLN-111 on REST v1) would
+   * render it as nothing until a reload; the applier then refreshes the project's metadata once.
+   */
+  isKnownLabel?: (labelId: string) => boolean;
+  isKnownState?: (stateId: string) => boolean;
+  /**
    * PLN-37: the workspace view list (one applier per project of the view feeds it) and its refetch, which
    * the workspace hook shares between those appliers so a burst over several projects costs one request
    */
@@ -256,6 +274,10 @@ export class LiveWorkItemsApplier {
   private coarseAll = false;
   private ownActorTimers = new Set<ReturnType<typeof setTimeout>>();
   private deferTimers = new Set<ReturnType<typeof setTimeout>>();
+  // PLN-111: unknown label/state ids a metadata refresh was already started for (never retried, so an id that
+  // stays unknown, such as a deleted label still on a work item, cannot loop), and the debounce timer
+  private unknownMetadataTried = new Set<string>();
+  private unknownMetadataTimer: ReturnType<typeof setTimeout> | undefined;
   private lastPeekFetch = new Map<string, number>();
   private peekTrailingTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private disposed = false;
@@ -270,6 +292,7 @@ export class LiveWorkItemsApplier {
     this.disposed = true;
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     if (this.coarseTimer) clearTimeout(this.coarseTimer);
+    if (this.unknownMetadataTimer) clearTimeout(this.unknownMetadataTimer);
     if (this.intakeListTimer) clearTimeout(this.intakeListTimer);
     this.ownActorTimers.forEach((timer) => clearTimeout(timer));
     this.deferTimers.forEach((timer) => clearTimeout(timer));
@@ -368,6 +391,41 @@ export class LiveWorkItemsApplier {
     }
     await Promise.all(refreshes);
     if (retry && !this.disposed) this.scheduleCoarseRetry(all);
+    // PLN-111: a full refresh refetched the metadata already; a list-only refresh may bring unknown ids
+    if (!all && !this.disposed) {
+      const ids = new Set<string>();
+      for (const target of targets) listedIssueIds(target.store.groupedIssueIds, ids);
+      this.noteUnknownMetadata([...ids].map((id) => this.deps.issueMap.getIssueById(id)));
+    }
+  }
+
+  /**
+   * PLN-111: refreshes the project's metadata once (debounced) when a work item of this project carries a
+   * label or state id the stores do not know.
+   */
+  private noteUnknownMetadata(issues: (TIssue | undefined)[]) {
+    const { isKnownLabel, isKnownState, projectId } = this.deps;
+    if (!isKnownLabel && !isKnownState) return;
+    let found = false;
+    for (const issue of issues) {
+      if (!issue || issue.project_id !== projectId) continue;
+      const unknown: string[] = [];
+      if (isKnownLabel) for (const id of issue.label_ids ?? []) if (!isKnownLabel(id)) unknown.push(id);
+      if (isKnownState && issue.state_id && !isKnownState(issue.state_id)) unknown.push(issue.state_id);
+      for (const id of unknown) {
+        if (this.unknownMetadataTried.has(id)) continue;
+        this.unknownMetadataTried.add(id);
+        found = true;
+      }
+    }
+    if (!found || this.unknownMetadataTimer) return;
+    this.unknownMetadataTimer = setTimeout(() => {
+      this.unknownMetadataTimer = undefined;
+      if (this.disposed) return;
+      this.deps
+        .refreshProjectMetadata()
+        .catch((error: unknown) => console.error("live metadata refresh failed", error));
+    }, UNKNOWN_METADATA_DEBOUNCE_MS);
   }
 
   /** fork (PLN-110 fix): runs the deferred full refresh once the user's edits have settled. */
@@ -634,6 +692,7 @@ export class LiveWorkItemsApplier {
     );
 
     if (coarseNeeded) this.scheduleCoarse(false);
+    this.noteUnknownMetadata([...fetched.values()]); // PLN-111
     await intake;
     await this.refreshOpenIssues(batch, new Set(missing.filter((id) => hasIssueDeleted(batch.get(id) ?? []))));
   }
@@ -699,11 +758,15 @@ export class LiveWorkItemsApplier {
 
   private fetchIssueDetail(issueId: string) {
     const { workspaceSlug, projectId, issueDetail } = this.deps;
-    issueDetail.fetchIssue(workspaceSlug, projectId, issueId).catch((error: unknown) => {
-      // gone or no longer visible: close the peek, anything else is transient
-      if (isNotFoundError(error) && this.getOpenIssueIds().includes(issueId)) this.closeOpenIssues([issueId]);
-      else console.error("live detail fetch failed", error);
-    });
+    issueDetail
+      .fetchIssue(workspaceSlug, projectId, issueId)
+      // PLN-111: the refreshed detail may carry a label or state the stores do not know yet
+      .then(() => this.noteUnknownMetadata([this.deps.issueMap.getIssueById(issueId)]))
+      .catch((error: unknown) => {
+        // gone or no longer visible: close the peek, anything else is transient
+        if (isNotFoundError(error) && this.getOpenIssueIds().includes(issueId)) this.closeOpenIssues([issueId]);
+        else console.error("live detail fetch failed", error);
+      });
   }
 
   /**

@@ -111,6 +111,9 @@ export const useLiveWorkspaceView = (workspaceSlug: string | undefined, globalVi
           archivedIssues: s.archivedStore.issues,
           projectInbox: root.projectInbox,
           getStateGroup: (stateId) => root.state.stateMap?.[stateId]?.group,
+          // PLN-111: unknown ids make the applier refresh the project's metadata once
+          isKnownLabel: (labelId) => !!root.label.labelMap?.[labelId],
+          isKnownState: (stateId) => !!root.state.stateMap?.[stateId],
           getFilterExpression: (which) => {
             const filters = { project: s.projectStore, cycle: s.cycleStore, module: s.moduleStore, view: s.viewStore }[
               which
