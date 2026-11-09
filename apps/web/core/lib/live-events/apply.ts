@@ -19,12 +19,16 @@ import type { IModuleIssues } from "@/store/issue/module";
 import type { IProjectViewIssues } from "@/store/issue/project-views";
 import type { IArchivedIssues } from "@/store/issue/archived";
 import type { IProjectInboxStore } from "@/store/inbox/project-inbox.store";
+import type { IWorkspaceIssues } from "@/store/issue/workspace";
 import type { IIssueDetail } from "@/store/issue/issue-details/root.store";
 import type { IIssueStore } from "@/store/issue/issue.store";
 import { EIssueGroupedAction } from "@/store/issue/helpers/base-issues.store";
 import type { IBaseIssuesStore } from "@/store/issue/helpers/base-issues.store";
 // fork (PLN-110 fix): the user's own in-flight edits win over live reads that started before them
 import { localEdits } from "@/fork/live/local-edits";
+// PLN-38: filtered lists and saved views evaluate their filter on the fetched work item
+import { compileFilter } from "./filter-match";
+import type { TFilterMatcher } from "./filter-match";
 
 export const APPLY_DEBOUNCE_MS = 300;
 export const APPLY_DEBOUNCE_MAX_MS = 1000;
@@ -69,14 +73,17 @@ export const isIssueInScope = (
  * - in scope and not listed yet: add (local-create semantics, bumps counts)
  * - in scope and listed: update (regroup / resort from the before state)
  * - out of scope and listed: remove
+ * PLN-38: with `matches` (the list's filter), "in scope" also requires the work item to match it.
  */
 export const decideStoreAction = (params: {
   scope: TListScope;
   projectId: string;
-  issue: Pick<TIssue, "project_id" | "cycle_id" | "module_ids">;
+  issue: TIssue;
   inList: boolean;
+  matches?: TFilterMatcher;
 }): TStoreAction => {
-  const inScope = isIssueInScope(params.scope, params.projectId, params.issue);
+  const inScope =
+    isIssueInScope(params.scope, params.projectId, params.issue) && (!params.matches || params.matches(params.issue));
   if (inScope) return params.inList ? "update" : "add";
   return params.inList ? "remove" : "none";
 };
@@ -172,6 +179,8 @@ export type TLiveRoute = {
   viewId?: string;
   archived?: boolean;
   intake?: boolean;
+  /** PLN-37: a workspace view (all-issues, assigned, created, subscribed, or a saved workspace view id) */
+  globalViewId?: string;
 };
 
 /** PLN-76: an intake list refresh (new intake items, full refreshes) waits this long, merged across a burst */
@@ -193,6 +202,18 @@ export interface ILiveApplierDeps {
   archivedIssues: IArchivedIssues;
   /** PLN-76: the intake (triage) list */
   projectInbox: IProjectInboxStore;
+  /** PLN-38: the group of a state, for state_group filters */
+  getStateGroup: (stateId: string) => string | undefined;
+  /**
+   * PLN-37: the workspace view list (one applier per project of the view feeds it) and its refetch, which
+   * the workspace hook shares between those appliers so a burst over several projects costs one request
+   */
+  workspace?: {
+    issues: IWorkspaceIssues;
+    refetch: () => Promise<unknown>;
+    /** the view's stored rich filter */
+    getRichFilters: () => unknown;
+  };
   getFilterExpression: (store: "project" | "cycle" | "module" | "view") => unknown;
   issueDetail: IIssueDetail;
   onIssueMissingFromPeek: () => void;
@@ -206,7 +227,22 @@ type TListTarget = {
   store: IBaseIssuesStore;
   scope: TListScope;
   coarse: boolean;
+  /** PLN-38: the list's filter, evaluated on each fetched work item (absent for an unfiltered list) */
+  matches?: TFilterMatcher;
   refetch: () => Promise<unknown>;
+};
+
+/**
+ * PLN-38: how a list with this filter takes live changes. Unfiltered: per work item. Filtered with a filter
+ * the client can evaluate: per work item, adding or removing it by the filter. Otherwise: a full refetch.
+ */
+const filterMode = (
+  richFilters: unknown,
+  getStateGroup: (stateId: string) => string | undefined
+): { coarse: boolean; matches?: TFilterMatcher } => {
+  if (!isFilterExpressionActive(richFilters)) return { coarse: false };
+  const matches = compileFilter(richFilters, getStateGroup);
+  return matches ? { coarse: false, matches } : { coarse: true };
 };
 
 export class LiveWorkItemsApplier {
@@ -420,12 +456,40 @@ export class LiveWorkItemsApplier {
     return ids;
   }
 
+  /**
+   * PLN-37: a workspace view's filter is its rich filter plus, for the built-in views, the condition the
+   * store adds to the request (getFilterConditionBasedOnViews): assigned = assignee is me, created = created by
+   * me. "subscribed" needs subscriber data the work item does not carry, so that view refetches as a whole.
+   */
+  private workspaceFilterMode(viewId: string, richFilters: unknown): { coarse: boolean; matches?: TFilterMatcher } {
+    if (viewId === "subscribed") return { coarse: true };
+    const mode = filterMode(richFilters, this.deps.getStateGroup);
+    if (mode.coarse || (viewId !== "assigned" && viewId !== "created")) return mode;
+    const userId = this.deps.getCurrentUserId();
+    if (!userId) return { coarse: true };
+    const fixed: TFilterMatcher =
+      viewId === "assigned"
+        ? (issue) => (issue.assignee_ids ?? []).includes(userId)
+        : (issue) => issue.created_by === userId;
+    const rich = mode.matches;
+    return { coarse: false, matches: rich ? (issue) => fixed(issue) && rich(issue) : fixed };
+  }
+
   /** The list stores that are on screen for the current route. */
   private getTargets(): TListTarget[] {
     const { workspaceSlug, projectId } = this.deps;
     const route = this.deps.getRoute();
     const targets: TListTarget[] = [];
-    if (route.archived) {
+    if (route.globalViewId && this.deps.workspace) {
+      // PLN-37: the workspace view holds work items of many projects; this applier handles its own project's
+      const workspace = this.deps.workspace;
+      targets.push({
+        store: workspace.issues,
+        scope: { kind: "project" },
+        ...this.workspaceFilterMode(route.globalViewId, workspace.getRichFilters()),
+        refetch: workspace.refetch,
+      });
+    } else if (route.archived) {
       // PLN-77: the per-item read (retrieveIssues) leaves archived work items out, so the archived list is
       // always refreshed as a whole (in place, after the user's own edits have settled; see liveRefetch)
       const store = this.deps.archivedIssues;
@@ -441,7 +505,7 @@ export class LiveWorkItemsApplier {
       targets.push({
         store,
         scope: { kind: "cycle", cycleId },
-        coarse: isFilterExpressionActive(this.deps.getFilterExpression("cycle")),
+        ...filterMode(this.deps.getFilterExpression("cycle"), this.deps.getStateGroup),
         refetch: () => store.fetchIssuesWithExistingPagination(workspaceSlug, projectId, "mutation", cycleId),
       });
     } else if (route.moduleId) {
@@ -450,7 +514,7 @@ export class LiveWorkItemsApplier {
       targets.push({
         store,
         scope: { kind: "module", moduleId },
-        coarse: isFilterExpressionActive(this.deps.getFilterExpression("module")),
+        ...filterMode(this.deps.getFilterExpression("module"), this.deps.getStateGroup),
         refetch: () => store.fetchIssuesWithExistingPagination(workspaceSlug, projectId, "mutation", moduleId),
       });
     } else if (route.viewId) {
@@ -459,8 +523,8 @@ export class LiveWorkItemsApplier {
       targets.push({
         store,
         scope: { kind: "project" },
-        // a saved view is always a filtered list
-        coarse: true,
+        // a saved view is a filtered list: per work item when its filter can be evaluated (PLN-38)
+        ...filterMode(this.deps.getFilterExpression("view"), this.deps.getStateGroup),
         refetch: () => store.fetchIssuesWithExistingPagination(workspaceSlug, projectId, viewId, "mutation"),
       });
     } else {
@@ -468,7 +532,7 @@ export class LiveWorkItemsApplier {
       targets.push({
         store,
         scope: { kind: "project" },
-        coarse: isFilterExpressionActive(this.deps.getFilterExpression("project")),
+        ...filterMode(this.deps.getFilterExpression("project"), this.deps.getStateGroup),
         refetch: () => store.fetchIssuesWithExistingPagination(workspaceSlug, projectId, "mutation"),
       });
     }
@@ -551,6 +615,7 @@ export class LiveWorkItemsApplier {
               projectId,
               issue: after,
               inList: listContainsIssue(target.store.groupedIssueIds, id),
+              matches: target.matches,
             });
             if (action === "add") target.store.addIssueToList(id);
             else if (action === "update") target.store.updateIssueList(after, beforeState);

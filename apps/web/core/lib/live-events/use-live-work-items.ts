@@ -93,6 +93,7 @@ export const useLiveWorkItems = (
       viewIssues: s.viewStore.issues,
       archivedIssues: s.archivedStore.issues,
       projectInbox: root.projectInbox,
+      getStateGroup: (stateId) => root.state.stateMap?.[stateId]?.group,
       getFilterExpression: (which) => {
         const filters = { project: s.projectStore, cycle: s.cycleStore, module: s.moduleStore, view: s.viewStore }[
           which
