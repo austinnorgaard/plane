@@ -159,6 +159,37 @@ class PageVersionDetailAPISerializer(PageVersionAPISerializer):
         return sanitize_output_html(obj.description_html)
 
 
+class PageBulkCreateAPISerializer(serializers.Serializer):
+    """Documentation shape of the bulk import body (PLN-81); items are validated one by one in the view."""
+
+    pages = PageCreateAPISerializer(many=True)
+
+
+class PageBulkItemResultAPISerializer(serializers.Serializer):
+    """One item of a bulk import answer: created (with the page) or conflict (with the error, and the id of
+    the existing page when the caller can see it)."""
+
+    index = serializers.IntegerField()
+    status = serializers.ChoiceField(choices=["created", "conflict"])
+    page = PageAPISerializer(required=False)
+    error = serializers.CharField(required=False)
+    id = serializers.UUIDField(required=False)
+
+
+class PageBulkResultAPISerializer(serializers.Serializer):
+    created = serializers.IntegerField()
+    conflicts = serializers.IntegerField()
+    results = PageBulkItemResultAPISerializer(many=True)
+
+
+class PageBulkErrorAPISerializer(serializers.Serializer):
+    """Documentation shape of a bulk import 400: a body error, or the invalid items with their index."""
+
+    error = serializers.CharField(required=False)
+    max_pages = serializers.IntegerField(required=False)
+    errors = serializers.ListField(child=serializers.DictField(), required=False)
+
+
 class PageErrorAPISerializer(serializers.Serializer):
     """Documentation shape of an error body (400, 403, 413 without a limit, 503)."""
 

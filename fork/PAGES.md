@@ -13,6 +13,7 @@ All paths are under `/api/v1/workspaces/<slug>/projects/<project_id>/`.
 | ------ | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | GET    | `pages/`                                 | list (cursor paginated, see "Listing and incremental sync"; `?archived=true` lists archived pages; filters `parent_id`, `external_source`, `external_id`, `updated_after`; `order_by` limited to created_at, updated_at, name, sort_order, otherwise the default `-created_at`) |
 | POST   | `pages/`                                 | create                                                                                                                                                                                                                                                                          |
+| POST   | `pages/bulk/`                            | bulk import, up to `PAGES_API_BULK_MAX_PAGES` pages per call (PLN-81)                                                                                                                                                                                                           |
 | GET    | `pages/<page_id>/`                       | retrieve (includes `description_html`)                                                                                                                                                                                                                                          |
 | PATCH  | `pages/<page_id>/`                       | update `name` and/or `description_html`                                                                                                                                                                                                                                         |
 | POST   | `pages/<page_id>/archive/`               | archive (page and descendants)                                                                                                                                                                                                                                                  |
@@ -62,6 +63,25 @@ middle of the 50000-page project by `(updated_at, id)` takes about 90 ms without
 on `pages (updated_at, id)`; the planner then walks that index across every project and filters the rows of other projects.
 A 200-page project takes about 1 ms either way (project_pages.project_id index, then a small sort). The index is not
 justified, so no migration was added. Revisit only if a single project grows far beyond 50000 pages.
+
+## Bulk import (PLN-81)
+
+`POST pages/bulk/` with `{"pages": [<create body>, ...]}` creates many pages in one call.
+
+- At most `PAGES_API_BULK_MAX_PAGES` items (api, default 100, at most 1000); an empty or missing list, or more items, is 400.
+  The whole request body is still capped at `FILE_SIZE_LIMIT` (5 MB by default, 413), which in practice bounds the total html.
+- Each item is validated and sanitised exactly like a single create (same serializer: `name` at most 255, html sanitised,
+  `parent` visible and not archived, `access`, `color`, external fields), and each `description_html` has the same
+  `PAGES_API_MAX_HTML_BYTES` cap: an item over it is 413 `{"error": "description_html too large", "max_bytes", "index"}`.
+- All or nothing for invalid input: if any item is invalid, nothing is created and the answer is 400
+  `{"errors": [{"index", "errors": {...}}]}`. An external pair repeated inside the request is such an error.
+- Existing external pairs are not an error: those items are not created and come back as `{"index", "status": "conflict",
+"error", "id"?}` (the `id` only for a page the caller can see, as on single create). The pair locks are taken in key order
+  in one transaction, so concurrent imports with overlapping pairs cannot create duplicates or deadlock.
+- The other items are created in that transaction: `{"index", "status": "created", "page": {...}}`. The answer is
+  `{"created", "conflicts", "results"}` with `results` in request order; 201 when every item was created, 200 when at least
+  one was a conflict. `page_transaction` is queued for each created page after the commit.
+- Pages are created with a NULL binary like single create (live builds the document on first open); live is not called.
 
 ## Page versions (PLN-82)
 
