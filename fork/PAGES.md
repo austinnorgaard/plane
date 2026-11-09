@@ -63,8 +63,12 @@ use different paths, add aliases here and in `api/urls/page.py`. This is confirm
 - Create: pages start with a NULL binary document and `description_json = {}`; the live service builds the document from
   `description_html` the first time the page is opened. A duplicate `(external_source, external_id)` pair in the project answers
   409 with `{"error": "Page with the same external id and external source already exists", "id": <existing page id>}`; the check runs under a transaction-scoped advisory lock.
+  The pair is unique across the whole project, but `id` is only returned when the caller can see that page (PLN-99); for another
+  user's private page the 409 carries the error message only.
   A project with pages disabled (`page_view` false) answers 400; an archived or unknown project answers 404.
-  The optional `parent` must be an active page of the same project.
+  The optional `parent` must be a page of the same project that the caller can see and that is not archived; a hidden,
+  unknown or archived parent all answer the same 400 `{"parent": ["Parent page does not belong to this project."]}` (PLN-99).
+  `name` is at most 255 characters on create and update (400 above).
 - Update accepts only `name` and `description_html` and **replaces the whole body**; any other key, or an empty body, is 400.
   Locked or archived pages are 400. `description_html` is sanitized; an empty value is stored as `<p></p>`.
 - Update never merges into an open document. If the page is loaded in the live service, or its state cannot be determined
@@ -95,7 +99,15 @@ use different paths, add aliases here and in `api/urls/page.py`. This is confirm
   earlier make the lock refuse. Recorded in `fork/docs/security/pln-66-pages-review.md` (F3, F4).
 - Rolling deploy: an API that finds no lock route (live older than PLN-98, 404) falls back to the old presence check and logs
   a warning; an older API never asks for the lock. Either deploy order works.
-- Request bodies larger than `FILE_SIZE_LIMIT` (5 MB by default) are 413.
+- Request bodies larger than `FILE_SIZE_LIMIT` (5 MB by default) are 413, with or without Content-Length: a chunked body is
+  measured from the file Django spooled it to, before it is parsed (PLN-99).
+- A live 413 is passed on as 413: `{"error": "description_html too large"}` for live's html cap, `{"error": "page document too
+large to update through the API"}` when the stored document plus the html exceed live's raw body cap (PLN-99).
+- **Write blocking and availability coupling (review F10).** Any member who has a public page open in the editor keeps its
+  document loaded, and every API PATCH of that page gets 409 until the last tab closes; this is intended, but a member can stall
+  an integration this way. A live outage (down, `LIVE_URL` unset, an unusable `LIVE_SERVER_SECRET_KEY`) stops all page updates
+  through this API: 409 for pages without a stored document, 503 for pages with one. Create, list, retrieve and archive do not
+  call live and keep working.
 - After commit: `page_transaction` and `track_page_version` are queued (the post-commit presence re-check is gone: the write
   lock makes it unnecessary).
 - Archive and unarchive: the page owner or a project admin only. POST by another member is 400; DELETE by another member is 403.
@@ -105,7 +117,7 @@ use different paths, add aliases here and in `api/urls/page.py`. This is confirm
 
 - `PAGES_API_ENABLED=1` is set on the api and live containers only.
 - `LIVE_BASE_URL` is set on the api container ONLY, never on the worker or beat-worker. Reason: `apps/api/plane/bgtasks/copy_s3_object.py` (around lines 73-78) returns early while `LIVE_BASE_URL` is unset; with it set, page duplicate would start calling the live service's convert-document path from the worker.
-- `LIVE_BASE_URL` must be a direct internal URL of the live container (for example `http://live:3000`), not the public proxy URL, because the live pages endpoints answer 403 to any request carrying `X-Forwarded-For` or `X-Forwarded-Host` (`apps/live/src/fork-pages/auth.ts`), which would make PATCH return 409 (no stored binary) or 503 (stored binary).
+- `LIVE_BASE_URL` must be a direct internal URL of the live container (for example `http://live:3000`), not the public proxy URL, because the live pages endpoints refuse (404 since PLN-99, 403 before) any request carrying `X-Forwarded-For` or `X-Forwarded-Host` (`apps/live/src/fork-pages/auth.ts`), which would make PATCH return 409 (no stored binary) or 503 (stored binary).
 - `LIVE_SERVER_SECRET_KEY` must be set (not the shipped placeholder) on api and live; the value is never logged.
 - Only one live replica is supported (presence is per process).
 
@@ -143,7 +155,14 @@ Internal endpoints under `/fork/pages`, all behind one guard (`apps/live/src/for
 | `POST /fork/pages/:page_id/write-lock`, `DELETE /fork/pages/:page_id/write-lock` | PLN-98 document write lock (`write-lock.ts`): granted only while the page is not loaded; while held, a new load of the page waits in `onLoadDocument` until release or TTL.                                                                                                                       |
 | `POST /fork/pages/rebase`                                                        | Stateless. Applies new `description_html` and/or `name` on top of a stored `base_binary` inside its lineage and returns `{description_binary, description_html, description_json}`. Content type `application/vnd.plane-fork.rebase+json`, body limit 25 MB, `base_binary` at most 10 MB decoded. |
 
-Guard order: `PAGES_API_ENABLED != '1'` -> 404; empty or placeholder secret -> 503; `X-Forwarded-For` or `X-Forwarded-Host` present -> 403; `live-server-secret-key` header compared with `timingSafeEqual` over sha256 digests -> 401 on mismatch (including a wrong-length key).
+Guard (PLN-99): every refusal answers the same 404 `{"message": "Not Found"}`, so a caller without the key cannot tell the
+causes apart (review F9). Refused: `PAGES_API_ENABLED != '1'`; a key that is unset, a known example value
+(`change-this-key-on-deployment`, `secret-key`) or shorter than 32 characters (review F8); `X-Forwarded-For` or
+`X-Forwarded-Host` present; a `live-server-secret-key` header that does not match (sha256 digests compared with
+`timingSafeEqual`, so a wrong-length key neither throws nor leaks its length). The cause is logged internally, at most once
+a minute per cause, without the key. At startup live logs a warning when the key is unusable, and when `NODE_OPTIONS` sets
+`--max-old-space-size` (it overrides the rebase worker heap limit). The api applies the same key rule: with an unusable
+key it makes no live call and treats live as unavailable (logged once). The api calls live with redirects disabled (review N2).
 
 ## Findings from `@hocuspocus/server` 2.15.2
 

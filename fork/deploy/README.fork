@@ -40,10 +40,18 @@ WARNINGS
    URL of the live container (http://live:3000), never the public URL: live
    refuses requests that carry X-Forwarded-For / X-Forwarded-Host.
 
-4. LIVE_SERVER_SECRET_KEY must not be the shipped placeholder
-   (change-this-key-on-deployment); the pages endpoints answer 503 until it is
-   changed. Do not print it. Never run "docker compose config" without -q on
-   the server: it prints every secret.
+4. LIVE_SERVER_SECRET_KEY must be at least 32 characters and not a shipped
+   example (change-this-key-on-deployment, secret-key). Otherwise (PLN-99) the
+   live pages endpoints refuse every request with 404 and the api makes no
+   live call, so every pages PATCH answers 409 or 503; both services log a
+   warning naming the variable. Generate one with: openssl rand -hex 32.
+   Do not print it. Never run "docker compose config" without -q on the
+   server: it prints every secret.
+   Rotation (review N3): api reads the key per call, live once at start. Set the
+   new value in plane.env, then restart live and api together
+   (update.sh or "up -d --no-deps live api"); between the two restarts pages
+   PATCH answers 409 or 503 (fail closed), nothing else is affected. Plan it
+   for a quiet minute and retry any 409/503 writes afterwards.
 
 5. CORS_ALLOWED_ORIGINS must not be passed into live. Browser origins for the
    events socket go in LIVE_EVENTS_ALLOWED_ORIGINS.

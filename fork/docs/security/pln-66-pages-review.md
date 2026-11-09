@@ -78,12 +78,14 @@ Only F1 should block the deploy. F3 and F4 should be scheduled right after. Upst
 - Where: `apps/api/plane/api/views/page.py:158-176`.
 - Scenario: the duplicate lookup is not filtered by page visibility. A member POSTing an `external_id` and `external_source` that match another user's private page in the project receives 409 with that page's `id`. Verified with a throwaway test (409 and the id of the private page).
 - Recommended fix: scope the duplicate lookup like `base_queryset` (owned by the caller or public); for hidden matches return a generic 409 without `id`, or treat the pair as unique per owner.
+- Resolution (PLN-99): the pair stays unique per project; the 409 carries `id` only when the caller can see the page.
 
 ### F6 Low: `parent` accepts a private page of another user
 
 - Where: `apps/api/plane/api/serializers/page.py:73-86`.
 - Scenario: the parent only needs an active link to the project. A member can attach a new page under another user's private page (201 in the throwaway test), and the response differs from an unknown id (400 "Parent page does not belong to this project."), so private page ids can be probed (ids are UUIDs, so practical impact is small).
 - Recommended fix: require the parent to be visible to the caller (reuse `base_queryset`), and return the same error for hidden and unknown parents. Also reject an archived parent.
+- Resolution (PLN-99): done as recommended (`validate_parent` with the view's `base_queryset`; hidden, unknown and archived give the same 400).
 
 ### F7 Low (upstream): archive cascades to all descendants
 
@@ -97,12 +99,14 @@ Only F1 should block the deploy. F3 and F4 should be scheduled right after. Upst
 - Where: `apps/live/src/fork-pages/auth.ts:9` and `:30` (only `change-this-key-on-deployment` is rejected); `apps/api/.env.example:66` and `apps/live/.env.example:9` use `secret-key`; the API side sends an empty header when the variable is unset (`apps/api/plane/utils/live_pages.py:39-40`).
 - Scenario: a deployment that copies an example file runs with a publicly known key, and the pages endpoints (presence and rebase) accept it from anything that can reach the live service on the internal network.
 - Recommended fix: reject known example values and keys shorter than 32 characters at startup (live) and when the API reads the variable, and fail closed with a clear log line naming the variable (not its value).
+- Resolution (PLN-99): done on both sides (live guard and startup warning; api `_usable_secret`, logged once).
 
 ### F9 Low: unauthenticated status codes reveal configuration
 
 - Where: `apps/live/src/fork-pages/auth.ts:24-38`.
 - Scenario: before the key is checked, callers can tell whether the feature flag is on (404 vs other), whether the key is unset or still the placeholder (503), and whether a forwarding header is present (403). The 403 forwarded-header check also runs before the key check.
 - Recommended fix: check the key first and answer 404 for every failure on a request carrying forwarding headers; keep the specific causes in an internal log line without the key.
+- Resolution (PLN-99): every refusal of the guard answers the same 404; the cause is logged at most once a minute per cause.
 
 ### F10 Low: 409 and 503 paths
 
@@ -110,6 +114,7 @@ Only F1 should block the deploy. F3 and F4 should be scheduled right after. Upst
 - Disclosure: a caller who may PATCH the page learns one boolean (open in an editor or not). The response never contains who, how many, or when. Private pages are visible to the owner only. Acceptable.
 - Write blocking: any member who can open a public page in the editor keeps its document loaded, so integration writes get 409 for as long as the socket stays open. This is intended behaviour, but it is also a cheap way for a member to stall an integration. Add a `Retry-After` header and keep the message generic.
 - Availability coupling: presence unknown (live down, `LIVE_URL` unset, bad answer) returns 409 even for pages with no stored binary; a rebase failure returns 503. Fail-closed is the right default for integrity. Document that a live outage stops all page writes through this API.
+- Resolution (PLN-99): documented in `fork/PAGES.md` (Semantics, "Write blocking and availability coupling"). `Retry-After` was added earlier.
 - The 409 and 503 bodies contain only fixed strings; no exception text, URL or secret leaks.
 
 ### F11 Low (mixed): input bounds
@@ -118,6 +123,7 @@ Only F1 should block the deploy. F3 and F4 should be scheduled right after. Upst
 - Scenario: memory and CPU amplification by an authenticated member. The shipped reverse proxy config sets a request body limit equal to `FILE_SIZE_LIMIT`, which mitigates the chunked case when it is deployed in front. CPU cost of the double parse was not measured.
 - Origin: the Content-Length trust and the unbounded `name` are fork code; the sanitiser double parse is upstream (document only).
 - Recommended fix: enforce the cap by reading a bounded stream, add `max_length` (suggest 255) to `name` on create and update, and compute the sanitiser diff only when a log level asks for it.
+- Resolution (PLN-99, fork part): `name` max 255 on create and update; a body without Content-Length is measured from Django's spooled body file (the api runs under ASGI) before parsing and capped at `FILE_SIZE_LIMIT`. The sanitiser double parse is upstream and stays documented only.
 
 ### F12 Low (upstream): `style` allowed unfiltered
 
@@ -159,11 +165,13 @@ Only F1 should block the deploy. F3 and F4 should be scheduled right after. Upst
 - Where: `apps/api/plane/utils/live_pages.py:50` and `:72` (`requests.get` and `requests.post` follow redirects by default and keep custom headers on same-host redirects).
 - Scenario: a redirect from the live url (proxy misconfiguration) would carry the shared key header along. Not reachable from user input; the host comes only from the operator-set `LIVE_URL`.
 - Recommended fix: `allow_redirects=False` on both calls.
+- Resolution (PLN-99): done (and on the PLN-98 write lock calls).
 
 ### N3 Info (fork): key rotation needs a coordinated restart
 
 - Where: the API reads `LIVE_SERVER_SECRET_KEY` per call (`apps/api/plane/utils/live_pages.py:40`); live reads it once at start.
 - Scenario: rotating the key means restarting both services; in between the API gets 401, so presence is unknown (409) and rebase is 503. This fails closed and is acceptable. Add the restart order and the expected brief write outage to the deploy notes.
+- Resolution (PLN-99): rotation steps in `fork/deploy/README.fork` (item 4).
 
 Checked, no finding: SSRF (host only from `LIVE_URL`, the only variable path part is a database UUID); log injection in the API (log lines carry page id, exception type and a `json.dumps` summary); presence endpoint auth (same guard and fixed check order as the rebase route, one boolean after the key check).
 

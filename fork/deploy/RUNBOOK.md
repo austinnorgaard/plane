@@ -349,18 +349,18 @@ Live-side guard checks (from inside `api`, so no public route is involved; the k
 $C exec -T api python -c "import os,requests;h={'live-server-secret-key':os.environ['LIVE_SERVER_SECRET_KEY']};print(requests.get('http://live:3000/live/fork/pages/00000000-0000-0000-0000-000000000000/loaded',headers=h,timeout=3).text)"
 ```
 
-prints `{"loaded":false}`. With an added header `X-Forwarded-For: 1.2.3.4` the same request returns 403.
+prints `{"loaded":false}`. With an added header `X-Forwarded-For: 1.2.3.4` the same request returns 404 (403 before PLN-99).
 
 Guard checks without the key (both must match exactly; any other status means the guard is not what the code says, so run rollback L1 and escalate):
 
 ```
-# direct to live, no secret header: 401
+# direct to live, no secret header: 404 (401 before PLN-99)
 $C exec -T api python -c "import requests;print(requests.get('http://live:3000/live/fork/pages/00000000-0000-0000-0000-000000000000/loaded',timeout=3).status_code)"
-# public route through the proxy, no key: 403
+# public route through the proxy, no key: 404 (403 before PLN-99)
 curl -sS -o /dev/null -w '%{http_code}\n' "$PUBLIC_URL/live/fork/pages/00000000-0000-0000-0000-000000000000/loaded"
 ```
 
-Why: the live guard answers 401 to a request with a missing or wrong `live-server-secret-key` (`apps/live/src/fork-pages/auth.ts`), and answers 403 to any request that carries `X-Forwarded-For` or `X-Forwarded-Host` before it looks at the key. The proxy adds `X-Forwarded-For` to everything it forwards, so the public route is 403 with or without a key. Repeat the second call from `$LAN_URL`.
+Why: since PLN-99 the live guard (`apps/live/src/fork-pages/auth.ts`) answers every refusal with the same 404 `{"message": "Not Found"}`: a missing or wrong `live-server-secret-key`, an unusable configured key, or a request that carries `X-Forwarded-For` or `X-Forwarded-Host`. The proxy adds `X-Forwarded-For` to everything it forwards, so the public route is 404 with or without a key. The live log names the cause (`FORK_PAGES: request refused: ...`, at most once a minute per cause). A 200 on either call means the guard is broken. Repeat the second call from `$LAN_URL`.
 
 Duplicate a page in the UI: it must still work and the copy must open normally (the worker has no `LIVE_BASE_URL`, so the live sync stays off).
 
