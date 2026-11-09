@@ -66,4 +66,4 @@ None.
 
 ## Accepted limits
 
-- Bulk delete (app/views/issue/base.py bulk delete) publishes only the deleted ids, so the parents of deleted sub-issues are not published and their sub-issue counts stay stale for other viewers until the next refetch. The single sub-issue delete (destroy, PLN-29) is covered.
+None. The former bulk delete limit (the parents of deleted sub-issues were not published) is closed by PLN-93: the bulk delete also publishes those parents as `issue`/`updated`.
