@@ -9,14 +9,16 @@ Authentication is the normal `/api/v1` API key; permissions come from `ProjectPa
 
 All paths are under `/api/v1/workspaces/<slug>/projects/<project_id>/`.
 
-| Method | Path                       | Purpose                                                                                                                                                                                                                                                                         |
-| ------ | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| GET    | `pages/`                   | list (cursor paginated, see "Listing and incremental sync"; `?archived=true` lists archived pages; filters `parent_id`, `external_source`, `external_id`, `updated_after`; `order_by` limited to created_at, updated_at, name, sort_order, otherwise the default `-created_at`) |
-| POST   | `pages/`                   | create                                                                                                                                                                                                                                                                          |
-| GET    | `pages/<page_id>/`         | retrieve (includes `description_html`)                                                                                                                                                                                                                                          |
-| PATCH  | `pages/<page_id>/`         | update `name` and/or `description_html`                                                                                                                                                                                                                                         |
-| POST   | `pages/<page_id>/archive/` | archive (page and descendants)                                                                                                                                                                                                                                                  |
-| DELETE | `pages/<page_id>/archive/` | unarchive                                                                                                                                                                                                                                                                       |
+| Method | Path                                     | Purpose                                                                                                                                                                                                                                                                         |
+| ------ | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `pages/`                                 | list (cursor paginated, see "Listing and incremental sync"; `?archived=true` lists archived pages; filters `parent_id`, `external_source`, `external_id`, `updated_after`; `order_by` limited to created_at, updated_at, name, sort_order, otherwise the default `-created_at`) |
+| POST   | `pages/`                                 | create                                                                                                                                                                                                                                                                          |
+| GET    | `pages/<page_id>/`                       | retrieve (includes `description_html`)                                                                                                                                                                                                                                          |
+| PATCH  | `pages/<page_id>/`                       | update `name` and/or `description_html`                                                                                                                                                                                                                                         |
+| POST   | `pages/<page_id>/archive/`               | archive (page and descendants)                                                                                                                                                                                                                                                  |
+| DELETE | `pages/<page_id>/archive/`               | unarchive                                                                                                                                                                                                                                                                       |
+| GET    | `pages/<page_id>/versions/`              | list the saved versions of the page, newest first, no content (PLN-82)                                                                                                                                                                                                          |
+| GET    | `pages/<page_id>/versions/<version_id>/` | one version with its `description_html` (PLN-82)                                                                                                                                                                                                                                |
 
 The URL kwarg is `page_id` because `ProjectPagePermission` reads `view.kwargs["page_id"]`.
 
@@ -60,6 +62,20 @@ middle of the 50000-page project by `(updated_at, id)` takes about 90 ms without
 on `pages (updated_at, id)`; the planner then walks that index across every project and filters the rows of other projects.
 A 200-page project takes about 1 ms either way (project_pages.project_id index, then a small sort). The index is not
 justified, so no migration was added. Revisit only if a single project grows far beyond 50000 pages.
+
+## Page versions (PLN-82)
+
+Versions are written by upstream's `track_page_version` task after every html change (the stock app and this API both queue
+it): a new version, or the same user's latest version updated in place when it is less than 10 minutes old; at most 20 are
+kept per page (the oldest is deleted). The API only reads them.
+
+- `GET pages/<page_id>/versions/`: `{id, page_id, last_saved_at, owned_by_id, created_at, updated_at}` per version, ordered
+  by `(created_at, id)` descending, keyset cursor paginated like the pages list (`per_page` default 100, maximum 1000).
+- `GET pages/<page_id>/versions/<version_id>/`: the same fields plus `description_html`, sanitised on output with the write
+  rules (nh3, same allowlist; no removal log on read). `description_binary` and `description_json` are not exposed.
+- Permissions: `ProjectPagePermission` as for the page itself, and the page must be visible to the caller (`base_queryset`:
+  public, or owned by the caller, guests limited as usual), else 404. A version id of another page is 404.
+- Archived pages: versions can still be read.
 
 ## MCP client contract (open item)
 
