@@ -8,7 +8,7 @@ import type { NextFunction, Request, RequestHandler, Response } from "express";
 import { z } from "zod";
 import { Controller, Delete, Get, Middleware, Post } from "@plane/decorators";
 import { logger } from "@plane/logger";
-import { requirePagesApiAccess } from "./auth";
+import { requirePagesApiAccess, warnIfKeyUnusable } from "./auth";
 import { InvalidBaseStateError } from "./rebase";
 import { prewarmRebaseWorker, RebaseBusyError, RebaseTimeoutError, runRebase } from "./rebase-runner";
 import { acquireWriteLock, releaseWriteLock } from "./write-lock";
@@ -53,12 +53,20 @@ export const getRebaseLimits = () => ({
 // byte), plus room for the name and the json framing.
 const getRebaseBodyLimit = () => MAX_BASE_BINARY_CHARS + 6 * getRebaseLimits().maxHtmlBytes + 1024 * 1024;
 
+// Error body of a raw request body over the cap. Distinct from the html cap's
+// {"error": "description_html too large"} (PLN-99): the api tells the two apart.
+export const BODY_TOO_LARGE_ERROR = "request body too large";
+
 // Wraps express.raw so oversize or malformed bodies get a JSON error instead of the default HTML page.
 const parseRebaseBody: RequestHandler = (req: Request, res: Response, next: NextFunction) => {
-  express.raw({ type: REBASE_CONTENT_TYPE, limit: getRebaseBodyLimit() })(req, res, (error?: unknown) => {
+  const limit = getRebaseBodyLimit();
+  express.raw({ type: REBASE_CONTENT_TYPE, limit })(req, res, (error?: unknown) => {
     if (error) {
-      const status = (error as { status?: number }).status === 413 ? 413 : 400;
-      res.status(status).json({ error: status === 413 ? "Payload too large" : "Invalid request body" });
+      if ((error as { status?: number }).status === 413) {
+        res.status(413).json({ error: BODY_TOO_LARGE_ERROR, max_bytes: limit });
+        return;
+      }
+      res.status(400).json({ error: "Invalid request body" });
       return;
     }
     if (!Buffer.isBuffer(req.body)) {
@@ -69,6 +77,18 @@ const parseRebaseBody: RequestHandler = (req: Request, res: Response, next: Next
   });
 };
 
+/**
+ * fork (PLN-99): a --max-old-space-size in NODE_OPTIONS overrides the per-worker heap limit of the rebase
+ * workers (PAGES_REBASE_WORKER_MAX_MB), so one large rebase could grow far beyond it. Warn once.
+ */
+const warnIfNodeOldSpaceSet = () => {
+  if (/--max[-_]old[-_]space[-_]size/.test(process.env.NODE_OPTIONS ?? "")) {
+    logger.warn(
+      "PAGES_CONTROLLER: NODE_OPTIONS sets --max-old-space-size, which overrides the rebase worker heap limit (PAGES_REBASE_WORKER_MAX_MB); remove it for live"
+    );
+  }
+};
+
 @Controller("/fork/pages")
 export class PagesController {
   [key: string]: unknown;
@@ -77,6 +97,9 @@ export class PagesController {
   constructor(hocusPocusServer: Hocuspocus) {
     this.hocusPocusServer = hocusPocusServer;
     prewarmRebaseWorker();
+    // fork (PLN-99): configuration problems are named once at startup (never a value)
+    warnIfKeyUnusable();
+    warnIfNodeOldSpaceSet();
   }
 
   // Read-only: only inspects the maps, never creates or loads a document. A document is in

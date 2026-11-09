@@ -141,6 +141,25 @@ def _external_lock_key(project_id, external_source, external_id):
     return int.from_bytes(digest[:8], "big", signed=True)
 
 
+def _request_body_size(request):
+    """The body size in bytes: Content-Length when present, otherwise the size of the spooled body.
+    0 when neither is known (a WSGI request without Content-Length has an empty body in Django)."""
+    raw = getattr(request, "_request", request)
+    try:
+        return int(raw.META.get("CONTENT_LENGTH") or "")
+    except ValueError:
+        pass
+    stream = getattr(raw, "_stream", None)
+    try:
+        position = stream.tell()
+        stream.seek(0, os.SEEK_END)
+        size = stream.tell()
+        stream.seek(position)
+        return size
+    except (AttributeError, OSError, ValueError):
+        return 0
+
+
 def _open_in_editor():
     response = Response(OPEN_IN_EDITOR, status=status.HTTP_409_CONFLICT)
     response["Retry-After"] = _get_retry_after_seconds()
@@ -195,12 +214,12 @@ class PageBaseAPIEndpoint(BaseAPIView):
         return super().handle_exception(exc)
 
     def check_body_size(self, request):
-        """Django's memory limit does not apply to streamed json bodies, so cap explicitly."""
-        try:
-            length = int(request.META.get("CONTENT_LENGTH") or 0)
-        except ValueError:
-            length = 0
-        if length > settings.FILE_SIZE_LIMIT:
+        """Django's memory limit does not apply to streamed json bodies, so cap explicitly.
+
+        PLN-99 (review F11): a body without Content-Length (chunked) is capped too. Under ASGI Django has
+        already spooled it to a temporary file before the view runs, so its size is read from that file
+        (seek to the end, no read into memory) before DRF parses it."""
+        if _request_body_size(request) > settings.FILE_SIZE_LIMIT:
             raise RequestDataTooBig()
 
     def check_html_size(self, request):
@@ -346,7 +365,10 @@ class PageListCreateAPIEndpoint(PageBaseAPIEndpoint):
         if not project.page_view:
             return Response({"error": "Pages are disabled for this project"}, status=status.HTTP_400_BAD_REQUEST)
 
-        serializer = PageCreateAPISerializer(data=request.data, context={"project": project})
+        serializer = PageCreateAPISerializer(
+            data=request.data,
+            context={"project": project, "visible_pages": self.base_queryset(slug, project_id)},
+        )
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         data = serializer.validated_data
@@ -370,13 +392,12 @@ class PageListCreateAPIEndpoint(PageBaseAPIEndpoint):
                     .first()
                 )
                 if existing is not None:
-                    return Response(
-                        {
-                            "error": "Page with the same external id and external source already exists",
-                            "id": str(existing),
-                        },
-                        status=status.HTTP_409_CONFLICT,
-                    )
+                    # PLN-99 (review F5): the pair stays unique in the project, but the id is only given
+                    # for a page the caller can see.
+                    body = {"error": "Page with the same external id and external source already exists"}
+                    if self.base_queryset(slug, project_id).filter(pk=existing).exists():
+                        body["id"] = str(existing)
+                    return Response(body, status=status.HTTP_409_CONFLICT)
 
             page = Page.objects.create(
                 workspace_id=project.workspace_id,
@@ -505,6 +526,12 @@ class PageDetailAPIEndpoint(PageBaseAPIEndpoint):
             except live_pages.LiveServiceError as exc:
                 if getattr(exc, "too_large", False) is True:
                     # live refused the size: not retryable, and nothing internal is revealed
+                    if getattr(exc, "too_large_kind", None) == "body":
+                        # PLN-99: the stored document plus the html exceed live's raw body cap
+                        return Response(
+                            {"error": "page document too large to update through the API"},
+                            status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        )
                     return Response(
                         {"error": "description_html too large"}, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
                     )
@@ -525,8 +552,9 @@ class PageDetailAPIEndpoint(PageBaseAPIEndpoint):
 
         lock_state, lock_token = live_pages.acquire_write_lock(page.id)
         if lock_state == live_pages.LOCK_UNSUPPORTED:
-            # live predates the lock route (rolling deploy): the old presence check, best effort
-            logger.warning("live has no write lock route; page %s falls back to the presence check", page.id)
+            # live predates the lock route (rolling deploy) or refused the request: the presence check,
+            # which fails closed on a refusal
+            logger.warning("live answered 404 to the write lock; page %s falls back to the presence check", page.id)
             if live_pages.is_page_loaded(page.id) is not False:
                 return _open_in_editor()
         elif lock_state == live_pages.LOCK_BUSY:

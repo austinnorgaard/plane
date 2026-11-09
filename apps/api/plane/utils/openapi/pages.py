@@ -77,8 +77,9 @@ PAGE_VALIDATION_EXAMPLES = [
 
 PAGE_CONFLICT_CREATE_RESPONSE = OpenApiResponse(
     description=(
-        "A page with the same external_id and external_source already exists in the project; "
-        "the body carries the id of the existing page."
+        "A page with the same external_id and external_source already exists in the project. "
+        "The body carries the id of the existing page only when the caller can see that page; "
+        "for another user's private page the body has the error message only."
     ),
     examples=[
         _example(
@@ -124,6 +125,10 @@ PAGE_TOO_LARGE_RESPONSE = OpenApiResponse(
     examples=[
         _example("HTML too large", {"error": "description_html too large", "max_bytes": 262144}),
         _example("Body too large", {"error": "request body too large"}),
+        _example(
+            "Stored document too large",
+            {"error": "page document too large to update through the API"},
+        ),
     ],
 )
 
