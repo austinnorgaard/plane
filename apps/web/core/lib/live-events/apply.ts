@@ -20,6 +20,8 @@ import type { IIssueDetail } from "@/store/issue/issue-details/root.store";
 import type { IIssueStore } from "@/store/issue/issue.store";
 import { EIssueGroupedAction } from "@/store/issue/helpers/base-issues.store";
 import type { IBaseIssuesStore } from "@/store/issue/helpers/base-issues.store";
+// fork (PLN-110 fix): the user's own in-flight edits win over live reads that started before them
+import { localEdits } from "@/fork/live/local-edits";
 
 export const APPLY_DEBOUNCE_MS = 300;
 export const APPLY_DEBOUNCE_MAX_MS = 1000;
@@ -27,6 +29,10 @@ export const COARSE_DEBOUNCE_MS = 1000;
 export const CHUNK_SIZE = 50;
 export const PEEK_FETCH_THROTTLE_MS = 2000;
 export const OWN_ACTOR_DELAY_MS = 1500;
+/** fork (PLN-110 fix): a full refresh that found the user's edits in flight (or got a stale answer) retries */
+export const COARSE_RETRY_MS = 1500;
+/** fork (PLN-110 fix): a per-item fetch of a work item the user edited meanwhile is retried after this */
+export const LOCAL_EDIT_RETRY_MS = 1500;
 
 // ---------------------------------------------------------------------------
 // pure decision logic
@@ -187,6 +193,7 @@ export class LiveWorkItemsApplier {
   private coarseTimer: ReturnType<typeof setTimeout> | undefined;
   private coarseAll = false;
   private ownActorTimers = new Set<ReturnType<typeof setTimeout>>();
+  private deferTimers = new Set<ReturnType<typeof setTimeout>>();
   private lastPeekFetch = new Map<string, number>();
   private peekTrailingTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private disposed = false;
@@ -202,8 +209,10 @@ export class LiveWorkItemsApplier {
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     if (this.coarseTimer) clearTimeout(this.coarseTimer);
     this.ownActorTimers.forEach((timer) => clearTimeout(timer));
+    this.deferTimers.forEach((timer) => clearTimeout(timer));
     this.peekTrailingTimers.forEach((timer) => clearTimeout(timer));
     this.ownActorTimers.clear();
+    this.deferTimers.clear();
     this.peekTrailingTimers.clear();
     this.pending.clear();
   }
@@ -274,9 +283,16 @@ export class LiveWorkItemsApplier {
   private async runCoarse(all: boolean) {
     if (this.disposed) return;
     const targets = this.getTargets().filter((target) => all || target.coarse);
-    const refreshes = targets.map((target) =>
-      target.refetch().catch((error: unknown) => console.error("live refresh failed", error))
-    );
+    // fork (PLN-110 fix): in place (the board stays on screen), never while the user's edits are in flight or
+    // just made, and a stale answer is dropped; either way the refresh is retried a little later
+    let retry = false;
+    const refreshes: Promise<unknown>[] = targets.map(async (target) => {
+      try {
+        if ((await target.store.liveRefetch(target.refetch)) !== "applied") retry = true;
+      } catch (error: unknown) {
+        console.error("live refresh failed", error);
+      }
+    });
     // a full refresh may carry a state or label change: the metadata stores follow it
     if (all) {
       refreshes.push(
@@ -286,6 +302,29 @@ export class LiveWorkItemsApplier {
       );
     }
     await Promise.all(refreshes);
+    if (retry && !this.disposed) this.scheduleCoarseRetry(all);
+  }
+
+  /** fork (PLN-110 fix): runs the deferred full refresh once the user's edits have settled. */
+  private scheduleCoarseRetry(all: boolean) {
+    if (all) this.coarseAll = true;
+    if (this.coarseTimer) return;
+    this.coarseTimer = setTimeout(() => {
+      this.coarseTimer = undefined;
+      const includeAll = this.coarseAll;
+      this.coarseAll = false;
+      void this.runCoarse(includeAll);
+    }, COARSE_RETRY_MS);
+  }
+
+  /** fork (PLN-110 fix): re-enqueues work items whose live read lost to a newer local edit. */
+  private deferLocal(ids: string[], batch: Map<string, Set<string>>) {
+    if (ids.length === 0) return;
+    const timer = setTimeout(() => {
+      this.deferTimers.delete(timer);
+      ids.forEach((id) => this.enqueue([id], [...(batch.get(id) ?? [changeKey("issue", "updated")])]));
+    }, LOCAL_EDIT_RETRY_MS);
+    this.deferTimers.add(timer);
   }
 
   private getOpenIssueIds(): string[] {
@@ -345,6 +384,9 @@ export class LiveWorkItemsApplier {
     const batch = this.pending;
     this.pending = new Map();
     const { workspaceSlug, projectId, issueMap } = this.deps;
+    // fork (PLN-110 fix): each work item's local edit counter when its read starts
+    const seqAtFetch = new Map<string, number>();
+    for (const id of batch.keys()) seqAtFetch.set(id, localEdits.issueSeq(id));
 
     const fetched = new Map<string, TIssue>();
     const missing: string[] = [];
@@ -371,6 +413,17 @@ export class LiveWorkItemsApplier {
     }
     if (this.disposed) return;
 
+    // fork (PLN-110 fix): a work item the user edited after the read started, or whose edit is still in flight,
+    // keeps its local state; it is read again later, after the edit has settled
+    const lostToLocal = [...batch.keys()].filter(
+      (id) => localEdits.isInFlight(id) || localEdits.issueSeq(id) !== seqAtFetch.get(id)
+    );
+    for (const id of lostToLocal) fetched.delete(id);
+    const missingNow = missing.filter((id) => !lostToLocal.includes(id));
+    missing.length = 0;
+    missing.push(...missingNow);
+    this.deferLocal(lostToLocal, batch);
+
     const targets = this.getTargets();
     const listTargets = targets.filter((target) => !target.coarse);
     const coarseNeeded = targets.some((target) => target.coarse);
@@ -382,34 +435,37 @@ export class LiveWorkItemsApplier {
       before.set(id, existing ? clone(existing) : undefined);
     });
 
-    runInAction(() => {
-      if (fetched.size > 0) issueMap.addIssue([...fetched.values()]);
+    // fork (PLN-110 fix): server changes, not local edits
+    localEdits.remote(() =>
+      runInAction(() => {
+        if (fetched.size > 0) issueMap.addIssue([...fetched.values()]);
 
-      fetched.forEach((_issue, id) => {
-        const after = issueMap.getIssueById(id);
-        if (!after) return;
-        const beforeState = before.get(id);
-        for (const target of listTargets) {
-          const action = decideStoreAction({
-            scope: target.scope,
-            projectId,
-            issue: after,
-            inList: listContainsIssue(target.store.groupedIssueIds, id),
-          });
-          if (action === "add") target.store.addIssueToList(id);
-          else if (action === "update") target.store.updateIssueList(after, beforeState);
-          else if (action === "remove")
-            target.store.updateIssueList(undefined, beforeState ?? after, EIssueGroupedAction.DELETE);
+        fetched.forEach((_issue, id) => {
+          const after = issueMap.getIssueById(id);
+          if (!after) return;
+          const beforeState = before.get(id);
+          for (const target of listTargets) {
+            const action = decideStoreAction({
+              scope: target.scope,
+              projectId,
+              issue: after,
+              inList: listContainsIssue(target.store.groupedIssueIds, id),
+            });
+            if (action === "add") target.store.addIssueToList(id);
+            else if (action === "update") target.store.updateIssueList(after, beforeState);
+            else if (action === "remove")
+              target.store.updateIssueList(undefined, beforeState ?? after, EIssueGroupedAction.DELETE);
+          }
+        });
+
+        // removeIssueFromList reads the issue map, so the map entry must outlive it. The list endpoint also
+        // omits archived, draft and intake work items, so only an issue delete drops the map entry.
+        for (const id of missing) {
+          for (const target of listTargets) target.store.removeIssueFromList(id);
+          if (hasIssueDeleted(batch.get(id) ?? [])) issueMap.removeIssue(id);
         }
-      });
-
-      // removeIssueFromList reads the issue map, so the map entry must outlive it. The list endpoint also
-      // omits archived, draft and intake work items, so only an issue delete drops the map entry.
-      for (const id of missing) {
-        for (const target of listTargets) target.store.removeIssueFromList(id);
-        if (hasIssueDeleted(batch.get(id) ?? [])) issueMap.removeIssue(id);
-      }
-    });
+      })
+    );
 
     if (coarseNeeded) this.scheduleCoarse(false);
     await this.refreshOpenIssues(batch, new Set(missing.filter((id) => hasIssueDeleted(batch.get(id) ?? []))));
@@ -422,6 +478,11 @@ export class LiveWorkItemsApplier {
     for (const issueId of this.getOpenIssueIds()) {
       const kinds = batch.get(issueId);
       if (!kinds) continue;
+      // fork (PLN-110 fix): the peek of a work item with an edit in flight is refreshed once it has settled
+      if (localEdits.isInFlight(issueId)) {
+        this.deferLocal([issueId], batch);
+        continue;
+      }
       if (deleted.has(issueId)) {
         // deleted: never fetchIssue on it
         this.closePeek();
