@@ -440,7 +440,8 @@ Afterwards run the stock stack as in L2 and check the web UI. Delete the snapsho
 
 ## 11. Retention
 
-- Keep the two most recent fork tags in the container's image store (the running one and the previous one, which `update.sh rollback` needs). Remove older ones by exact tag: `docker image rm ghcr.io/austinnorgaard/plane-fork-web:sha-<old>` (archive path: `localhost/plane-fork-web:v1.4.3-live.<old>`; and `-live`, `-api`).
+- `fork/deploy/prune-images.sh` (PLN-64) removes old GHCR fork images. Run it from the workstation with the same `PVE_HOST`, `PLANE_CTID` and `PLANE_APP_DIR` as `update.sh`. The default is a dry run that lists each `plane-fork-{web,live,api}:sha-*` image as KEEP or REMOVE with the reason; `--apply` removes the REMOVE ones with `docker image rm <repo>:<tag>`, never `--force`. Per image it keeps the current tag (plane.env), the `update.sh rollback` target (plane.env.update-prev), the most recent other tag (`--keep <n>` keeps more) and any image a container uses. It never touches `makeplane/*`, base images, untagged images or the `localhost/plane-fork-*` archive images. Run it after an update has been accepted.
+- Archive path images (`localhost/plane-fork-web:v1.4.3-live.<old>`; and `-live`, `-api`): keep the running one and the previous one, and remove older ones by exact tag with `docker image rm`.
 - Never prune stock images: no `docker image prune -a`, no `docker system prune -a`, no removal of `makeplane/*`, `postgres`, `valkey`, `rabbitmq` or `minio` images. Rollback L2 depends on them.
 - Delete image archives from `$PVE_STAGING_DIR` and `$CT_STAGING_DIR` after the checksum check.
 
