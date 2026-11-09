@@ -1555,6 +1555,8 @@ def issue_activity(
     notification=False,
     origin=None,
     intake=None,
+    # fork (PLN-129): False when the caller publishes one live event for a whole batch itself
+    live_event=True,
 ):
     issue_activities = []
     workspace_id = None
@@ -1645,7 +1647,7 @@ def issue_activity(
         log_exception(e)
         return
     finally:
-        if workspace_id is not None:
+        if workspace_id is not None and live_event:
             _publish_live_event(
                 type=type,
                 requested_data=requested_data,

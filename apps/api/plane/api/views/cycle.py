@@ -78,6 +78,7 @@ from plane.utils.openapi import (
     REQUIRED_FIELDS_RESPONSE,
 )
 from plane.utils.live_events import publish_metadata_event
+from plane.bgtasks.cycle_automation_task import queue_cycle_automation  # fork (PLN-129)
 
 
 class CycleListCreateAPIEndpoint(BaseAPIView):
@@ -350,6 +351,7 @@ class CycleListCreateAPIEndpoint(BaseAPIView):
                 cycle = Cycle.objects.get(pk=serializer.instance.id)
                 serializer = CycleSerializer(cycle)
                 publish_metadata_event(project_id, "cycle_definition", "created", request.user.id)  # fork (PLN-36)
+                queue_cycle_automation(cycle.id, dates_changed=True)  # fork (PLN-129)
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         else:
@@ -606,6 +608,8 @@ class CycleDetailAPIEndpoint(BaseAPIView):
             cycle = Cycle.objects.get(pk=serializer.instance.id)
             serializer = CycleSerializer(cycle)
             publish_metadata_event(project_id, "cycle_definition", "updated", request.user.id)  # fork (PLN-36)
+            # fork (PLN-129)
+            queue_cycle_automation(pk, dates_changed="start_date" in request.data or "end_date" in request.data)
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 

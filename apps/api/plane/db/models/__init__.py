@@ -93,3 +93,6 @@ from .description import Description, DescriptionVersion
 
 # fork (PLN-106): per-user settings record
 from .fork_user_settings import ForkUserSettings
+
+# fork (PLN-129): cycle automation rules
+from .cycle_automation import CycleAutomationRule, CycleAutomationRun, CycleAutomationTrigger
