@@ -183,7 +183,7 @@ Checks, each a PASS or a FAIL:
 - `PAGES_REBASE_MAX_HTML_BYTES` is at least `PAGES_API_MAX_HTML_BYTES` (unset values count as the code defaults, 524288 and 262144);
 - `PAGES_REBASE_WORKER_MAX_MB` is between 64 and 4096 (unset is the code default, 256);
 - `NODE_OPTIONS` has no `--max-old-space-size`;
-- `LIVE_SERVER_SECRET_KEY` is set and neither is nor contains the shipped placeholder (whitespace and an unquoted `# comment` tail are removed first, as compose does);
+- `LIVE_SERVER_SECRET_KEY` is set, neither is nor contains the shipped placeholder, is not the `.env.example` value `secret-key` and has at least 32 characters (PLN-113, the rule live and api apply; whitespace and an unquoted `# comment` tail are removed first, as compose does);
 - `inspect.sh` exits 0 (`PLANE_CTID` must be digits and `PLANE_APP_DIR` a safe absolute path, else nothing is sent; ssh runs with `BatchMode` and a timeout (the `timeout` command must exist, else the item FAILs and inspect.sh is not run), `GATE_INSPECT_TIMEOUT` seconds overall, default 300);
 - rollback is available: the five L1 flag lines are in the override, and `STOCK_RELEASE` is set and is not a fork tag.
 
