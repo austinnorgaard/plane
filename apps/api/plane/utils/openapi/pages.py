@@ -101,13 +101,19 @@ PAGE_LIST_VALIDATION_EXAMPLES = [
 
 PAGE_CONFLICT_UPDATE_RESPONSE = OpenApiResponse(
     description=(
-        "The page cannot be updated now because it is open in an editor, or because whether it is open "
-        "could not be determined and the page has no stored document (a page with a stored document "
-        "returns 503 instead when the live service fails). The response carries a Retry-After header "
-        "in seconds (default 60, maximum 3600, set by PAGES_API_RETRY_AFTER_SECONDS); wait at least that long. "
+        "The page was not updated. 'page is open in an editor': the page is open in an editor, or whether "
+        "it is open could not be determined (a page with a stored document returns 503 instead when the "
+        "live service fails while rebasing); Retry-After is in seconds (default 60, maximum 3600, set by "
+        "PAGES_API_RETRY_AFTER_SECONDS), wait at least that long. 'page changed during the update' and "
+        "'page is being updated by another request': another writer changed the page, or is updating it, "
+        "while this request was prepared; Retry-After is 1, re-read the page and send the update again. "
         "The 413 and 503 responses carry no Retry-After header."
     ),
-    examples=[_example("Open in editor", {"error": "page is open in an editor; retry later"})],
+    examples=[
+        _example("Open in editor", {"error": "page is open in an editor; retry later"}),
+        _example("Changed meanwhile", {"error": "page changed during the update; retry"}),
+        _example("Another update running", {"error": "page is being updated by another request; retry"}),
+    ],
 )
 
 PAGE_TOO_LARGE_RESPONSE = OpenApiResponse(

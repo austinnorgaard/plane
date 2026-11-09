@@ -73,6 +73,8 @@ logger = logging.getLogger("plane.api")
 
 OPEN_IN_EDITOR = {"error": "page is open in an editor; retry later"}
 LIVE_UNAVAILABLE = {"error": "live service unavailable, page not updated"}
+PAGE_CHANGED = {"error": "page changed during the update; retry"}
+PAGE_BUSY = {"error": "page is being updated by another request; retry"}
 
 
 def _pages_api_enabled():
@@ -137,6 +139,34 @@ def _has_binary(page):
 def _external_lock_key(project_id, external_source, external_id):
     digest = hashlib.sha256(f"{project_id}:{external_source}:{external_id}".encode()).digest()
     return int.from_bytes(digest[:8], "big", signed=True)
+
+
+def _open_in_editor():
+    response = Response(OPEN_IN_EDITOR, status=status.HTTP_409_CONFLICT)
+    response["Retry-After"] = _get_retry_after_seconds()
+    return response
+
+
+def _page_changed(body=PAGE_CHANGED):
+    """409 for a conflict with another writer: short Retry-After, the page is not held open."""
+    response = Response(body, status=status.HTTP_409_CONFLICT)
+    response["Retry-After"] = 1
+    return response
+
+
+def _page_version(page):
+    """What the PATCH version check compares (PLN-98): every field an editor store or another writer
+    changes. updated_at alone is not enough, because some writers update rows without save()."""
+    binary = page.description_binary
+    binary_digest = hashlib.sha256(bytes(binary)).hexdigest() if binary else None
+    return (
+        page.updated_at,
+        binary_digest,
+        page.description_html,
+        page.name,
+        page.is_locked,
+        page.archived_at,
+    )
 
 
 class HtmlTooLarge(Exception):
@@ -398,9 +428,10 @@ class PageDetailAPIEndpoint(PageBaseAPIEndpoint):
         summary="Update a page",
         description=(
             "Update the name and/or description_html of a page. Any other field is rejected. "
-            "A page that is open in an editor cannot be updated (409); an oversized body or html is "
-            "rejected (413); and when the page has a stored document and the live collaboration service "
-            "fails the page is left unchanged (503)."
+            "A page that is open in an editor cannot be updated (409); a page that changed while the update "
+            "was being prepared is not updated either (409, retry); an oversized body or html is rejected (413); "
+            "and when the page has a stored document and the live collaboration service fails the page is "
+            "left unchanged (503)."
         ),
         parameters=[PAGE_ID_PARAMETER],
         request=PageUpdateAPISerializer,
@@ -445,77 +476,87 @@ class PageDetailAPIEndpoint(PageBaseAPIEndpoint):
         if page.archived_at:
             return Response({"error": "Page is archived"}, status=status.HTTP_400_BAD_REQUEST)
 
-        with transaction.atomic():
-            page = Page.objects.select_for_update().get(pk=page.id)
-            if page.is_locked:
-                return Response({"error": "Page is locked"}, status=status.HTTP_400_BAD_REQUEST)
-            if page.archived_at:
-                return Response({"error": "Page is archived"}, status=status.HTTP_400_BAD_REQUEST)
-
-            old_html = page.description_html
-            has_html = "description_html" in data
-
-            if not _has_binary(page):
-                # (a) No stored document: live would rebuild it from the html on next open,
-                # so the html can be written directly, but only if nobody has it open.
-                if live_pages.is_page_loaded(page.id) is not False:
-                    response = Response(OPEN_IN_EDITOR, status=status.HTTP_409_CONFLICT)
-                    response["Retry-After"] = _get_retry_after_seconds()
-                    return response
-                update_fields = []
-                if "name" in data:
-                    page.name = data["name"]
-                    update_fields.append("name")
-                if has_html:
-                    page.description_html = data["description_html"]
-                    update_fields.append("description_html")
-            else:
-                # (b) Stored document: fold the change (html and/or name) into it through the live
-                # service; the title lives in the binary too, so a name-only change rebases as well.
-                try:
-                    result = live_pages.rebase_page(
-                        page.id,
-                        base64.b64encode(bytes(page.description_binary)).decode(),
-                        data.get("description_html"),
-                        data.get("name"),
+        # PLN-98 write ordering: (1) every slow live call runs with no transaction and no row lock;
+        # (2) the live document write lock is taken (granted only while no editor has the page loaded,
+        # and it holds back any new load); (3) a short transaction locks the row, checks that the page
+        # is still the version read in (1) (409 otherwise) and saves; (4) the lock is released after the
+        # commit, so an editor that opens the page meanwhile loads the committed state.
+        base_version = _page_version(page)
+        old_html = page.description_html
+        has_html = "description_html" in data
+        changes = {}
+        if not _has_binary(page):
+            # (a) No stored document: live rebuilds it from the html on the next open, so the html
+            # is written directly.
+            if "name" in data:
+                changes["name"] = data["name"]
+            if has_html:
+                changes["description_html"] = data["description_html"]
+        else:
+            # (b) Stored document: fold the change (html and/or name) into it through the live
+            # service; the title lives in the binary too, so a name-only change rebases as well.
+            try:
+                result = live_pages.rebase_page(
+                    page.id,
+                    base64.b64encode(bytes(page.description_binary)).decode(),
+                    data.get("description_html"),
+                    data.get("name"),
+                )
+            except live_pages.LiveServiceError as exc:
+                if getattr(exc, "too_large", False) is True:
+                    # live refused the size: not retryable, and nothing internal is revealed
+                    return Response(
+                        {"error": "description_html too large"}, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
                     )
-                except live_pages.LiveServiceError as exc:
-                    if getattr(exc, "too_large", False) is True:
-                        # live refused the size: not retryable, and nothing internal is revealed
-                        return Response(
-                            {"error": "description_html too large"}, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
-                        )
-                    return Response(LIVE_UNAVAILABLE, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-                rebased = PageBinaryUpdateSerializer(data=result)
-                if not rebased.is_valid() or not rebased.validated_data.get("description_binary"):
-                    return Response(LIVE_UNAVAILABLE, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-                # The presence check comes after the rebase so a page opened meanwhile is caught.
-                if live_pages.is_page_loaded(page.id) is not False:
-                    response = Response(OPEN_IN_EDITOR, status=status.HTTP_409_CONFLICT)
-                    response["Retry-After"] = _get_retry_after_seconds()
-                    return response
-                validated = rebased.validated_data
-                update_fields = ["description_binary"]
-                page.description_binary = validated["description_binary"]
-                if "name" in data:
-                    page.name = data["name"]
-                    update_fields.append("name")
-                if "description_html" in validated:
-                    page.description_html = validated["description_html"] or "<p></p>"
-                    update_fields.append("description_html")
-                elif data.get("description_html"):
-                    page.description_html = data["description_html"]
-                    update_fields.append("description_html")
-                if validated.get("description_json") is not None:
-                    page.description_json = validated["description_json"]
-                    update_fields.append("description_json")
+                return Response(LIVE_UNAVAILABLE, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            rebased = PageBinaryUpdateSerializer(data=result)
+            if not rebased.is_valid() or not rebased.validated_data.get("description_binary"):
+                return Response(LIVE_UNAVAILABLE, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            validated = rebased.validated_data
+            changes["description_binary"] = validated["description_binary"]
+            if "name" in data:
+                changes["name"] = data["name"]
+            if "description_html" in validated:
+                changes["description_html"] = validated["description_html"] or "<p></p>"
+            elif data.get("description_html"):
+                changes["description_html"] = data["description_html"]
+            if validated.get("description_json") is not None:
+                changes["description_json"] = validated["description_json"]
 
-            page.save(update_fields=[*update_fields, "description_stripped", "updated_at", "updated_by"])
-            stored_html = page.description_html
-            page_pk = page.id
-            user_id = request.user.id
-            html_changed = has_html
-            transaction.on_commit(lambda: self._after_commit(page_pk, old_html, stored_html, user_id, html_changed))
+        lock_state, lock_token = live_pages.acquire_write_lock(page.id)
+        if lock_state == live_pages.LOCK_UNSUPPORTED:
+            # live predates the lock route (rolling deploy): the old presence check, best effort
+            logger.warning("live has no write lock route; page %s falls back to the presence check", page.id)
+            if live_pages.is_page_loaded(page.id) is not False:
+                return _open_in_editor()
+        elif lock_state == live_pages.LOCK_BUSY:
+            # another api write of this page holds the lock
+            return _page_changed(PAGE_BUSY)
+        elif lock_state != live_pages.LOCK_ACQUIRED:
+            # loaded in an editor, or live could not answer
+            return _open_in_editor()
+
+        try:
+            with transaction.atomic():
+                page = Page.objects.select_for_update().get(pk=page.id)
+                if page.is_locked:
+                    return Response({"error": "Page is locked"}, status=status.HTTP_400_BAD_REQUEST)
+                if page.archived_at:
+                    return Response({"error": "Page is archived"}, status=status.HTTP_400_BAD_REQUEST)
+                if _page_version(page) != base_version:
+                    # an editor or another writer changed the page while live was rebasing
+                    return _page_changed()
+                for field, value in changes.items():
+                    setattr(page, field, value)
+                page.save(update_fields=[*changes.keys(), "description_stripped", "updated_at", "updated_by"])
+                stored_html = page.description_html
+                page_pk = page.id
+                user_id = request.user.id
+                html_changed = has_html
+                transaction.on_commit(lambda: self._after_commit(page_pk, old_html, stored_html, user_id, html_changed))
+        finally:
+            if lock_token:
+                live_pages.release_write_lock(page.id, lock_token)
 
         page = self.get_page(slug, project_id, page_id)
         return Response(PageAPISerializer(page).data, status=status.HTTP_200_OK)
@@ -533,12 +574,6 @@ class PageDetailAPIEndpoint(PageBaseAPIEndpoint):
             existing_instance=json.dumps({"description_html": old_html}),
             user_id=user_id,
         )
-        # Best effort: someone may have opened the page while we were writing.
-        try:
-            if live_pages.is_page_loaded(page_id) is True:
-                logger.warning("page %s was opened in an editor during an api update", page_id)
-        except Exception as exc:
-            logger.warning("presence re-check failed for page %s (%s)", page_id, type(exc).__name__)
 
 
 class PageArchiveAPIEndpoint(PageBaseAPIEndpoint):
