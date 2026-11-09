@@ -266,6 +266,53 @@ export class LiveEventsClient {
     }
   }
 
+  /**
+   * PLN-37: one listener for several projects of a workspace (the workspace views). Sends one subscribe frame
+   * for the projects that are new, and one unsubscribe frame when it ends: the hub rate-limits subscribe
+   * frames per user (PLN-96), so a project-by-project subscribe could close the socket.
+   */
+  subscribeMany(workspaceSlug: string, projectIds: string[], listener: TLiveListener): () => void {
+    const ids = [...new Set(projectIds)];
+    if (ids.length === 0) return () => {};
+    const fresh: string[] = [];
+    for (const projectId of ids) {
+      let set = this.listeners.get(projectId);
+      if (!set) {
+        set = new Set();
+        this.listeners.set(projectId, set);
+        fresh.push(projectId);
+      }
+      set.add(listener);
+      this.workspaceSlugs.set(projectId, workspaceSlug);
+    }
+    this.attachGlobalListeners();
+    // a navigation counts as user activity: it lifts a 4401 pause
+    this.pausedUntilActivity = false;
+    if (fresh.length > 0) this.sendSubscribe(fresh);
+    this.ensureConnected();
+    this.updateConnectionStatus();
+
+    let active = true;
+    return () => {
+      if (!active) return;
+      active = false;
+      const gone: string[] = [];
+      for (const projectId of ids) {
+        const current = this.listeners.get(projectId);
+        if (!current) continue;
+        current.delete(listener);
+        if (current.size > 0) continue;
+        this.listeners.delete(projectId);
+        this.workspaceSlugs.delete(projectId);
+        this.denied.delete(projectId);
+        gone.push(projectId);
+      }
+      if (gone.length > 0) this.send({ type: "unsubscribe", project_ids: gone });
+      if (this.listeners.size === 0) this.shutdown();
+      this.updateConnectionStatus();
+    };
+  }
+
   /** Subscribes to a project. Returns the unsubscribe function. */
   subscribe(workspaceSlug: string, projectId: string, listener: TLiveListener): () => void {
     let set = this.listeners.get(projectId);
